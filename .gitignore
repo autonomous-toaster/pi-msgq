@@ -1,0 +1,7 @@
+# Rust build output
+cli/target/
+
+# Local message bus database (default path is under ~/.pi/agent/msgq/)
+*.db
+*.db-wal
+*.db-shm
