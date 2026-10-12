@@ -47,6 +47,8 @@ import {
 	publishSafely,
 } from "./src/ack.ts";
 import { Coalescer, formatBatch, formatMessage, planDelivery } from "./src/delivery.ts";
+import { type CommandDeps, registerCommands } from "./src/commands.ts";
+import { runPlanned } from "./src/run.ts";
 import { Presence, PRESENCE_TTL_S } from "./src/presence.ts";
 import type { PresenceState } from "./src/presence-text.ts";
 import { decodeRecord, type MsgqRecord, recordBody } from "./src/record.ts";
@@ -105,6 +107,12 @@ export default function (pi: ExtensionAPI) {
 	let trusted: string[] = [];
 	/** Default recipient when a tool call does not name one. */
 	let reportTo: string | undefined;
+	/** Whether presence is configured on, as opposed to actually held. */
+	let presenceConfigured = false;
+	/** Whether the session currently holds its presence lease. */
+	let presenceHeld = false;
+	/** Where the bus is. Resolved once: it does not depend on the session. */
+	const busPath = resolveDbPath(process.env, homedir());
 	/** Extra addresses beyond this session's own, kept so a rename can rebuild the set. */
 	let extraTopics: string[] = [];
 	/** The most recently received message, so a reply can target it. */
@@ -125,7 +133,9 @@ export default function (pi: ExtensionAPI) {
 
 	/** Move presence to a new state, reporting a lost lease without failing. */
 	function setPresenceState(state: PresenceState): void {
-		if (presence && !presence.setState(state)) {
+		if (!presence) return;
+		presenceHeld = presence.setState(state);
+		if (!presenceHeld) {
 			report(`msgq presence is not registered (${state})`, "warning");
 		}
 	}
@@ -163,6 +173,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		presence?.stop();
 		presence = undefined;
+		presenceHeld = false;
 		identity = undefined;
 		inFlight = [];
 		lastStopReason = undefined;
@@ -284,9 +295,6 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Run a planned command and report what it said. Never throws at the model.
-	 *
-	 * `binEnv` names the variable that points at the binary, because a failure with no
-	 * output almost always means it was not found, and that is the caller's fix.
 	 */
 	async function runPlan(
 		plan: { command: string; args: string[] },
@@ -294,25 +302,8 @@ export default function (pi: ExtensionAPI) {
 		timeoutMs: number | undefined,
 		binEnv: string,
 	) {
-		try {
-			const result = await pi.exec(plan.command, plan.args, { timeout: timeoutMs, signal });
-			const out = (result.stdout ?? "").trim();
-			const err = (result.stderr ?? "").trim();
-			if (result.code !== 0) {
-				const detail = err || out;
-				if (detail) {
-					return toolText(`${plan.command} exited with ${result.code}: ${detail}`);
-				}
-				return toolText(
-					`${plan.command} exited with ${result.code} and said nothing, which usually means ` +
-						`it was not found. Check that \"${plan.command}\" is on PATH, or set ${binEnv} to ` +
-						"its full path (in a development checkout they are not installed).",
-				);
-			}
-			return toolText(out || "(no output)");
-		} catch (error) {
-			return toolText(`could not run ${plan.command}: ${String(error)}`);
-		}
+		const result = await runPlanned(pi, plan, { signal, timeoutMs, binEnv });
+		return toolText(result.text);
 	}
 
 	const peersTool = {
@@ -380,6 +371,23 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.registerTool(companionsTool);
 
+	// The human's surface: the same planners, run from the prompt instead of by a model.
+	// Registered here, as the extension loads, so the commands exist from the start.
+	const commandDeps: CommandDeps = {
+		identity: () => ({
+			self,
+			bus: busPath,
+			addresses,
+			policy,
+			presence: presenceConfigured ? (presenceHeld ? "registered" : "lost") : "off",
+			trusted,
+		}),
+		msgqBin: () => msgqBin,
+		companionBin: () => companionBin,
+		lastInbound: () => lastInbound,
+	};
+	registerCommands(pi, commandDeps);
+
 	pi.on("session_start", async (_event, ctx) => {
 		teardown();
 		context = ctx;
@@ -387,7 +395,6 @@ export default function (pi: ExtensionAPI) {
 
 		// Configuration.
 		let extra: string[];
-		let presenceOn: boolean;
 		let presenceTtl: number;
 		try {
 			const topicsFlag = pi.getFlag("msgq-topics");
@@ -403,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 				(typeof policyFlag === "string" ? policyFlag : undefined) ??
 					process.env.MSGQ_POLICY,
 			);
-			presenceOn = parsePresence(
+			presenceConfigured = parsePresence(
 				(typeof presenceFlag === "string" ? presenceFlag : undefined) ??
 					process.env.MSGQ_PRESENCE,
 			);
@@ -431,17 +438,16 @@ export default function (pi: ExtensionAPI) {
 		extraTopics = extra;
 
 		// Bus.
-		const dbPath = resolveDbPath(process.env, homedir());
 		try {
-			bus = new Bus(dbPath);
+			bus = new Bus(busPath);
 			resubscribe();
 		} catch (error) {
-			disable(`cannot open ${dbPath}: ${String(error)}`);
+			disable(`cannot open ${busPath}: ${String(error)}`);
 			return;
 		}
 
 		// Presence: a scoped write exception. A failure here is never fatal.
-		if (presenceOn && bus) {
+		if (presenceConfigured && bus) {
 			presence = new Presence(bus, {
 				kind: "session",
 				id: identity.sessionId,
@@ -449,12 +455,15 @@ export default function (pi: ExtensionAPI) {
 				state: ctx.isIdle() ? "idle" : "busy",
 				ttlS: presenceTtl,
 			});
-			if (!presence.start()) {
+			presenceHeld = presence.start();
+			if (!presenceHeld) {
 				report("msgq presence is not registered (lease held elsewhere)", "warning");
 			}
 			const renewMs = Math.max(1, Math.floor(presenceTtl / 3)) * 1000;
 			renewTimer = setInterval(() => {
-				if (presence && !presence.renew()) {
+				if (!presence) return;
+				presenceHeld = presence.renew();
+				if (!presenceHeld) {
 					report("msgq presence was lost and could not be re-registered", "warning");
 				}
 			}, renewMs);
@@ -556,8 +565,11 @@ export default function (pi: ExtensionAPI) {
 		self = selfAddress(renamed);
 		consumer = consumerId(renamed);
 		resubscribe();
-		if (presence && !presence.setOwner(consumer)) {
-			report("msgq presence could not re-register after a rename", "warning");
+		if (presence) {
+			presenceHeld = presence.setOwner(consumer);
+			if (!presenceHeld) {
+				report("msgq presence could not re-register after a rename", "warning");
+			}
 		}
 	});
 

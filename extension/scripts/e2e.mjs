@@ -3,12 +3,16 @@
 // Runs pi in RPC mode with `-e <this extension>`, publishes with the msgq CLI,
 // and inspects what the extension delivered into the session.
 //
-//   node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-busy|bad-bus|skip-version>
+//   node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-busy|bad-bus|skip-version|...>
+//
+// Scenarios whose name starts with `command-` drive the extension's slash commands,
+// `companion-list` drives the companion command with a fake herdr, and the rest cover
+// delivery, presence and acknowledgements. Run it with no argument for the full list.
 //
 // Environment overrides: MSGQ_BIN (path to the msgq binary), PI_BIN (pi command),
 // MSGQ_DB (bus location).
-import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -112,6 +116,68 @@ function shutdown(child) {
 		child.stdin.end();
 	} catch {}
 	setTimeout(() => child.kill(), 300);
+}
+
+/** A stream's records, or [] when nothing was ever published to it. */
+function readStream(address, db = DB) {
+	const out = execFileSync(CLI, ["--db", db, "read", address, "--from-start", "--json"], {
+		encoding: "utf8",
+	}).trim();
+	return out ? out.split("\n").map((line) => JSON.parse(line)) : [];
+}
+
+/**
+ * Take a presence lease by hand, so a scenario has a peer to talk to without
+ * starting a second pi. The address is derived from the owner's alias.
+ */
+function leasePeer(dbPath, alias, id, ttlS = 60) {
+	const native = honker.open(dbPath, { watcherPollIntervalMs: 50 });
+	const held = native.tryLock(`msgq:participant:session:idle:${id}`, `${alias}#${id}`, ttlS);
+	native.close();
+	return held;
+}
+
+/** Run a slash command in a session and report what the prompt did with it. */
+async function runCommand(session, text, settleMs = 1500) {
+	const response = await session.send({ id: `cmd-${Date.now()}`, type: "prompt", message: text });
+	await wait(settleMs);
+	return response.data ?? {};
+}
+
+/** Everything a session said to the human since `from`, as plain strings. */
+function notices(session, from = 0) {
+	return session.ui
+		.slice(from)
+		.filter((record) => record.method === "notify")
+		.map((record) => String(record.message ?? ""));
+}
+
+/** Answer the next dialog of this kind. The payload may be a function of the request. */
+async function answerDialog(session, method, payload) {
+	const answered = new Set(session.ui.filter((r) => r.__answered).map((r) => r.id));
+	for (let i = 0; i < 120; i++) {
+		const request = session.ui.find((r) => r.method === method && !answered.has(r.id));
+		if (request) {
+			request.__answered = true;
+			const body = typeof payload === "function" ? payload(request) : payload;
+			session.child.stdin.write(
+				`${JSON.stringify({ type: "extension_ui_response", id: request.id, ...body })}\n`,
+			);
+			return request;
+		}
+		await wait(50);
+	}
+	return undefined;
+}
+
+/** Run pi once, with no session to talk to: the no-UI path. */
+function oneShot(command, env = {}, db = DB) {
+	const result = spawnSync(PI, ["--mode", "json", "-p", command, "-e", EXTENSION], {
+		cwd: REPO,
+		env: { ...process.env, MSGQ_DB: db, ...env },
+		encoding: "utf8",
+	});
+	return { out: result.stdout ?? "", err: result.stderr ?? "", code: result.status ?? -1 };
 }
 
 function split(entries) {
@@ -824,6 +890,480 @@ async function scenarioDelegate() {
 	report("delegate", asked && answered, `asked=${asked} answered=${answered}`);
 }
 
+async function scenarioCommandSurface() {
+	const { child, send } = startPi();
+	const { data } = await send({ id: "c", type: "get_commands" });
+	// Other extensions are loaded from the user's own config; this one is the one
+	// living in this checkout.
+	const mine = data.commands.filter((entry) => entry.sourceInfo?.path === EXTENSION);
+	const names = mine.map((entry) => entry.name).sort();
+	const described = mine.every((entry) => String(entry.description ?? "").length > 20);
+	shutdown(child);
+
+	report(
+		"command-surface",
+		JSON.stringify(names) === JSON.stringify(["companions", "peer", "peers", "reply"]) && described,
+		`commands=${JSON.stringify(names)} described=${described}`,
+	);
+}
+
+async function scenarioCommandNoPeers() {
+	// A dedicated bus: the only participant is the session itself.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-nopeers-")), "msgq.db");
+	const session = startPi([], { MSGQ_DB: own });
+	await session.send({ id: "s", type: "get_state" });
+
+	const before = await session.send({ id: "s", type: "get_state" });
+	const disposition = await runCommand(session, "/peers");
+	const said = notices(session);
+	shutdown(session.child);
+
+	const ok = disposition.disposition === "handled" && said.some((m) => m.includes("no other participant"));
+	report("command-no-peers", ok, `disposition=${disposition.disposition} said=${JSON.stringify(said)}`);
+}
+
+async function scenarioCommandPickAndSend() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-pick-")), "msgq.db");
+	if (!leasePeer(own, "reviewer", "peer-one")) report("command-pick-and-send", false, "could not make a peer");
+
+	const session = startPi([], { MSGQ_DB: own });
+	await session.send({ id: "s", type: "get_state" });
+
+	// A command that opens a dialog only answers its prompt once the dialog is
+	// closed, so the dialogs are answered while the prompt is still in flight.
+	const pending = session.send({ id: "p1", type: "prompt", message: "/peers" });
+	const choice = await answerDialog(session, "select", (request) => ({ value: request.options[0] }));
+	const selected = choice?.options?.[0];
+	const composed = await answerDialog(session, "editor", { value: "hello from the picker" });
+	const disposition = (await pending).data ?? {};
+	await wait(1500);
+
+	const records = readStream("session/reviewer", own);
+
+	// Abandoning the composition sends nothing either.
+	const abandoning = session.send({ id: "p2", type: "prompt", message: "/peers" });
+	await answerDialog(session, "select", (request) => ({ value: request.options[0] }));
+	const abandoned = await answerDialog(session, "editor", { cancelled: true });
+	await abandoning;
+	await wait(1200);
+	const afterAbandon = readStream("session/reviewer", own);
+	const said = notices(session);
+	shutdown(session.child);
+
+	const ok =
+		disposition.disposition === "handled" &&
+		String(selected).startsWith("session/reviewer") &&
+		Boolean(composed) &&
+		Boolean(abandoned) &&
+		records.length === 1 &&
+		records[0].message === "hello from the picker" &&
+		records[0].type === "prompt" &&
+		records[0].from.startsWith("session/") &&
+		afterAbandon.length === 1 &&
+		said.some((m) => m.includes("sent to session/reviewer"));
+	report(
+		"command-pick-and-send",
+		ok,
+		`selected=${JSON.stringify(selected)} composed=${Boolean(composed)} abandoned=${Boolean(abandoned)} records=${records.length} afterAbandon=${afterAbandon.length} said=${JSON.stringify(said)}`,
+	);
+}
+
+async function scenarioCommandPeerDirect() {
+	// Two sessions on one bus: one sends with a command, the other acts on it.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-cmdpeer-")), "msgq.db");
+	const target = startPi(["--msgq-policy", "honor"], { MSGQ_DB: own });
+	const targetState = await target.send({ id: "s", type: "get_state" });
+	const targetAddress = `session/${targetState.data.sessionId}`;
+
+	const sender = startPi([], { MSGQ_DB: own });
+	const senderState = await sender.send({ id: "s", type: "get_state" });
+	const senderAddress = `session/${senderState.data.sessionId}`;
+	console.log("sender:", senderAddress, "target:", targetAddress);
+
+	const disposition = await runCommand(sender, `/peer ${targetAddress} "Reply with exactly: pong"`, 500);
+	await target.waitForEvent("agent_settled", 90_000);
+	await wait(1500);
+
+	const { data } = await target.send({ id: "e", type: "get_entries" });
+	const { custom, assistants } = split(data.entries);
+	const delivered = custom.find((entry) => String(entry.content).includes("Reply with exactly: pong"));
+
+	shutdown(sender.child);
+	shutdown(target.child);
+
+	const ok =
+		disposition.disposition === "handled" &&
+		Boolean(delivered) &&
+		String(delivered?.content).includes(senderAddress) &&
+		assistants.length >= 1;
+	report(
+		"command-peer-direct",
+		ok,
+		`delivered=${Boolean(delivered)} from=${senderAddress} assistants=${assistants.length}`,
+	);
+}
+
+async function scenarioCommandPeerCompose() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-compose-")), "msgq.db");
+	const session = startPi([], { MSGQ_DB: own });
+	await session.send({ id: "s", type: "get_state" });
+
+	// An address but no message opens the editor.
+	const sending = session.send({ id: "p1", type: "prompt", message: "/peer session/target" });
+	const composed = await answerDialog(session, "editor", { value: "composed by hand" });
+	await sending;
+	await wait(1500);
+	const afterSend = readStream("session/target", own);
+
+	// Abandoning the composition sends nothing.
+	const abandoning = session.send({ id: "p2", type: "prompt", message: "/peer session/target" });
+	const cancelled = await answerDialog(session, "editor", { cancelled: true });
+	await abandoning;
+	await wait(1200);
+	const afterCancel = readStream("session/target", own);
+
+	shutdown(session.child);
+
+	const ok =
+		Boolean(composed) &&
+		Boolean(cancelled) &&
+		afterSend.length === 1 &&
+		afterSend[0].message === "composed by hand" &&
+		afterCancel.length === 1;
+	report(
+		"command-peer-compose",
+		ok,
+		`composed=${Boolean(composed)} cancelled=${Boolean(cancelled)} sent=${afterSend.length} afterCancel=${afterCancel.length}`,
+	);
+}
+
+async function scenarioCommandPeerPick() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-peerpick-")), "msgq.db");
+	if (!leasePeer(own, "reviewer", "peer-two")) report("command-peer-pick", false, "could not make a peer");
+
+	const session = startPi([], { MSGQ_DB: own });
+	await session.send({ id: "s", type: "get_state" });
+
+	// A quoted message means no address, so the peers are offered instead.
+	const pending = session.send({ id: "p1", type: "prompt", message: '/peer "picked message"' });
+	const choice = await answerDialog(session, "select", (request) => ({ value: request.options[0] }));
+	const disposition = (await pending).data ?? {};
+	await wait(1500);
+
+	const records = readStream("session/reviewer", own);
+	shutdown(session.child);
+
+	const ok =
+		disposition.disposition === "handled" &&
+		Boolean(choice) &&
+		records.length === 1 &&
+		records[0].message === "picked message";
+	report(
+		"command-peer-pick",
+		ok,
+		`offered=${Boolean(choice)} records=${records.length} message=${JSON.stringify(records[0]?.message)}`,
+	);
+}
+
+async function scenarioCommandReply() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-cmdreply-")), "msgq.db");
+	const session = startPi([], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+
+	// Nothing has been received yet, so there is nothing to answer.
+	const early = await runCommand(session, "/reply too early");
+	const earlySaid = notices(session);
+	const earlyRecords = readStream("cli/e2e@test", own);
+
+	// Now receive one, and answer it.
+	const offset = Number(
+		execFileSync(CLI, ["--db", own, "publish", address, "what do you think?", "--from", "cli/e2e@test"], {
+			encoding: "utf8",
+		}).trim(),
+	);
+	await wait(2000);
+	await runCommand(session, "/reply on it");
+
+	const replies = readStream("cli/e2e@test", own);
+	shutdown(session.child);
+
+	const ok =
+		early.disposition === "handled" &&
+		earlySaid.some((m) => m.includes("nothing to reply to")) &&
+		earlyRecords.length === 0 &&
+		replies.length === 1 &&
+		replies[0].message === "on it" &&
+		replies[0].to === "cli/e2e@test" &&
+		Number(replies[0].reply_to) === offset &&
+		replies[0].from === address;
+	report(
+		"command-reply",
+		ok,
+		`early=${JSON.stringify(earlySaid)} replies=${replies.length} reply_to=${replies[0]?.reply_to} offset=${offset}`,
+	);
+}
+
+async function scenarioCommandAbsentRecipient() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-absent-")), "msgq.db");
+	const session = startPi([], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const self = `session/${state.data.sessionId}`;
+
+	const before = session.ui.length;
+	const disposition = await runCommand(session, "/peer session/nobody-here ping");
+	const said = notices(session, before);
+	const records = readStream("session/nobody-here", own);
+
+	const alive = await session.send({ id: "a", type: "get_state" });
+	shutdown(session.child);
+
+	const ok =
+		disposition.disposition === "handled" &&
+		records.length === 1 &&
+		records[0].to === "session/nobody-here" &&
+		records[0].from === self &&
+		said.some((m) => m.includes("nothing is listening at session/nobody-here")) &&
+		alive.success === true;
+	report(
+		"command-absent-recipient",
+		ok,
+		`records=${records.length} said=${JSON.stringify(said)} alive=${alive.success}`,
+	);
+}
+
+async function scenarioCommandMe() {
+	// Under honor a self-addressed prompt would start a turn, but for the guard.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-cmdme-")), "msgq.db");
+	const session = startPi(["--msgq-policy", "honor"], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const self = `session/${state.data.sessionId}`;
+
+	const disposition = await runCommand(session, '/peer me "a note to myself"');
+	const records = readStream(self, own);
+	const { data } = await session.send({ id: "e", type: "get_entries" });
+	const { custom, assistants } = split(data.entries);
+	shutdown(session.child);
+
+	const delivered = custom.some((entry) => String(entry.content).includes("a note to myself"));
+	const ok =
+		disposition.disposition === "handled" &&
+		records.length === 1 &&
+		records[0].to === self &&
+		delivered &&
+		assistants.length === 0;
+	report(
+		"command-me",
+		ok,
+		`to=${records[0]?.to} delivered=${delivered} assistants=${assistants.length}`,
+	);
+}
+
+async function scenarioCommandIdentity() {
+	// The bus cannot be opened, so this is exactly when a human asks who they are.
+	const dir = mkdtempSync(resolve(tmpdir(), "msgq-identity-"));
+	const blocker = resolve(dir, "not-a-dir");
+	writeFileSync(blocker, "x");
+	const badPath = resolve(blocker, "msgq.db");
+
+	const session = startPi(["--msgq-policy", "honor", "--msgq-trust", "session/parent"], {
+		MSGQ_DB: badPath,
+	});
+	const state = await session.send({ id: "s", type: "get_state" });
+	const self = `session/${state.data.sessionId}`;
+
+	const before = session.ui.length;
+	const disposition = await runCommand(session, "/peers me");
+	const said = notices(session, before).join("\n");
+	shutdown(session.child);
+
+	const ok =
+		disposition.disposition === "handled" &&
+		said.includes(self) &&
+		said.includes("policy") &&
+		said.includes("honor") &&
+		said.includes("session/parent");
+	report("command-identity", ok, `disposition=${disposition.disposition} said=${JSON.stringify(said)}`);
+}
+
+async function scenarioCommandNoDialog() {
+	// A peer exists, so the pick would be needed, and there is no session to show one.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-nodialog-")), "msgq.db");
+	if (!leasePeer(own, "reviewer", "peer-three")) report("command-no-dialog", false, "could not make a peer");
+
+	const listing = oneShot("/peers", {}, own);
+	const pick = oneShot("/peer", {}, own);
+	const reply = oneShot("/reply hi", {}, own);
+
+	const published = readStream("session/reviewer", own);
+	const ok =
+		listing.code === 0 &&
+		listing.err.includes("session/reviewer") &&
+		listing.err.includes("no dialog can be shown") &&
+		pick.code === 0 &&
+		pick.err.includes("no dialog can be shown") &&
+		reply.code === 0 &&
+		reply.err.includes("nothing to reply to") &&
+		published.length === 0;
+	report(
+		"command-no-dialog",
+		ok,
+		`listing=${JSON.stringify(listing.err.trim())} published=${published.length}`,
+	);
+}
+
+/**
+ * A fake herdr, so a test never depends on a live window manager. It answers
+ * `agent list` with $FAKE_HERDR_AGENTS and nothing else.
+ */
+function fakeHerdr() {
+	const dir = mkdtempSync(resolve(tmpdir(), "msgq-fakeherdr-"));
+	const bin = resolve(dir, "herdr");
+	writeFileSync(
+		bin,
+		'#!/usr/bin/env bash\n[ "$1 $2" = "agent list" ] && cat "$FAKE_HERDR_AGENTS" && exit 0\nexit 1\n',
+	);
+	chmodSync(bin, 0o755);
+	return { dir, bin };
+}
+
+/** Two named agents, one of them on the bus and one not, plus an unnamed one. */
+function fakeAgents() {
+	const file = resolve(mkdtempSync(resolve(tmpdir(), "msgq-agents-")), "agents.json");
+	writeFileSync(
+		file,
+		JSON.stringify({
+			result: {
+				agents: [
+					{ name: "reviewer", agent_status: "working", cwd: "/src/api", tab_id: "w1:t1", pane_id: "w1:p1" },
+					{ name: "lonely", agent_status: "idle", cwd: "/src/web", tab_id: "w1:t2", pane_id: "w1:p2" },
+					{ agent_status: "idle", cwd: "/src/noname", tab_id: "w1:t3", pane_id: "w1:p3" },
+				],
+			},
+		}),
+	);
+	return file;
+}
+
+async function scenarioCompanionList() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-complist-")), "msgq.db");
+	const herdr = fakeHerdr();
+	const agents = fakeAgents();
+	// Only `reviewer` is on the bus; `lonely` is a tab that is not listening, and the
+	// third has no name at all.
+	const leased = leasePeer(own, "reviewer", "peer-list", 120);
+
+	const env = {
+		...process.env,
+		MSGQ_DB: own,
+		MSGQ_BIN: CLI,
+		HERDR_ENV: "1",
+		FAKE_HERDR_AGENTS: agents,
+		PATH: `${herdr.dir}:${process.env.PATH}`,
+	};
+	const script = resolve(REPO, "companion/companion");
+	const asJson = spawnSync(script, ["list", "--json"], { env, encoding: "utf8" });
+	const asText = spawnSync(script, ["list"], { env, encoding: "utf8" });
+
+	// Outside herdr, and with no herdr on PATH, it says so instead of dying obscurely.
+	const outside = spawnSync(script, ["list"], { env: { ...env, HERDR_ENV: "" }, encoding: "utf8" });
+	const missing = spawnSync(script, ["list"], {
+		env: { ...env, PATH: "/usr/bin:/bin" },
+		encoding: "utf8",
+	});
+
+	let parsed = {};
+	try {
+		parsed = JSON.parse(asJson.stdout.trim());
+	} catch {}
+	const entries = parsed.companions ?? [];
+
+	const ok =
+		leased &&
+		asJson.status === 0 &&
+		entries.length === 1 &&
+		entries[0].name === "reviewer" &&
+		entries[0].address === "session/reviewer" &&
+		entries[0].status === "working" &&
+		entries[0].cwd === "/src/api" &&
+		asText.stdout.includes("reviewer") &&
+		!asText.stdout.includes("lonely") &&
+		outside.status !== 0 &&
+		outside.stderr.includes("herdr") &&
+		missing.status !== 0 &&
+		missing.stderr.includes("herdr") &&
+		missing.stderr.includes("PATH");
+	report(
+		"companion-list",
+		ok,
+		`entries=${JSON.stringify(entries)} outside=${JSON.stringify(outside.stderr.trim())} missing=${JSON.stringify(missing.stderr.trim())}`,
+	);
+}
+
+async function scenarioCommandCompanions() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-cmdcomp-")), "msgq.db");
+	const herdr = fakeHerdr();
+	const agents = fakeAgents();
+	leasePeer(own, "reviewer", "peer-comp", 120);
+
+	const session = startPi([], {
+		MSGQ_DB: own,
+		MSGQ_COMPANION: resolve(REPO, "companion/companion"),
+		HERDR_ENV: "1",
+		FAKE_HERDR_AGENTS: agents,
+		PATH: `${herdr.dir}:${process.env.PATH}`,
+	});
+	await session.send({ id: "s", type: "get_state" });
+
+	const before = session.ui.length;
+	const disposition = await runCommand(session, "/companions");
+	const said = notices(session, before).join("\n");
+	shutdown(session.child);
+
+	const ok =
+		disposition.disposition === "handled" &&
+		said.includes("reviewer") &&
+		said.includes("working") &&
+		said.includes("/src/api") &&
+		!said.includes("lonely");
+	report("command-companions", ok, `said=${JSON.stringify(said)}`);
+}
+
+async function scenarioCommandWithoutHerdr() {
+	// herdr missing: only /companions notices. The bus commands are unaffected.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-noherdr-")), "msgq.db");
+	const session = startPi([], {
+		MSGQ_DB: own,
+		MSGQ_COMPANION: resolve(REPO, "companion/companion"),
+		HERDR_ENV: "",
+	});
+	await session.send({ id: "s", type: "get_state" });
+
+	const before = session.ui.length;
+	await runCommand(session, "/companions");
+	const complained = notices(session, before).join("\n");
+
+	const beforePeer = session.ui.length;
+	await runCommand(session, "/peer session/someone hello");
+	const saidPeer = notices(session, beforePeer).join("\n");
+	const records = readStream("session/someone", own);
+
+	const alive = await session.send({ id: "a", type: "get_state" });
+	shutdown(session.child);
+
+	const ok =
+		complained.includes("herdr") &&
+		saidPeer.includes("sent to session/someone") &&
+		records.length === 1 &&
+		records[0].message === "hello" &&
+		alive.success === true;
+	report(
+		"command-without-herdr",
+		ok,
+		`complained=${JSON.stringify(complained)} peer=${JSON.stringify(saidPeer)} records=${records.length}`,
+	);
+}
+
 const scenario = process.argv[2];
 if (scenario === "default-note") await scenarioDefaultNote();
 else if (scenario === "honor-prompt") await scenarioHonorPrompt();
@@ -847,9 +1387,23 @@ else if (scenario === "presence-off") await scenarioPresenceOff();
 else if (scenario === "blocked") await scenarioBlocked();
 else if (scenario === "bad-bus") await scenarioBadBus();
 else if (scenario === "skip-version") await scenarioSkipVersion();
+else if (scenario === "command-surface") await scenarioCommandSurface();
+else if (scenario === "command-no-peers") await scenarioCommandNoPeers();
+else if (scenario === "command-pick-and-send") await scenarioCommandPickAndSend();
+else if (scenario === "command-peer-direct") await scenarioCommandPeerDirect();
+else if (scenario === "command-peer-compose") await scenarioCommandPeerCompose();
+else if (scenario === "command-peer-pick") await scenarioCommandPeerPick();
+else if (scenario === "command-reply") await scenarioCommandReply();
+else if (scenario === "command-absent-recipient") await scenarioCommandAbsentRecipient();
+else if (scenario === "command-me") await scenarioCommandMe();
+else if (scenario === "command-identity") await scenarioCommandIdentity();
+else if (scenario === "command-no-dialog") await scenarioCommandNoDialog();
+else if (scenario === "companion-list") await scenarioCompanionList();
+else if (scenario === "command-companions") await scenarioCommandCompanions();
+else if (scenario === "command-without-herdr") await scenarioCommandWithoutHerdr();
 else {
 	console.error(
-		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|delegate|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version>",
+		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|delegate|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog|companion-list|command-companions|command-without-herdr>",
 	);
 	process.exit(2);
 }

@@ -185,6 +185,60 @@ The tools shell out to the `msgq` CLI and the `companion` command, so the wire a
 each live in one place. `MSGQ_BIN` and `MSGQ_COMPANION` point at them when they are not installed on
 `PATH` — which is also how the `spawn` command passes them into a companion.
 
+## Commands for you
+
+The tools above belong to the agent. These four are yours: run them from the prompt, and no model
+turn is spent.
+
+| Command | What it does |
+|---|---|
+| `/peers` | who is reachable; choosing one composes a message and sends it |
+| `/peer <address> [message]` | send to one peer |
+| `/reply [message]` | answer the message you most recently received |
+| `/companions` | the companions running in terminal tabs, with their status and directory |
+
+Addresses work the same way everywhere:
+
+- **`me` is this session.** `/peers me` reports who you are on the bus: your address, the bus
+  location, the addresses you follow, your policy, whether presence is registered, and who you
+  trust. It answers from what the session already knows, so it still works when the bus does not —
+  which is when you are most likely to ask.
+- **A bare name is a session.** `/peer reviewer "..."` sends to `session/reviewer`. A name that
+  already carries a scheme (`cli/ci-bot`) is used as it is. A message sent to an address nobody
+  holds is still sent, and the command tells you nobody was there — a consumer that starts later
+  begins at the end of its stream and would miss it.
+- **`me` is ours, not the bus's.** It means nothing to `msgq` at a shell; only the commands resolve
+  it.
+
+Leave out what you do not need and you will be asked for it:
+
+```
+/peer                          choose a peer, then compose
+/peer reviewer                 compose a message to reviewer
+/peer reviewer "take a look"   send it as typed
+/peer "take a look"            no address: choose a peer for this message
+/reply                         compose an answer to the last message you received
+```
+
+A leading quote means the whole argument is the message, which is how you give a message without
+naming a recipient. Abandoning the editor sends nothing.
+
+Every command sends and returns. None of them waits for an answer, because an answer is an inbound
+message and that path already exists. The transcript tells you how to answer each one:
+
+```
+msgq note
+cli/alice@mac → session/api-worker
+
+build is green
+
+reply: /peer cli/alice@mac ...
+```
+
+That line is part of the rendering and never part of the content the model reads. What you send is
+an ordinary record from `session/<self>` — the same identity your agent uses, so a companion that
+trusts this session answers you both.
+
 ## Configuration
 
 | Setting | Flag | Environment | Default |
