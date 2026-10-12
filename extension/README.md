@@ -152,6 +152,39 @@ trusting everyone who can write the bus.
 
 Wait for them from a shell with `msgq publish --await` or `msgq await <offset>`.
 
+## Working with other agents
+
+Two tools put the bus in the agent's hands.
+
+| Tool | Actions |
+|---|---|
+| `peers` | `list` who is reachable · `send` a message · `ask` a question and wait for the answer · `reply` to the message you last received |
+| `companions` | `spawn` a companion (a real pi in its own terminal tab, reachable at `session/<name>`) · `close` it |
+
+Spawning creates a process and nothing else: the task is simply the first message.
+
+```
+companions({action:"spawn", name:"reviewer"})        ->  session/reviewer
+peers({action:"ask", to:"session/reviewer", message:"Review this diff"})
+peers({action:"reply", message:"done"})              ->  answers whoever last asked
+```
+
+Three options make this work safely:
+
+- **`--msgq-report-to <address>`** (or **`MSGQ_PARENT`**) is the default recipient when a call does
+  not name one, and is how a spawned companion knows where to report.
+- **`--msgq-trust <addresses>`** is a comma-separated allowlist. Under `honor`, a record from
+  anyone outside it is delivered display-only and **cannot start a turn**. A companion is spawned
+  trusting only its parent, which is what stops a shell-capable agent from being commanded by any
+  process that can write the bus.
+- A message that **asks a question** is delivered with an instruction telling the model to answer
+  with the `peers` tool. Without it a peer answers into its own transcript and the asker waits in
+  vain.
+
+The tools shell out to the `msgq` CLI and the `companion` command, so the wire and the herdr glue
+each live in one place. `MSGQ_BIN` and `MSGQ_COMPANION` point at them when they are not installed on
+`PATH` — which is also how the `spawn` command passes them into a companion.
+
 ## Configuration
 
 | Setting | Flag | Environment | Default |

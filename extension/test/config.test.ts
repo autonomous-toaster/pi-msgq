@@ -8,7 +8,9 @@ import {
 	parsePolicy,
 	parsePresence,
 	parseTopics,
+	parseOptionalAddress,
 	parseTtlSeconds,
+	parseTrustList,
 	resolveDbPath,
 	selfAddress,
 	subscriptionAddresses,
@@ -46,6 +48,21 @@ test("parsePolicy defaults to display and rejects unknown values", () => {
 	assert.equal(parsePolicy("honor"), "honor");
 	assert.equal(parsePolicy("display"), "display");
 	assert.throws(() => parsePolicy("trust"), ConfigError);
+});
+
+test("a trust list is comma separated, trimmed, and de-duplicated", () => {
+	assert.deepEqual(parseTrustList(undefined), []);
+	assert.deepEqual(parseTrustList("  "), []);
+	assert.deepEqual(parseTrustList("session/planner, cli/ci@host , session/planner"), [
+		"session/planner",
+		"cli/ci@host",
+	]);
+});
+
+test("an optional address is trimmed or undefined", () => {
+	assert.equal(parseOptionalAddress(undefined), undefined);
+	assert.equal(parseOptionalAddress("   "), undefined);
+	assert.equal(parseOptionalAddress("  session/planner "), "session/planner");
 });
 
 test("presence is on by default and accepts explicit values", () => {

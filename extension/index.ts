@@ -15,6 +15,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "@earendil-works/pi-ai";
 
 import {
 	Bus,
@@ -26,7 +27,9 @@ import {
 	consumerId,
 	parsePolicy,
 	parsePresence,
+	parseOptionalAddress,
 	parseTopics,
+	parseTrustList,
 	parseTtlSeconds,
 	type Policy,
 	resolveDbPath,
@@ -47,6 +50,12 @@ import { Coalescer, formatBatch, formatMessage, planDelivery } from "./src/deliv
 import { Presence, PRESENCE_TTL_S } from "./src/presence.ts";
 import type { PresenceState } from "./src/presence-text.ts";
 import { decodeRecord, type MsgqRecord, recordBody } from "./src/record.ts";
+import {
+	DEFAULT_ASK_TIMEOUT_S,
+	isError,
+	planCompanionAction,
+	planPeerAction,
+} from "./src/tools.ts";
 import { renderMsgq } from "./src/render.ts";
 import type { MsgqDetails, MsgqItem } from "./src/render-text.ts";
 
@@ -69,6 +78,14 @@ export default function (pi: ExtensionAPI) {
 		description: "Register session presence: 'on' (default) or 'off'",
 		type: "string",
 	});
+	pi.registerFlag("msgq-report-to", {
+		description: "Default recipient for messages this session sends",
+		type: "string",
+	});
+	pi.registerFlag("msgq-trust", {
+		description: "Comma-separated senders allowed to start a turn under 'honor'",
+		type: "string",
+	});
 
 	pi.registerMessageRenderer(MESSAGE_TYPE, renderMsgq);
 
@@ -84,6 +101,15 @@ export default function (pi: ExtensionAPI) {
 	let policy: Policy = "display";
 	let addresses: string[] = [];
 	let skipped = 0;
+	/** Senders allowed to start a turn under the honour policy. Empty means no allowlist. */
+	let trusted: string[] = [];
+	/** Default recipient when a tool call does not name one. */
+	let reportTo: string | undefined;
+	/** Extra addresses beyond this session's own, kept so a rename can rebuild the set. */
+	let extraTopics: string[] = [];
+	/** The most recently received message, so a reply can target it. */
+	let lastInbound: { from: string; offset: number } | undefined;
+	/** How to reach the two binaries the tools delegate to. */
 	/** Acknowledged records awaiting a run, so start and completion can be reported. */
 	let inFlight: Array<{ offset: number; to: string; phases: AckPhase[] }> = [];
 	/** The stop reason of the last assistant message in the current run. */
@@ -140,6 +166,7 @@ export default function (pi: ExtensionAPI) {
 		identity = undefined;
 		inFlight = [];
 		lastStopReason = undefined;
+		lastInbound = undefined;
 		for (const subscription of subscriptions) subscription.close();
 		subscriptions = [];
 		coalescer = new Coalescer();
@@ -169,7 +196,7 @@ export default function (pi: ExtensionAPI) {
 		// An acknowledgement is never itself acknowledged.
 		const phases = isAckRecord(record) ? undefined : parseAckRequest(record.meta);
 		const busy = context ? !context.isIdle() : false;
-		const plan = planDelivery(record, policy, self, busy);
+		const plan = planDelivery(record, policy, self, busy, trusted);
 
 		if (plan === "buffer") {
 			// Responsibility is not taken yet: a crash here must redeliver.
@@ -209,6 +236,28 @@ export default function (pi: ExtensionAPI) {
 		subscription.save(offset);
 	}
 
+	/**
+	 * (Re)build the subscription set for the current identity. Called on start and on a
+	 * rename: the address a session answers to changes, and the subscription has to follow
+	 * it or the session stops receiving at the name the roster advertises.
+	 */
+	function resubscribe(): void {
+		const open = bus;
+		if (!open || !identity) return;
+		for (const subscription of subscriptions) subscription.close();
+		const targets = subscriptionAddresses(identity, extraTopics);
+		addresses = targets;
+		subscriptions = targets.map((address) => {
+			const subscription = open.subscribe(
+				address,
+				consumer,
+				(event) => onEvent(address, event, subscription),
+				(error) => disable(`bus subscription failed on ${address}: ${String(error)}`),
+			);
+			return subscription;
+		});
+	}
+
 	function onEvent(address: string, event: BusEvent, subscription: Subscription): void {
 		const decoded = decodeRecord(event.payload);
 		if (!decoded.ok) {
@@ -218,7 +267,118 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		deliver(decoded.record, address, event.offset, subscription);
+		// An acknowledgement is not something to reply to, so it does not become the target.
+		if (!isAckRecord(decoded.record)) {
+			lastInbound = { from: decoded.record.from, offset: event.offset };
+		}
 	}
+
+	// The agent-facing surface: two tools that delegate, so the wire lives in the CLI and
+	// the herdr glue in the companion command, each in one place.
+	const msgqBin = process.env.MSGQ_BIN?.trim() || "msgq";
+	const companionBin = process.env.MSGQ_COMPANION?.trim() || "companion";
+
+	function toolText(content: string, details?: unknown) {
+		return { content: [{ type: "text" as const, text: content }], details };
+	}
+
+	/**
+	 * Run a planned command and report what it said. Never throws at the model.
+	 *
+	 * `binEnv` names the variable that points at the binary, because a failure with no
+	 * output almost always means it was not found, and that is the caller's fix.
+	 */
+	async function runPlan(
+		plan: { command: string; args: string[] },
+		signal: AbortSignal | undefined,
+		timeoutMs: number | undefined,
+		binEnv: string,
+	) {
+		try {
+			const result = await pi.exec(plan.command, plan.args, { timeout: timeoutMs, signal });
+			const out = (result.stdout ?? "").trim();
+			const err = (result.stderr ?? "").trim();
+			if (result.code !== 0) {
+				const detail = err || out;
+				if (detail) {
+					return toolText(`${plan.command} exited with ${result.code}: ${detail}`);
+				}
+				return toolText(
+					`${plan.command} exited with ${result.code} and said nothing, which usually means ` +
+						`it was not found. Check that \"${plan.command}\" is on PATH, or set ${binEnv} to ` +
+						"its full path (in a development checkout they are not installed).",
+				);
+			}
+			return toolText(out || "(no output)");
+		} catch (error) {
+			return toolText(`could not run ${plan.command}: ${String(error)}`);
+		}
+	}
+
+	const peersTool = {
+		name: "peers",
+		label: "peers",
+		description:
+			"Work with other agents on the message bus. 'list' the addresses that are reachable, " +
+			"'send' a message to one, 'ask' a question and wait for the answer, or 'reply' to the " +
+			"message you most recently received. Use it to delegate to a companion you started, " +
+			"or to talk to any other session on the bus.",
+		parameters: Type.Object({
+			action: Type.Union(
+				[Type.Literal("list"), Type.Literal("send"), Type.Literal("ask"), Type.Literal("reply")],
+				{ description: "what to do" },
+			),
+			to: Type.Optional(
+				Type.String({ description: "the peer's address, for example session/reviewer" }),
+			),
+			message: Type.Optional(Type.String({ description: "what to say or ask" })),
+			timeoutSeconds: Type.Optional(
+				Type.Number({ description: "how long 'ask' waits; 0 waits without a limit" }),
+			),
+		}),
+		async execute(
+			_toolCallId: string,
+			params: { action: "list" | "send" | "ask" | "reply"; to?: string; message?: string; timeoutSeconds?: number },
+			signal: AbortSignal | undefined,
+		) {
+			const plan = planPeerAction(params, { msgqBin, self, reportTo, lastInbound });
+			if (isError(plan)) return toolText(plan.error);
+			const seconds = params.action === "ask" ? (params.timeoutSeconds ?? DEFAULT_ASK_TIMEOUT_S) : 0;
+			const timeoutMs = seconds > 0 ? seconds * 1000 + 30_000 : undefined;
+			return runPlan(plan, signal, timeoutMs, "MSGQ_BIN");
+		},
+	};
+	pi.registerTool(peersTool);
+
+	const companionsTool = {
+		name: "companions",
+		label: "companions",
+		description:
+			"Start and stop companion agents. A companion is a real pi process in its own terminal " +
+			"tab, reachable at session/<name>. 'spawn' starts one and reports the address to use; " +
+			"the task is then simply a message sent with the peers tool. 'close' stops it.",
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("spawn"), Type.Literal("close")], {
+				description: "what to do",
+			}),
+			name: Type.Optional(
+				Type.String({ description: "a short role name, for example reviewer" }),
+			),
+			cwd: Type.Optional(
+				Type.String({ description: "where the companion runs; defaults to this directory" }),
+			),
+		}),
+		async execute(
+			_toolCallId: string,
+			params: { action: "spawn" | "close"; name?: string; cwd?: string },
+			signal: AbortSignal | undefined,
+		) {
+			const plan = planCompanionAction(params, { companionBin, self });
+			if (isError(plan)) return toolText(plan.error);
+			return runPlan(plan, signal, undefined, "MSGQ_COMPANION");
+		},
+	};
+	pi.registerTool(companionsTool);
 
 	pi.on("session_start", async (_event, ctx) => {
 		teardown();
@@ -233,6 +393,8 @@ export default function (pi: ExtensionAPI) {
 			const topicsFlag = pi.getFlag("msgq-topics");
 			const policyFlag = pi.getFlag("msgq-policy");
 			const presenceFlag = pi.getFlag("msgq-presence");
+			const reportFlag = pi.getFlag("msgq-report-to");
+			const trustFlag = pi.getFlag("msgq-trust");
 			extra = parseTopics(
 				(typeof topicsFlag === "string" ? topicsFlag : undefined) ??
 					process.env.MSGQ_TOPICS,
@@ -246,6 +408,14 @@ export default function (pi: ExtensionAPI) {
 					process.env.MSGQ_PRESENCE,
 			);
 			presenceTtl = parseTtlSeconds(process.env.MSGQ_PRESENCE_TTL, PRESENCE_TTL_S);
+			reportTo = parseOptionalAddress(
+				(typeof reportFlag === "string" ? reportFlag : undefined) ??
+					process.env.MSGQ_PARENT,
+			);
+			trusted = parseTrustList(
+				(typeof trustFlag === "string" ? trustFlag : undefined) ??
+					process.env.MSGQ_TRUST,
+			);
 		} catch (error) {
 			disable(error instanceof ConfigError ? error.message : String(error));
 			return;
@@ -258,22 +428,13 @@ export default function (pi: ExtensionAPI) {
 		};
 		self = selfAddress(identity);
 		consumer = consumerId(identity);
-		addresses = subscriptionAddresses(identity, extra);
+		extraTopics = extra;
 
 		// Bus.
 		const dbPath = resolveDbPath(process.env, homedir());
 		try {
-			const opened = new Bus(dbPath);
-			bus = opened;
-			subscriptions = addresses.map((address) => {
-				const subscription = opened.subscribe(
-					address,
-					consumer,
-					(event) => onEvent(address, event, subscription),
-					(error) => disable(`bus subscription failed on ${address}: ${String(error)}`),
-				);
-				return subscription;
-			});
+			bus = new Bus(dbPath);
+			resubscribe();
 		} catch (error) {
 			disable(`cannot open ${dbPath}: ${String(error)}`);
 			return;
@@ -385,13 +546,17 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_info_changed", async (_event, ctx) => {
-		if (!presence) return;
+		// Identity, the address this session answers to, and the subscription all move
+		// together, whether or not presence is on.
 		const renamed: SessionIdentity = {
 			alias: pi.getSessionName() ?? ctx.sessionManager.getSessionName(),
 			sessionId: identity?.sessionId ?? ctx.sessionManager.getSessionId(),
 		};
 		identity = renamed;
-		if (!presence.setOwner(consumerId(renamed))) {
+		self = selfAddress(renamed);
+		consumer = consumerId(renamed);
+		resubscribe();
+		if (presence && !presence.setOwner(consumer)) {
 			report("msgq presence could not re-register after a rename", "warning");
 		}
 	});

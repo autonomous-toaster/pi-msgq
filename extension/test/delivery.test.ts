@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Coalescer, formatBatch, formatMessage, planDelivery } from "../src/delivery.ts";
+import {
+	Coalescer,
+	formatBatch,
+	formatMessage,
+	planDelivery,
+	wantsReply,
+} from "../src/delivery.ts";
 import type { MsgqRecord } from "../src/record.ts";
 
 const SELF = "session/api-worker";
@@ -31,6 +37,16 @@ test("honor policy maps turn-bearing types by agent state", () => {
 	assert.equal(planDelivery(record({ type: "follow_up" }), "honor", SELF, true), "buffer");
 });
 
+test("a trusted sender allowlist gates the honour policy", () => {
+	// Named apart from the helper, which would otherwise shadow it here.
+	const fromPlanner = record({ from: "session/planner" });
+	// A configured list admits only its members.
+	assert.equal(planDelivery(fromPlanner, "honor", SELF, false, ["session/planner"]), "turn");
+	assert.equal(planDelivery(fromPlanner, "honor", SELF, false, ["session/other"]), "display");
+	// An empty list means no allowlist was configured, so nothing is gated.
+	assert.equal(planDelivery(fromPlanner, "honor", SELF, false, []), "turn");
+});
+
 test("note and unknown types never turn", () => {
 	assert.equal(planDelivery(record({ type: "note" }), "honor", SELF, false), "display");
 	assert.equal(planDelivery(record({ type: "future-kind" }), "honor", SELF, false), "display");
@@ -46,6 +62,16 @@ test("a record with no body is display-only", () => {
 		planDelivery(record({ type: "prompt", message: undefined }), "honor", SELF, false),
 		"display",
 	);
+});
+
+test("a record asking for an answer carries a reply hint", () => {
+	const asking = record({ message: "what is 2+2?", meta: { reply: true } });
+	assert.match(formatMessage(asking, "group/a"), /peers tool/);
+	assert.equal(wantsReply(asking), true);
+
+	const plain = record({ message: "just a note" });
+	assert.equal(wantsReply(plain), false);
+	assert.doesNotMatch(formatMessage(plain, "group/a"), /peers tool/);
 });
 
 test("messages carry provenance", () => {

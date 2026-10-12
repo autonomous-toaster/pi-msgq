@@ -41,8 +41,9 @@ function publishRaw(dbPath, address, payload) {
 	return offset;
 }
 
-function startPi(extraArgs = [], envOverrides = {}) {
-	const child = spawn(PI, ["--mode", "rpc", "-e", EXTENSION, "-nt", ...extraArgs], {
+function startPi(extraArgs = [], envOverrides = {}, { noTools = true } = {}) {
+	const toolArgs = noTools ? ["-nt"] : [];
+	const child = spawn(PI, ["--mode", "rpc", "-e", EXTENSION, ...toolArgs, ...extraArgs], {
 		cwd: REPO,
 		env: { ...process.env, MSGQ_DB: DB, ...envOverrides },
 		stdio: ["pipe", "pipe", "ignore"],
@@ -497,9 +498,24 @@ async function scenarioRename() {
 	}
 	console.log("after rename:", after?.address);
 
+	// The subscription has to follow the new address, or the session stops receiving at
+	// the very name the roster now advertises.
+	execFileSync(CLI, ["--db", own, "publish", "session/api-worker", "ping after rename", "--type", "note"]);
+	await wait(2500);
+	const { data } = await send({ id: "e", type: "get_entries" });
+	const received = data.entries.some(
+		(entry) => entry.type === "custom_message" && String(entry.content).includes("ping after rename"),
+	);
+	console.log("delivered at the new address:", received);
+
 	shutdown(child);
-	const ok = before?.address === `session/${id}` && after?.alias === "api-worker";
-	report("rename", ok, `before=${before?.address} after=${after?.address} alias=${after?.alias}`);
+	const ok =
+		before?.address === `session/${id}` && after?.alias === "api-worker" && received;
+	report(
+		"rename",
+		ok,
+		`before=${before?.address} after=${after?.address} received=${received}`,
+	);
 }
 
 async function scenarioSquat() {
@@ -755,6 +771,59 @@ async function scenarioAckQuiet() {
 	report("ack-quiet", replies === "" && assistants.length === 0, `replies=${JSON.stringify(replies)} assistants=${assistants.length}`);
 }
 
+
+async function scenarioDelegate() {
+	// An agent session, not a shell, drives the whole delegation.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-delegate-")), "msgq.db");
+	const companion = resolve(REPO, "companion/companion");
+	const env = {
+		MSGQ_DB: own,
+		MSGQ_BIN: CLI,
+		MSGQ_COMPANION: companion,
+		MSGQ_SPAWN_EXTRA: `-e ${resolve(REPO, "extension")}`,
+	};
+	const { child, send, waitForEvent } = startPi(["--name", "planner", "--msgq-policy", "honor"], env, {
+		noTools: false,
+	});
+	await send({ id: "s", type: "get_state" });
+
+	child.stdin.write(
+		`${JSON.stringify({
+			id: "p",
+			type: "prompt",
+			message:
+				"Use the companions tool to spawn a companion named helper. Then use the peers tool with action 'ask' to ask it: What is 2+2? Reply with just the number. Finally, report what it answered.",
+		})}\n`,
+	);
+
+	await waitForEvent("agent_settled", 600_000);
+	await wait(1500);
+
+	const { data } = await send({ id: "e", type: "get_entries" });
+	const asked = data.entries.some(
+		(entry) =>
+			entry.type === "message" &&
+			entry.message?.role === "assistant" &&
+			JSON.stringify(entry.message.content).includes('"ask"'),
+	);
+	const answered = data.entries.some(
+		(entry) =>
+			entry.type === "message" &&
+			entry.message?.role === "toolResult" &&
+			entry.message?.toolName === "peers" &&
+			JSON.stringify(entry.message.content).includes("4"),
+	);
+	console.log("asked:", asked, "answered:", answered);
+
+	shutdown(child);
+	try {
+		execFileSync(companion, ["close", "helper"], { env: { ...process.env, ...env } });
+	} catch {
+		/* already gone */
+	}
+	report("delegate", asked && answered, `asked=${asked} answered=${answered}`);
+}
+
 const scenario = process.argv[2];
 if (scenario === "default-note") await scenarioDefaultNote();
 else if (scenario === "honor-prompt") await scenarioHonorPrompt();
@@ -765,6 +834,7 @@ else if (scenario === "self-guard") await scenarioSelfGuard();
 else if (scenario === "steer-mid-run") await scenarioSteerMidRun();
 else if (scenario === "extra-topic") await scenarioExtraTopic();
 else if (scenario === "presence") await scenarioPresence();
+else if (scenario === "delegate") await scenarioDelegate();
 else if (scenario === "ack-display") await scenarioAckDisplay();
 else if (scenario === "ack-honor") await scenarioAckHonor();
 else if (scenario === "ack-batch") await scenarioAckBatch();
@@ -779,7 +849,7 @@ else if (scenario === "bad-bus") await scenarioBadBus();
 else if (scenario === "skip-version") await scenarioSkipVersion();
 else {
 	console.error(
-		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version>",
+		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|delegate|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version>",
 	);
 	process.exit(2);
 }

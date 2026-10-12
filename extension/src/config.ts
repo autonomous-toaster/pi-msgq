@@ -69,6 +69,26 @@ export function parsePolicy(raw: string | undefined | null): Policy {
 }
 
 /**
+ * Parse a comma-separated list of trusted sender addresses. Entries are compared
+ * literally against a record's `from`, so write the address as it appears.
+ */
+export function parseTrustList(raw: string | undefined | null): string[] {
+	if (!raw) return [];
+	const out: string[] = [];
+	for (const part of raw.split(",")) {
+		const trimmed = part.trim();
+		if (trimmed && !out.includes(trimmed)) out.push(trimmed);
+	}
+	return out;
+}
+
+/** Parse an optional address, trimmed, or undefined when absent. */
+export function parseOptionalAddress(raw: string | undefined | null): string | undefined {
+	const trimmed = raw?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+/**
  * Parse the presence switch. Presence is enabled unless explicitly disabled.
  */
 export function parsePresence(raw: string | undefined | null): boolean {

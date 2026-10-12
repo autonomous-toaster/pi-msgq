@@ -26,9 +26,12 @@ export function planDelivery(
 	policy: Policy,
 	selfAddress: string,
 	busy: boolean,
+	trusted: string[] = [],
 ): DeliveryPlan {
 	if (policy === "display") return "display";
 	if (record.from === selfAddress) return "display";
+	// An empty list means no allowlist is configured; a non-empty one admits only those senders.
+	if (trusted.length > 0 && !trusted.includes(record.from)) return "display";
 	if (!TURN_TYPES.includes(record.type)) return "display";
 	if (!recordBody(record)) return "display";
 	return busy ? "buffer" : "turn";
@@ -69,9 +72,29 @@ export class Coalescer {
 	}
 }
 
-/** Render one record with its provenance. */
+/** Whether a record asks its recipient for an answer. */
+export function wantsReply(record: MsgqRecord): boolean {
+	const meta = record.meta;
+	return (
+		typeof meta === "object" && meta !== null && (meta as { reply?: unknown }).reply === true
+	);
+}
+
+/** Render one record with its provenance, and a reply hint when one was asked for. */
 export function formatMessage(record: MsgqRecord, address: string): string {
-	return `[msgq] from ${record.from} on ${address}\n${recordBody(record)}`;
+	const body = recordBody(record);
+	if (!wantsReply(record)) {
+		return `[msgq] from ${record.from} on ${address}\n${body}`;
+	}
+	// A soft parenthetical at the end gets ignored: the peer answers into its own
+	// transcript and the asker waits in vain. State the expected action, first, with
+	// the exact tool call to make.
+	return [
+		`[msgq] ${record.from} asks you a question through session ${address}`,
+		'Answer them using the peers tool: {"action":"reply","message":"<your answer>"}',
+		"",
+		body,
+	].join("\n");
 }
 
 /** Render a coalesced batch with each record's provenance. */
