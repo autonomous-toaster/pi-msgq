@@ -261,6 +261,158 @@ fn await_derives_the_reply_address_from_the_message() {
     assert!(out.stdout.contains("completed"), "{}", out.stdout);
 }
 
+fn spawn_ask(db: &Path, args: &[&str]) -> std::process::Child {
+    Command::new(bin())
+        .arg("--db")
+        .arg(db)
+        .arg("ask")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// Wait until `topic` has a message, and return its offset. Never guess it: under
+/// parallel load the ask may publish later than a fixed sleep would assume.
+fn wait_for_offset(db: &Path, topic: &str) -> i64 {
+    for _ in 0..100 {
+        let out = run(db, &["topics", "--json"]);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out.stdout).unwrap_or(serde_json::Value::Null);
+        if let Some(rows) = parsed.as_array() {
+            for row in rows {
+                if row["topic"] == topic
+                    && let Some(offset) = row["max_offset"].as_i64()
+                    && offset > 0
+                {
+                    return offset;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{topic} never received a message");
+}
+
+#[test]
+fn publish_reply_to_references_an_earlier_message() {
+    let db = temp_db();
+    assert_eq!(run(&db, &["publish", "session/w", "question"]).code, 0);
+    assert_eq!(
+        run(
+            &db,
+            &[
+                "publish",
+                "cli/asker",
+                "answer",
+                "--type",
+                "prompt",
+                "--reply-to",
+                "1"
+            ]
+        )
+        .code,
+        0
+    );
+    let out = run(&db, &["read", "cli/asker", "--from-start", "--json"]);
+    assert!(out.stdout.contains("\"reply_to\":1"), "{}", out.stdout);
+}
+
+#[test]
+fn ask_returns_the_reply() {
+    let db = temp_db();
+    let child = spawn_ask(
+        &db,
+        &[
+            "session/w",
+            "what is 2+2?",
+            "--from",
+            "cli/asker",
+            "--timeout",
+            "20",
+        ],
+    );
+
+    let offset = wait_for_offset(&db, "session/w");
+    let reply = format!(
+        r#"{{"v":1,"type":"prompt","from":"session/w","to":"cli/asker","message":"four","reply_to":{offset}}}"#
+    );
+    assert_eq!(
+        run(&db, &["publish", "cli/asker", "--json", &reply]).code,
+        0
+    );
+
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text.contains("four"), "{text}");
+}
+
+#[test]
+fn ask_reports_finished_without_replying() {
+    let db = temp_db();
+    let child = spawn_ask(
+        &db,
+        &[
+            "session/w",
+            "anyone there?",
+            "--from",
+            "cli/asker",
+            "--timeout",
+            "20",
+        ],
+    );
+    let offset = wait_for_offset(&db, "session/w");
+    let ack = format!(
+        r#"{{"v":1,"type":"event","from":"session/w","to":"cli/asker","reply_to":{offset},"event":{{"kind":"ack","phase":"completed","outcome":"ok"}}}}"#
+    );
+    assert_eq!(run(&db, &["publish", "cli/asker", "--json", &ack]).code, 0);
+
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text.contains("finished without replying"), "{text}");
+}
+
+#[test]
+fn ask_reports_still_running_without_erroring() {
+    let db = temp_db();
+    let out = run(
+        &db,
+        &[
+            "ask",
+            "session/w",
+            "hello?",
+            "--from",
+            "cli/asker",
+            "--timeout",
+            "1",
+        ],
+    );
+    assert_eq!(out.code, 0, "still running is not an error: {}", out.stderr);
+    assert!(out.stdout.contains("still running"), "{}", out.stdout);
+
+    let json = run(
+        &db,
+        &[
+            "ask",
+            "session/w",
+            "hello?",
+            "--from",
+            "cli/asker",
+            "--timeout",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(
+        json.stdout.contains("\"outcome\":\"running\""),
+        "{}",
+        json.stdout
+    );
+}
+
 #[test]
 fn acknowledgements_render_as_lifecycle_lines() {
     let db = temp_db();

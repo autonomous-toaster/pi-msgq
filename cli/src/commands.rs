@@ -45,8 +45,21 @@ pub struct PublishArgs {
     pub json: bool,
     /// `--ack`: `true` for every phase, or a comma-separated phase list.
     pub ack: Option<String>,
+    /// `--reply-to`: the offset of the message this one answers.
+    pub reply_to: Option<i64>,
     pub await_ack: bool,
     pub timeout: u64,
+}
+
+/// Arguments for `ask`.
+pub struct AskArgs {
+    pub address: String,
+    pub message: Option<String>,
+    pub from: Option<String>,
+    /// The stream the answer arrives on; defaults to this sender's own address.
+    pub on: Option<String>,
+    pub timeout: u64,
+    pub json: bool,
 }
 
 /// Action for `consumers`.
@@ -122,6 +135,129 @@ pub fn await_ack(
     };
     // Re-attaching has no snapshot to take, so the reply stream is read from its start.
     await_terminal(&store, &stream, 0, offset, timeout_s, json_out)
+}
+
+/// `msgq ask`: publish a question and wait for the answer.
+///
+/// Ends on a reply, on a terminal acknowledgement, or on the wait window. None of
+/// the three is an error: in all of them the peer is fine.
+pub fn ask(db_path: &Path, args: AskArgs) -> Result<(), Error> {
+    let canonical = address::canonicalize(&args.address)?;
+    let message = match args.message.as_deref() {
+        Some("-") => read_stdin()?,
+        Some(text) => text.to_string(),
+        None => {
+            return Err(Error::usage(
+                "missing message; pass a question or '-' to read stdin",
+            ));
+        }
+    };
+    let from = args.from.clone().unwrap_or_else(record::default_sender);
+    let mut rec = record::Record::message("prompt", &from, &canonical, message);
+    // An ask needs both: the recipient should be able to answer, and the sender needs
+    // the lifecycle to know the peer finished without ever answering.
+    rec.meta = Some(json!({ "ack": true, "reply": true }));
+    record::validate(&rec)?;
+    let value = record::to_value(&rec)?;
+
+    let (store, _) = Store::open(db_path)?;
+    // The answer comes back to the sender, so record where that stream ends before asking.
+    let stream = match args.on.as_deref() {
+        Some(value) => address::canonicalize(value)?,
+        None => address::canonicalize(&from)?,
+    };
+    let from_offset = store.max_offset(&stream)?;
+
+    let offset = store.publish(&canonical, &value)?;
+    println!("{offset}");
+
+    await_reply(
+        &store,
+        &stream,
+        from_offset,
+        offset,
+        args.timeout,
+        args.json,
+    )
+}
+
+/// Print the answer to an ask, or report why there is none yet.
+fn await_reply(
+    store: &Store,
+    stream: &str,
+    from_offset: i64,
+    reply_to: i64,
+    timeout_s: u64,
+    json_out: bool,
+) -> Result<(), Error> {
+    let updates = store.update_events();
+    let started = Instant::now();
+    let mut cursor = from_offset;
+
+    loop {
+        let events = store.read_since(stream, cursor, 200)?;
+        if events.is_empty() {
+            if timeout_s > 0 && started.elapsed() >= Duration::from_secs(timeout_s) {
+                report_outcome(
+                    json_out,
+                    json!({"outcome": "running", "reply_to": reply_to}),
+                    "still running",
+                );
+                return Ok(());
+            }
+            updates.recv_timeout(Duration::from_millis(500))?;
+            continue;
+        }
+
+        for event in events {
+            cursor = event.offset;
+            let record: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
+            if record.get("reply_to").and_then(Value::as_i64) != Some(reply_to) {
+                continue;
+            }
+
+            // Acknowledgements share the reply reference, so they are told apart by shape.
+            if let Some(ack) = ack_event(&record) {
+                let phase = ack
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let delivery = ack.get("delivery").and_then(Value::as_str);
+                let terminal =
+                    phase == "completed" || (phase == "received" && delivery == Some("display"));
+                if terminal {
+                    report_outcome(
+                        json_out,
+                        json!({"outcome": "finished", "phase": phase, "reply_to": reply_to}),
+                        &format!("finished without replying ({phase})"),
+                    );
+                    return Ok(());
+                }
+                continue;
+            }
+
+            if json_out {
+                println!("{}", String::from_utf8_lossy(&event.payload));
+            } else {
+                println!(
+                    "{}",
+                    record.get("message").and_then(Value::as_str).unwrap_or("")
+                );
+            }
+            return Ok(());
+        }
+    }
+}
+
+fn report_outcome(json_out: bool, value: Value, human: &str) {
+    if json_out {
+        match serde_json::to_string(&value) {
+            Ok(line) => println!("{line}"),
+            Err(_) => println!("{human}"),
+        }
+    } else {
+        println!("{human}");
+    }
 }
 
 /// The sender recorded on the message at `offset`, when the offset is known.
@@ -252,6 +388,7 @@ fn build_record(canonical: &str, args: &PublishArgs) -> Result<Value, Error> {
             };
             rec.meta = Some(json!({ "ack": ack }));
         }
+        rec.reply_to = args.reply_to;
         record::validate(&rec)?;
         record::to_value(&rec)
     }

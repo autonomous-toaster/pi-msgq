@@ -144,6 +144,7 @@ msgq [--db <PATH>] <COMMAND>
 | `topics` | list addresses with message count and highest offset |
 | `sessions` | list live participants holding a bus lease |
 | `await <OFFSET>` | wait for acknowledgements of a published message |
+| `ask <ADDRESS> [MESSAGE]` | ask a peer a question and wait for the answer |
 | `consumers [--topic <T>]` | list consumer cursors |
 | `consumers rm <NAME> [--topic <T>]` | remove consumer cursors |
 | `cursor get <CONSUMER> <TOPIC>` | print a saved offset, or `0` |
@@ -305,6 +306,24 @@ $ msgq follow cli/ci-bot
 ```
 
 `#7` is the offset of the message being acknowledged.
+
+## Asking a peer
+
+`msgq ask` publishes a question that asks for an answer, then waits for one:
+
+```bash
+msgq ask session/reviewer "Review the diff on this branch and tell me what you find"
+msgq ask session/reviewer "and the tests?" --from session/planner
+```
+
+It ends in one of three ways, and **none of them is an error**: the reply is printed as the
+command's output; or the peer finishes without answering, which is reported; or the wait window
+closes first, which is reported as "still running" (the peer is fine, it is just slow).
+`--timeout <seconds>` defaults to 600, and `0` waits without a limit.
+
+Replies are ordinary records carrying `reply_to`, so `msgq publish --reply-to <offset>` will craft
+one by hand. In practice you rarely do: a peer that is asked a question is told, in the message it
+receives, to answer with the `peers` tool.
 
 ## Non-goals
 

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use msgq::commands::{self, ConsumersAction, CursorAction, FromSpec, PublishArgs};
+use msgq::commands::{self, AskArgs, ConsumersAction, CursorAction, FromSpec, PublishArgs};
 use msgq::error::Error;
 
 #[derive(Parser)]
@@ -45,12 +45,34 @@ enum Command {
         /// Request acknowledgements: `--ack` for every phase, or `--ack started,completed`.
         #[arg(long, value_name = "PHASES", num_args = 0..=1, default_missing_value = "true")]
         ack: Option<String>,
+        /// The offset of the message this one answers.
+        #[arg(long, value_name = "OFFSET")]
+        reply_to: Option<i64>,
         /// Wait for acknowledgements after publishing.
         #[arg(long = "await")]
         await_ack: bool,
         /// Seconds to wait when awaiting; 0 waits without a limit.
         #[arg(long, value_name = "N", default_value_t = 300)]
         timeout: u64,
+    },
+    /// Ask another agent and wait for the answer.
+    Ask {
+        /// The address to ask.
+        address: String,
+        /// The question, or '-' to read it from stdin.
+        message: Option<String>,
+        /// Sender address (default: cli/<user>@<host>).
+        #[arg(long)]
+        from: Option<String>,
+        /// Address the answer arrives on (default: this sender).
+        #[arg(long, value_name = "ADDRESS")]
+        on: Option<String>,
+        /// Seconds to wait; 0 waits without a limit.
+        #[arg(long, value_name = "N", default_value_t = 600)]
+        timeout: u64,
+        /// Emit the reply as its raw record, and outcomes as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Wait for acknowledgements of a published message.
     Await {
@@ -184,6 +206,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             kind,
             json,
             ack,
+            reply_to,
             await_ack,
             timeout,
         } => commands::publish(
@@ -195,8 +218,27 @@ fn run(cli: Cli) -> Result<(), Error> {
                 kind,
                 json,
                 ack,
+                reply_to,
                 await_ack,
                 timeout,
+            },
+        ),
+        Command::Ask {
+            address,
+            message,
+            from,
+            on,
+            timeout,
+            json,
+        } => commands::ask(
+            &db,
+            AskArgs {
+                address,
+                message,
+                from,
+                on,
+                timeout,
+                json,
             },
         ),
         Command::Await {
