@@ -219,6 +219,54 @@ impl Store {
             .map_err(Error::runtime)
     }
 
+    /// Unexpired participant leases: `(name, owner, expires_at)`.
+    pub fn list_leases(&self) -> Result<Vec<(String, String, i64)>, Error> {
+        self.db
+            .with_conn(|c| -> Result<Vec<(String, String, i64)>, String> {
+                let mut stmt = c
+                    .prepare(
+                        "SELECT name, owner, expires_at FROM _honker_locks \
+                         WHERE name LIKE 'msgq:participant:%' AND expires_at > unixepoch() \
+                         ORDER BY name",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(|e| e.to_string())?);
+                }
+                Ok(out)
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// The stored `(topic, payload)` for one offset, when it exists.
+    pub fn record_at(&self, offset: i64) -> Result<Option<(String, String)>, Error> {
+        self.db
+            .with_conn(|c| -> Result<Option<(String, String)>, String> {
+                let mut stmt = c
+                    .prepare("SELECT topic, payload FROM _honker_stream WHERE offset = ?1")
+                    .map_err(|e| e.to_string())?;
+                let mut rows = stmt.query([offset]).map_err(|e| e.to_string())?;
+                match rows.next().map_err(|e| e.to_string())? {
+                    Some(row) => Ok(Some((
+                        row.get::<_, String>(0).map_err(|e| e.to_string())?,
+                        row.get::<_, String>(1).map_err(|e| e.to_string())?,
+                    ))),
+                    None => Ok(None),
+                }
+            })
+            .map_err(Error::runtime)
+    }
+
     /// Read one owned metadata value.
     pub fn meta(&self, key: &str) -> Result<Option<String>, Error> {
         self.db

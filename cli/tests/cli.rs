@@ -10,11 +10,17 @@ fn bin() -> &'static str {
 }
 
 fn temp_db() -> PathBuf {
+    // A monotonic counter along with the clock: two test threads can otherwise read the
+    // same nanosecond and share one database, which silently couples unrelated tests.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("msgq-it-{}-{nanos}", std::process::id()));
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("msgq-it-{}-{nanos}-{unique}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("msgq.db")
 }
@@ -200,6 +206,75 @@ fn db_info_reports_fields() {
         assert!(out.stdout.contains(field), "missing {field}");
     }
     assert!(out.stdout.contains("protocol_version: 1"));
+}
+
+#[test]
+fn publish_ack_requests_acknowledgements() {
+    let db = temp_db();
+    assert_eq!(
+        run(&db, &["publish", "cli/x", "hi", "--type", "note", "--ack"]).code,
+        0
+    );
+    let all = run(&db, &["read", "cli/x", "--from-start", "--json"]);
+    assert!(all.stdout.contains("\"ack\":true"), "{}", all.stdout);
+
+    assert_eq!(
+        run(
+            &db,
+            &[
+                "publish",
+                "cli/x",
+                "hi2",
+                "--type",
+                "note",
+                "--ack",
+                "started,completed"
+            ],
+        )
+        .code,
+        0
+    );
+    let subset = run(&db, &["read", "cli/x", "--from-start", "--json"]);
+    assert!(
+        subset.stdout.contains("\"ack\":\"started,completed\""),
+        "{}",
+        subset.stdout
+    );
+}
+
+#[test]
+fn await_derives_the_reply_address_from_the_message() {
+    let db = temp_db();
+    let message = r#"{"v":1,"type":"note","from":"cli/bot","to":"session/w","message":"hi"}"#;
+    assert_eq!(
+        run(&db, &["publish", "session/w", "--json", message]).code,
+        0
+    );
+
+    // The acknowledgement is addressed to the sender, not to the stream the message went to.
+    let ack = r#"{"v":1,"type":"event","from":"session/w","to":"cli/bot","reply_to":1,"event":{"kind":"ack","phase":"completed","outcome":"ok"}}"#;
+    assert_eq!(run(&db, &["publish", "cli/bot", "--json", ack]).code, 0);
+
+    // No --on: the wait must find it through the referenced message's sender.
+    let out = run(&db, &["await", "1", "--timeout", "5"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("completed"), "{}", out.stdout);
+}
+
+#[test]
+fn acknowledgements_render_as_lifecycle_lines() {
+    let db = temp_db();
+    let ack = r#"{"v":1,"type":"event","from":"session/child","to":"cli/x","reply_to":42,"event":{"kind":"ack","phase":"completed","outcome":"ok"}}"#;
+    assert_eq!(run(&db, &["publish", "cli/x", "--json", ack]).code, 0);
+
+    let human = run(&db, &["read", "cli/x", "--from-start"]);
+    assert!(human.stdout.contains("ack"), "{}", human.stdout);
+    assert!(human.stdout.contains("#42"), "{}", human.stdout);
+    assert!(human.stdout.contains("completed"), "{}", human.stdout);
+    assert!(human.stdout.contains("ok"), "{}", human.stdout);
+
+    let json = run(&db, &["read", "cli/x", "--from-start", "--json"]);
+    assert!(json.stdout.contains(r#""kind":"ack""#), "{}", json.stdout);
 }
 
 #[cfg(unix)]

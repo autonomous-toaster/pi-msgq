@@ -8,6 +8,7 @@ pub mod address;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod presence;
 pub mod record;
 pub mod store;
 

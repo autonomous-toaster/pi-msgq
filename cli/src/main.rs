@@ -42,6 +42,29 @@ enum Command {
         /// Treat MESSAGE (or stdin) as a full JSON record.
         #[arg(long)]
         json: bool,
+        /// Request acknowledgements: `--ack` for every phase, or `--ack started,completed`.
+        #[arg(long, value_name = "PHASES", num_args = 0..=1, default_missing_value = "true")]
+        ack: Option<String>,
+        /// Wait for acknowledgements after publishing.
+        #[arg(long = "await")]
+        await_ack: bool,
+        /// Seconds to wait when awaiting; 0 waits without a limit.
+        #[arg(long, value_name = "N", default_value_t = 300)]
+        timeout: u64,
+    },
+    /// Wait for acknowledgements of a published message.
+    Await {
+        /// The offset printed when the message was published.
+        offset: i64,
+        /// Address the acknowledgements arrive on (default: cli/<user>@<host>).
+        #[arg(long, value_name = "ADDRESS")]
+        on: Option<String>,
+        /// Seconds to wait; 0 waits without a limit.
+        #[arg(long, value_name = "N", default_value_t = 300)]
+        timeout: u64,
+        /// Emit one JSON object per acknowledgement.
+        #[arg(long)]
+        json: bool,
     },
     /// Read messages without touching any cursor.
     Read {
@@ -79,6 +102,11 @@ enum Command {
     },
     /// List addresses that have messages.
     Topics {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List live participants on the bus.
+    Sessions {
         #[arg(long)]
         json: bool,
     },
@@ -155,6 +183,9 @@ fn run(cli: Cli) -> Result<(), Error> {
             from,
             kind,
             json,
+            ack,
+            await_ack,
+            timeout,
         } => commands::publish(
             &db,
             PublishArgs {
@@ -163,8 +194,17 @@ fn run(cli: Cli) -> Result<(), Error> {
                 from,
                 kind,
                 json,
+                ack,
+                await_ack,
+                timeout,
             },
         ),
+        Command::Await {
+            offset,
+            on,
+            timeout,
+            json,
+        } => commands::await_ack(&db, offset, on.as_deref(), timeout, json),
         Command::Read {
             addresses,
             from,
@@ -186,6 +226,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             json,
         ),
         Command::Topics { json } => commands::topics(&db, json),
+        Command::Sessions { json } => commands::sessions(&db, json),
         Command::Consumers {
             topic,
             json,

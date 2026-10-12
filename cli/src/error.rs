@@ -9,6 +9,8 @@ pub enum Error {
     Usage(String),
     /// A runtime or database failure: exit status 1.
     Runtime(String),
+    /// A wait window elapsed without a terminal acknowledgement: exit status 3.
+    Timeout(String),
 }
 
 impl Error {
@@ -20,11 +22,16 @@ impl Error {
         Error::Runtime(msg.into())
     }
 
-    /// Process exit status: 0 success, 1 runtime, 2 usage.
+    pub fn timeout(msg: impl Into<String>) -> Self {
+        Error::Timeout(msg.into())
+    }
+
+    /// Process exit status: 0 success, 1 runtime, 2 usage, 3 timeout.
     pub fn exit_code(&self) -> u8 {
         match self {
             Error::Usage(_) => 2,
             Error::Runtime(_) => 1,
+            Error::Timeout(_) => 3,
         }
     }
 }
@@ -32,7 +39,7 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Usage(m) | Error::Runtime(m) => write!(f, "{m}"),
+            Error::Usage(m) | Error::Runtime(m) | Error::Timeout(m) => write!(f, "{m}"),
         }
     }
 }

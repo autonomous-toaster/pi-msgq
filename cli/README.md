@@ -142,6 +142,8 @@ msgq [--db <PATH>] <COMMAND>
 | `read <ADDRESS>...` | stateless read; never creates or advances a cursor |
 | `follow <ADDRESS>... --consumer <NAME>` | durable subscription; advances the consumer's cursors |
 | `topics` | list addresses with message count and highest offset |
+| `sessions` | list live participants holding a bus lease |
+| `await <OFFSET>` | wait for acknowledgements of a published message |
 | `consumers [--topic <T>]` | list consumer cursors |
 | `consumers rm <NAME> [--topic <T>]` | remove consumer cursors |
 | `cursor get <CONSUMER> <TOPIC>` | print a saved offset, or `0` |
@@ -222,6 +224,87 @@ The bus is built on [honker](https://github.com/russellromney/honker)'s durable 
 indexed append-only table plus a per-consumer offset table. `msgq` adds one table of its own,
 `msgq_meta`, recording the bus protocol version. Engine use is confined to one module so the
 record contract and address grammar stay independent of it.
+
+## Presence
+
+Live sessions advertise themselves with a short **lease** in the bus: renewed while the session
+runs, released when it stops. `msgq sessions` lists them.
+
+```text
+$ msgq sessions
+session/api-worker  session  busy  api-worker  27
+session/01a12cc5    session  idle             30
+```
+
+Columns are address, kind, state, and remaining lifetime in seconds. `--json` emits one object
+per participant.
+
+A session that crashes simply stops renewing, so its lease expires on its own — there is nothing
+to clean up and no daemon involved. Presence is **advisory**: it tells you who is reachable right
+now, but publishing to an offline session still queues durably. Leases come from the pi
+extension, so `msgq sessions` is empty unless at least one session has it loaded.
+
+## Acknowledgements
+
+A sender can ask to be told what happened to a message. `--ack` adds the request for you, and
+`meta.ack` does it for a full record:
+
+```bash
+msgq publish session/api-worker "Deploy now" --ack                 # every phase
+msgq publish session/api-worker "Deploy now" --ack started,completed
+```
+
+With a hand-written record:
+
+```bash
+msgq publish session/api-worker --json '{"v":1,"type":"prompt","from":"cli/ci-bot",\
+  "to":"session/api-worker","message":"Deploy now","meta":{"ack":true}}'
+```
+
+The session reports up to three phases, each published back to the sender's address:
+
+| Phase | Meaning |
+|---|---|
+| `received` | responsibility taken, and **how** it was delivered |
+| `started` | a run that includes it began |
+| `completed` | that run settled, with an outcome |
+
+`received` carries a delivery mode — `turn`, `queued` (held while the session was busy), or
+`display` (shown only, **terminal**: no run will follow). `completed` carries an outcome:
+`ok`, `error`, or `aborted`.
+
+Wait for them with `--await`, or re-attach with `await`:
+
+```text
+$ msgq publish session/api-worker "Deploy now" --await
+7
+received delivery=turn
+started
+completed outcome=ok
+```
+
+`--timeout <seconds>` bounds the wait (default 300, `0` for no limit). A wait that ends without a
+terminal acknowledgement exits with status **3**, so a script can tell "timed out" from "errored".
+`await` finds the acknowledgements by asking whoever sent the referenced message, so it works
+regardless of which address the replies landed on. `--on <address>` overrides that when you need
+to point it somewhere else.
+
+Note where replies go: acknowledgements are addressed to the **sender**, not to the stream the
+message was published to. `msgq follow session/<id>` shows messages sent *to* a session; follow
+your own address (`msgq follow cli/<user>@<host>`) to watch the lifecycle.
+
+Acknowledgements are ordinary `event` records carrying `reply_to`, so `msgq read <your-address>`
+shows them and any third party following both sides can watch the exchange. Human-readable output
+renders them as a lifecycle line rather than raw JSON:
+
+```text
+$ msgq follow cli/ci-bot
+      9  2026-10-11T22:04:00Z  cli/ci-bot      ack   session/child   #7 received turn
+     10  2026-10-11T22:04:01Z  cli/ci-bot      ack   session/child   #7 started
+     11  2026-10-11T22:04:09Z  cli/ci-bot      ack   session/child   #7 completed ok
+```
+
+`#7` is the offset of the message being acknowledged.
 
 ## Non-goals
 

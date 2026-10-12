@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use crate::address;
 use crate::error::Error;
+use crate::presence::{self, Roster};
 use crate::record;
 use crate::store::Store;
 
@@ -42,6 +43,10 @@ pub struct PublishArgs {
     pub from: Option<String>,
     pub kind: Option<String>,
     pub json: bool,
+    /// `--ack`: `true` for every phase, or a comma-separated phase list.
+    pub ack: Option<String>,
+    pub await_ack: bool,
+    pub timeout: u64,
 }
 
 /// Action for `consumers`.
@@ -72,9 +77,139 @@ pub fn publish(db_path: &Path, args: PublishArgs) -> Result<(), Error> {
     let canonical = address::canonicalize(&args.address)?;
     let value = build_record(&canonical, &args)?;
     let (store, _) = Store::open(db_path)?;
+
+    // When awaiting, record where the reply stream ends *before* publishing, so an
+    // acknowledgement that arrives immediately is still reported.
+    let reply = if args.await_ack {
+        let sender = value
+            .get("from")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let stream = address::canonicalize(&sender)?;
+        let from_offset = store.max_offset(&stream)?;
+        Some((stream, from_offset))
+    } else {
+        None
+    };
+
     let offset = store.publish(&canonical, &value)?;
     println!("{offset}");
+
+    if let Some((stream, from_offset)) = reply {
+        await_terminal(&store, &stream, from_offset, offset, args.timeout, false)?;
+    }
     Ok(())
+}
+
+/// Wait for acknowledgements of an already published offset.
+pub fn await_ack(
+    db_path: &Path,
+    offset: i64,
+    on: Option<&str>,
+    timeout_s: u64,
+    json_out: bool,
+) -> Result<(), Error> {
+    let (store, _) = Store::open(db_path)?;
+    // Without an explicit address, ask whoever sent the message: acknowledgements are
+    // addressed to the sender, not to the stream the message was published to.
+    let stream = match on {
+        Some(value) => address::canonicalize(value)?,
+        None => match sender_of(&store, offset)? {
+            Some(sender) => address::canonicalize(&sender)?,
+            None => address::canonicalize(&record::default_sender())?,
+        },
+    };
+    // Re-attaching has no snapshot to take, so the reply stream is read from its start.
+    await_terminal(&store, &stream, 0, offset, timeout_s, json_out)
+}
+
+/// The sender recorded on the message at `offset`, when the offset is known.
+fn sender_of(store: &Store, offset: i64) -> Result<Option<String>, Error> {
+    let Some((_topic, payload)) = store.record_at(offset)? else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+    Ok(value
+        .get("from")
+        .and_then(Value::as_str)
+        .map(|sender| sender.to_string()))
+}
+
+/// Print acknowledgements of `reply_to` until a terminal one arrives or the window closes.
+fn await_terminal(
+    store: &Store,
+    stream: &str,
+    from_offset: i64,
+    reply_to: i64,
+    timeout_s: u64,
+    json_out: bool,
+) -> Result<(), Error> {
+    let updates = store.update_events();
+    let started = Instant::now();
+    let mut cursor = from_offset;
+
+    loop {
+        let events = store.read_since(stream, cursor, 200)?;
+        if events.is_empty() {
+            if timeout_s > 0 && started.elapsed() >= Duration::from_secs(timeout_s) {
+                return Err(Error::timeout(format!(
+                    "no terminal acknowledgement for offset {reply_to} within {timeout_s}s"
+                )));
+            }
+            updates.recv_timeout(Duration::from_millis(500))?;
+            continue;
+        }
+
+        for event in events {
+            cursor = event.offset;
+            let record: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
+            if record.get("reply_to").and_then(Value::as_i64) != Some(reply_to) {
+                continue;
+            }
+            let Some(ack) = record.get("event") else {
+                continue;
+            };
+            if ack.get("kind").and_then(Value::as_str) != Some("ack") {
+                continue;
+            }
+
+            let phase = ack
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let delivery = ack.get("delivery").and_then(Value::as_str);
+            let outcome = ack.get("outcome").and_then(Value::as_str);
+
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "phase": phase,
+                        "reply_to": reply_to,
+                        "from": record.get("from").and_then(Value::as_str),
+                        "delivery": delivery,
+                        "outcome": outcome,
+                        "offset": event.offset,
+                    }))?
+                );
+            } else {
+                let mut line = phase.to_string();
+                if let Some(delivery) = delivery {
+                    line.push_str(&format!(" delivery={delivery}"));
+                }
+                if let Some(outcome) = outcome {
+                    line.push_str(&format!(" outcome={outcome}"));
+                }
+                println!("{line}");
+            }
+
+            // Terminal: completion, or a received acknowledgement for a display delivery.
+            if phase == "completed" || (phase == "received" && delivery == Some("display")) {
+                return Ok(());
+            }
+        }
+    }
 }
 
 fn build_record(canonical: &str, args: &PublishArgs) -> Result<Value, Error> {
@@ -108,7 +243,15 @@ fn build_record(canonical: &str, args: &PublishArgs) -> Result<Value, Error> {
             }
         };
         let from = args.from.clone().unwrap_or_else(record::default_sender);
-        let rec = record::Record::message(&kind, &from, canonical, message);
+        let mut rec = record::Record::message(&kind, &from, canonical, message);
+        if let Some(phases) = &args.ack {
+            let ack = if phases == "true" {
+                Value::Bool(true)
+            } else {
+                Value::String(phases.clone())
+            };
+            rec.meta = Some(json!({ "ack": ack }));
+        }
         record::validate(&rec)?;
         record::to_value(&rec)
     }
@@ -285,6 +428,73 @@ pub fn consumers(
     Ok(())
 }
 
+/// List live participants from the bus leases.
+pub fn sessions(db_path: &Path, json_out: bool) -> Result<(), Error> {
+    let (store, _) = Store::open(db_path)?;
+    let leases = store.list_leases()?;
+    let now = unix_now();
+
+    // De-duplicate by participant id, preferring the most active state.
+    let mut best: BTreeMap<String, (u8, Roster)> = BTreeMap::new();
+    for (name, owner, expires_at) in leases {
+        let Some((kind, state, id)) = presence::parse_lease_name(&name) else {
+            continue;
+        };
+        let rank = presence::state_rank(&state);
+        let entry = Roster {
+            address: presence::address_for(&kind, &id, &owner),
+            kind,
+            state,
+            alias: presence::alias_from_owner(&owner).map(|alias| alias.to_string()),
+            expires_at,
+        };
+        match best.get(&id) {
+            Some((existing, _)) if *existing <= rank => {}
+            _ => {
+                best.insert(id, (rank, entry));
+            }
+        }
+    }
+
+    let mut entries: Vec<Roster> = best.into_values().map(|(_, entry)| entry).collect();
+    entries.sort_by(|a, b| a.address.cmp(&b.address));
+
+    if json_out {
+        for entry in &entries {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "address": entry.address,
+                    "kind": entry.kind,
+                    "state": entry.state,
+                    "alias": entry.alias,
+                    "expires_at": entry.expires_at,
+                    "expires_in": (entry.expires_at - now).max(0),
+                }))?
+            );
+        }
+    } else {
+        for entry in &entries {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                entry.address,
+                entry.kind,
+                entry.state,
+                entry.alias.clone().unwrap_or_default(),
+                (entry.expires_at - now).max(0)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Read, set, or reset one consumer cursor.
 pub fn cursor(db_path: &Path, action: CursorAction) -> Result<(), Error> {
     let (store, _) = Store::open(db_path)?;
@@ -380,6 +590,51 @@ fn render(event: &StreamEvent, json_out: bool) {
 
     let value: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
     let from = value.get("from").and_then(Value::as_str).unwrap_or("?");
+    let (kind, body) = describe(&value);
+
+    println!(
+        "{:>7}  {}  {:<24}  {:<9}  {:<20}  {}",
+        event.offset,
+        format_unix(event.created_at),
+        event.topic,
+        kind,
+        from,
+        body
+    );
+}
+
+/// The `event` object of a record, when that record is an acknowledgement.
+fn ack_event(value: &Value) -> Option<&Value> {
+    if value.get("type").and_then(Value::as_str) != Some("event") {
+        return None;
+    }
+    let event = value.get("event")?;
+    (event.get("kind").and_then(Value::as_str) == Some("ack")).then_some(event)
+}
+
+/// Human-facing kind and body for a record. An acknowledgement reads as a lifecycle
+/// line instead of a JSON blob.
+fn describe(value: &Value) -> (String, String) {
+    if let Some(event) = ack_event(value) {
+        let phase = event
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let detail = event
+            .get("delivery")
+            .or_else(|| event.get("outcome"))
+            .and_then(Value::as_str);
+        let mut body = match value.get("reply_to").and_then(Value::as_i64) {
+            Some(reply_to) => format!("#{reply_to} {phase}"),
+            None => phase.to_string(),
+        };
+        if let Some(detail) = detail {
+            body.push(' ');
+            body.push_str(detail);
+        }
+        return ("ack".to_string(), body);
+    }
+
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("?");
     let body = if kind == "event" {
         value
@@ -393,16 +648,7 @@ fn render(event: &StreamEvent, json_out: bool) {
             .unwrap_or("")
             .to_string()
     };
-
-    println!(
-        "{:>7}  {}  {:<24}  {:<9}  {:<20}  {}",
-        event.offset,
-        format_unix(event.created_at),
-        event.topic,
-        kind,
-        from,
-        body
-    );
+    (kind.to_string(), body)
 }
 
 /// Format a unix timestamp (seconds) as an ISO-8601 UTC string.
