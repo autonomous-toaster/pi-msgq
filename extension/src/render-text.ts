@@ -45,6 +45,21 @@ function route(item: MsgqItem, theme: MsgqTheme): string {
 }
 
 /**
+ * How a human answers this message.
+ *
+ * Presentation only, and deliberately not part of the content: that is what the model
+ * reads, and a line telling somebody to type a command would be addressed to the wrong
+ * reader. It names the sender rather than pointing at `/reply`, because `/reply` means
+ * "the message I most recently received", which is not the row in front of you once a
+ * batch has several.
+ */
+function replyHint(item: MsgqItem, theme: MsgqTheme): string {
+	// `?` is what the renderer substitutes when a message carries no details.
+	if (!item.from || item.from === "?") return "";
+	return theme.fg("dim", `reply: /peer ${item.from} ...`);
+}
+
+/**
  * Compose the body shown in the transcript.
  *
  * Single message:  `msgq note` / route / body
@@ -69,6 +84,8 @@ export function composeMsgqText(details: MsgqDetails, theme: MsgqTheme): string 
 				lines.push(theme.fg("customMessageText", line));
 			}
 		}
+		const hint = replyHint(item, theme);
+		if (hint) lines.push("", hint);
 		return lines.join("\n");
 	}
 
@@ -81,6 +98,9 @@ export function composeMsgqText(details: MsgqDetails, theme: MsgqTheme): string 
 		for (const line of item.body.split("\n")) {
 			lines.push(theme.fg("customMessageText", line));
 		}
+		// Each row names its own sender, so any one of them can be answered.
+		const hint = replyHint(item, theme);
+		if (hint) lines.push(hint);
 	});
 	return lines.join("\n");
 }

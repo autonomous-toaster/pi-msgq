@@ -61,6 +61,39 @@ test("empty items degrade to the label", () => {
 	assert.equal(composeMsgqText({ items: [] }, plain), "msgq");
 });
 
+test("a single message says how to answer it", () => {
+	const text = composeMsgqText(
+		{ items: [{ from: "cli/alice@mac", address: "session/api-worker", type: "note", body: "build is green" }] },
+		plain,
+	);
+	assert.match(text, /reply: \/peer cli\/alice@mac \.\.\./);
+});
+
+test("every row of a batch names its own sender", () => {
+	const text = composeMsgqText(
+		{
+			items: [
+				{ from: "cli/a@h", address: "session/w", type: "prompt", body: "second" },
+				{ from: "cli/b@h", address: "session/w", type: "prompt", body: "third" },
+			],
+		},
+		plain,
+	);
+	assert.match(text, /reply: \/peer cli\/a@h \.\.\./);
+	assert.match(text, /reply: \/peer cli\/b@h \.\.\./);
+});
+
+test("a message with no details offers no reply", () => {
+	// `?` is the renderer's fallback when a message carries no structured details.
+	const text = composeMsgqText(
+		{ items: [{ from: "?", address: "?", type: "note", body: "raw text" }] },
+		plain,
+	);
+	assert.match(text, /raw text/);
+	assert.doesNotMatch(text, /reply:/);
+	assert.doesNotMatch(text, /\/peer/);
+});
+
 test("type colors are distinct per role", () => {
 	assert.equal(typeColor("prompt"), "accent");
 	assert.equal(typeColor("steer"), "warning");

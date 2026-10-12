@@ -81,6 +81,19 @@ test("messages carry provenance", () => {
 	assert.match(text, /hello/);
 });
 
+test("the content never carries the human's reply affordance", () => {
+	// The content is what the model reads. How a person answers belongs to the
+	// renderer, and must never leak into this.
+	for (const text of [
+		formatMessage(record(), "group/a"),
+		formatMessage(record({ message: "what is 2+2?", meta: { reply: true } }), "group/a"),
+		formatBatch([{ record: record({ message: "one" }), address: "group/a" }]),
+	]) {
+		assert.doesNotMatch(text, /\/peer/);
+		assert.doesNotMatch(text, /reply:/);
+	}
+});
+
 test("coalescer drains and empties", () => {
 	const coalescer = new Coalescer();
 	assert.equal(coalescer.empty, true);
