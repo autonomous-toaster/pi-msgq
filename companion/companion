@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+#
+# companion - start and stop companion pi agents, wired to the message bus.
+#
+#   companion spawn <name> [options]   start a companion in a new herdr tab
+#   companion close <name>             close that companion's tab
+#
+# A companion is a real `pi` process in its own herdr tab, running the message-bus
+# extension and reachable at session/<name>. Spawning creates the process only: the
+# first task is just the first message sent to that address.
+#
+# Options for spawn:
+#   --cwd PATH           working directory (default: the caller's)
+#   --workspace ID       herdr workspace (default: the caller's)
+#   --parent ADDRESS     the address the companion reports to; also its only trusted sender
+#   --model P/M          provider/model for the companion (default: pi's own default)
+#   --trust | --no-trust grant or withhold project trust for the companion
+#   --topics LIST        extra bus addresses for the companion to follow
+#   --allow DEPTH        override the delegation depth cap
+#   --focus              focus the new tab (default: leave focus alone)
+#   --timeout SECONDS    how long to wait for the companion to become reachable
+#   --json               emit the result as one JSON object
+#   --dry-run            print the commands instead of running them
+#
+# Environment:
+#   MSGQ_BIN             the msgq binary (default: msgq on PATH)
+#   MSGQ_DB              the bus to use and to give the companion
+#   MSGQ_SPAWN_EXTRA     extra pi arguments (e.g. "-e /path/to/extension" in development)
+#   MSGQ_DEPTH           the caller's delegation depth (set by spawn for the child)
+#   COMPANION_MAX_DEPTH  the delegation cap (default: 1)
+
+set -uo pipefail
+
+PROG="companion"
+NAME_RE='^[a-z][a-z0-9_-]{0,31}$'
+MAX_DEPTH="${COMPANION_MAX_DEPTH:-1}"
+MAX_ATTEMPTS="${COMPANION_MAX_ATTEMPTS:-10}"
+READY_TIMEOUT="${COMPANION_READY_TIMEOUT:-60}"
+
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+warn() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+show() { printf '%q ' "$@"; printf '\n'; }
+
+# Named `bus`, not `msgq`: a function called msgq would shadow the binary and make
+# `command -v msgq` succeed even when no binary exists.
+bus() { "${MSGQ_BIN:-msgq}" "$@"; }
+
+require_herdr() {
+	[ "${HERDR_ENV:-}" = "1" ] ||
+		die "not running inside herdr; companion spawns agents in herdr tabs (HERDR_ENV=1)"
+	command -v herdr >/dev/null 2>&1 || die "herdr is required but was not found on PATH"
+}
+
+require_bus_tools() {
+	command -v jq >/dev/null 2>&1 || die "jq is required but was not found on PATH"
+	if [ -n "${MSGQ_BIN:-}" ]; then
+		[ -x "$MSGQ_BIN" ] || die "MSGQ_BIN=$MSGQ_BIN is not executable"
+	else
+		command -v msgq >/dev/null 2>&1 || die "msgq was not found on PATH (set MSGQ_BIN to its path)"
+	fi
+}
+
+# Whether a live companion already holds this name, by herdr or by a bus lease.
+name_taken() {
+	local candidate="$1"
+	if herdr agent get "$candidate" >/dev/null 2>&1; then
+		return 0
+	fi
+	bus sessions --json 2>/dev/null |
+		jq -s -e --arg a "session/$candidate" 'map(select(.address == $a)) | length > 0' >/dev/null 2>&1
+}
+
+# Derive a free name: the requested one, then suffixed alternatives, bounded.
+grant_name() {
+	# Separate lines: a single `local` leaves every name unset for the others.
+	local base="$1"
+	local candidate="$base"
+	local attempt=1
+	while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+		if ! name_taken "$candidate"; then
+			printf '%s' "$candidate"
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		candidate="${base}-${attempt}"
+	done
+	die "no free name for '$base' after $MAX_ATTEMPTS attempts"
+}
+
+# Wait until the companion registers on the bus. Its presence lease is created only
+# after its subscription exists, so this is proof that a message will not be skipped
+# as history.
+wait_ready() {
+	local address="session/$1"
+	local deadline=$((SECONDS + READY_TIMEOUT))
+	local failures=0
+	local listed
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if listed=$(bus sessions --json 2>&1); then
+			failures=0
+			if printf '%s' "$listed" |
+				jq -s -e --arg a "$address" 'map(select(.address == $a)) | length > 0' >/dev/null 2>&1; then
+				return 0
+			fi
+		else
+			# Do not loop for a minute on a bus that cannot be read at all.
+			failures=$((failures + 1))
+			[ "$failures" -ge 5 ] && die "cannot read the bus while waiting for $address: $listed"
+		fi
+		sleep 0.5
+	done
+	return 1
+}
+
+parse_field() { # json, jq expression
+	printf '%s' "$1" | jq -r "$2" 2>/dev/null
+}
+
+cmd_spawn() {
+	local requested="" cwd="" workspace="" parent="" model="" topics=""
+	local trust="" allow_depth=0 focus=0 json_out=0 dry_run=0 timeout=""
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--cwd) cwd="${2:-}"; shift 2 ;;
+		--workspace) workspace="${2:-}"; shift 2 ;;
+		--parent) parent="${2:-}"; shift 2 ;;
+		--model) model="${2:-}"; shift 2 ;;
+		--topics) topics="${2:-}"; shift 2 ;;
+		--trust) trust="yes"; shift ;;
+		--no-trust) trust="no"; shift ;;
+		--allow-depth) allow_depth=1; shift ;;
+		--focus) focus=1; shift ;;
+		--timeout) timeout="${2:-}"; shift 2 ;;
+		--json) json_out=1; shift ;;
+		--dry-run) dry_run=1; shift ;;
+		-*) die "unknown option for spawn: $1" ;;
+		*) [ -z "$requested" ] || die "unexpected argument: $1"; requested="$1"; shift ;;
+		esac
+	done
+
+	[ -n "$requested" ] || die "usage: $PROG spawn <name> [options]"
+	[ -n "$timeout" ] && READY_TIMEOUT="$timeout"
+
+	# Depth is checked before anything else: a spawn loop is a fork bomb.
+	local depth=$(( ${MSGQ_DEPTH:-0} + 1 ))
+	if [ "$depth" -gt "$MAX_DEPTH" ] && [ "$allow_depth" != 1 ]; then
+		die "delegation depth $depth exceeds the cap of $MAX_DEPTH (pass --allow-depth to override)"
+	fi
+
+	cwd="${cwd:-$PWD}"
+	[ -d "$cwd" ] || die "no such directory: $cwd"
+	[ -z "$parent" ] && warn "no --parent given; the companion will trust no sender allowlist"
+
+	# The name has to satisfy herdr's agent grammar, because it is the same string
+	# everywhere: herdr agent, pi session name, and bus address.
+	if [ "$dry_run" != 1 ]; then
+		require_herdr
+		require_bus_tools
+	fi
+	[[ "$requested" =~ $NAME_RE ]] ||
+		die "name '$requested' must match [a-z][a-z0-9_-]{0,31}"
+
+	local granted
+	if [ "$dry_run" = 1 ]; then
+		# Best-effort dedup; a dry run must work where herdr is unavailable.
+		granted=$(grant_name "$requested" 2>/dev/null) || granted="$requested"
+	else
+		granted=$(grant_name "$requested")
+	fi
+	[ -n "$granted" ] || die "could not grant a name for '$requested'"
+	local address="session/$granted"
+
+	# The pi invocation: a plain pi, bus-enabled, named, pointed at its parent, and
+	# with the parent as its only trusted sender.
+	local pi_args=(--name "$granted" --msgq-policy honor)
+	[ -n "$parent" ] && pi_args+=(--msgq-report-to "$parent" --msgq-trust "$parent")
+	[ -n "$topics" ] && pi_args+=(--msgq-topics "$topics")
+	[ -n "$model" ] && pi_args+=(--model "$model")
+	case "$trust" in
+	yes) pi_args+=(--approve) ;;
+	no) pi_args+=(--no-approve) ;;
+	esac
+	# shellcheck disable=SC2206  # deliberate: MSGQ_SPAWN_EXTRA is a list of arguments
+	[ -n "${MSGQ_SPAWN_EXTRA:-}" ] && pi_args+=($MSGQ_SPAWN_EXTRA)
+
+	# A tab lands in the caller's workspace unless another is named, since the herdr
+	# default follows the UI focus, which may be someone else's pane.
+	workspace="${workspace:-${HERDR_WORKSPACE_ID:-}}"
+
+	local env_args=(--env "MSGQ_DEPTH=$depth")
+	# The herdr server does not share our environment, so anything the companion needs to
+	# resolve travels explicitly: the bus, and the binaries its own tools delegate to.
+	[ -n "${MSGQ_DB:-}" ] && env_args+=(--env "MSGQ_DB=$MSGQ_DB")
+	[ -n "${MSGQ_BIN:-}" ] && env_args+=(--env "MSGQ_BIN=$MSGQ_BIN")
+	[ -n "${MSGQ_COMPANION:-}" ] && env_args+=(--env "MSGQ_COMPANION=$MSGQ_COMPANION")
+	[ -n "${MSGQ_SPAWN_EXTRA:-}" ] && env_args+=(--env "MSGQ_SPAWN_EXTRA=$MSGQ_SPAWN_EXTRA")
+	[ -n "$parent" ] && env_args+=(--env "MSGQ_PARENT=$parent")
+
+	local tab_args=(herdr tab create --label "$granted" --cwd "$cwd")
+	if [ "$focus" = 1 ]; then tab_args+=(--focus); else tab_args+=(--no-focus); fi
+	[ -n "$workspace" ] && tab_args+=(--workspace "$workspace")
+	tab_args+=("${env_args[@]}")
+
+	if [ "$dry_run" = 1 ]; then
+		show "${tab_args[@]}"
+		show herdr agent start "$granted" --kind pi --pane '<root_pane>' -- "${pi_args[@]}"
+		printf '# then wait until %s appears on the bus\n' "$address"
+		return 0
+	fi
+
+	local tab_json root_pane tab_id
+	tab_json=$("${tab_args[@]}") || die "herdr tab create failed"
+	root_pane=$(parse_field "$tab_json" '.result.root_pane.pane_id // .result.root_pane.pane_id // .result.root_pane')
+	tab_id=$(parse_field "$tab_json" '.result.tab.tab_id // .result.tab.tab_id // .result.tab')
+	[ -n "$root_pane" ] && [ "$root_pane" != "null" ] ||
+		die "could not read the new pane from herdr: $tab_json"
+
+	# `agent start` waits for pi to be interactive; a blocked startup (an unapproved
+	# project trust prompt, say) returns agent_not_ready rather than hanging here.
+	if ! herdr agent start "$granted" --kind pi --pane "$root_pane" -- "${pi_args[@]}" >/dev/null; then
+		die "the companion did not become ready in tab $tab_id (pane $root_pane); is it blocked at startup?"
+	fi
+
+	if ! wait_ready "$granted"; then
+		die "the companion never became reachable on the bus (tab $tab_id, pane $root_pane)"
+	fi
+
+	if [ "$json_out" = 1 ]; then
+		jq -n --arg name "$granted" --arg address "$address" --arg cwd "$cwd" \
+			--arg tab "$tab_id" --arg pane "$root_pane" \
+			'{name: $name, address: $address, cwd: $cwd, tab: $tab, pane: $pane}'
+	else
+		printf '%s\n' "$address"
+		printf '  cwd  %s\n' "$cwd"
+		printf '  tab  %s   pane %s\n' "$tab_id" "$root_pane"
+	fi
+}
+
+cmd_close() {
+	local requested="" dry_run=0
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--dry-run) dry_run=1; shift ;;
+		-*) die "unknown option for close: $1" ;;
+		*) [ -z "$requested" ] || die "unexpected argument: $1"; requested="$1"; shift ;;
+		esac
+	done
+	[ -n "$requested" ] || die "usage: $PROG close <name>"
+
+	if [ "$dry_run" = 1 ]; then
+		show herdr agent get "$requested"
+		show herdr tab close "<tab_id>"
+		return 0
+	fi
+
+	require_herdr
+	local agent_json tab_id
+	agent_json=$(herdr agent get "$requested" 2>/dev/null) || {
+		printf 'no companion named %s\n' "$requested"
+		return 0
+	}
+	tab_id=$(parse_field "$agent_json" '.result.agent.tab_id // .result.tab_id // .tab_id')
+	if [ -z "$tab_id" ] || [ "$tab_id" = "null" ]; then
+		printf 'no companion named %s\n' "$requested"
+		return 0
+	fi
+
+	herdr tab close "$tab_id" >/dev/null || die "herdr tab close failed for $tab_id"
+	printf 'closed %s\n' "$requested"
+}
+
+case "${1:-}" in
+spawn) shift; cmd_spawn "$@" ;;
+close) shift; cmd_close "$@" ;;
+""|-h|--help|help) sed -n '2,30p' "$0" | sed 's/^#\{1,2\} \{0,1\}//' ;;
+*) die "unknown command: $1 (try: $PROG help)" ;;
+esac
