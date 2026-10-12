@@ -1,6 +1,9 @@
 # Rust build output
 cli/target/
 
+# Node dependencies for the pi extension (installed with npm install)
+extension/node_modules/
+
 # Local message bus database (default path is under ~/.pi/agent/msgq/)
 *.db
 *.db-wal
