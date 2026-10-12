@@ -6,6 +6,7 @@ Start and stop companion agents: a real `pi` process in its own herdr tab, wired
 ```
    companion spawn reviewer        ->  a new herdr tab running pi, reachable at session/reviewer
    msgq ask session/reviewer "..." ->  the task is just the first message
+   companion list                  ->  what is running, and where
    companion close reviewer        ->  the tab is gone
 ```
 
@@ -23,6 +24,7 @@ work is a message like any other.
 
 ```
 companion spawn <name> [options]      start a companion
+companion list [--json]               list the companions that are running
 companion close <name>                close its tab
 companion help                        this text
 ```
@@ -47,6 +49,22 @@ The result names how to reach it:
 { "name": "reviewer", "address": "session/reviewer",
   "cwd": "/path/to/repo", "tab": "w1:t3", "pane": "w1:p5" }
 ```
+
+`companion list` answers the other direction — what is running now. It joins herdr's agents to
+the bus by the name they share, so an entry is a tab that is both alive and listening:
+
+```
+  reviewer  working  /path/to/repo
+```
+
+```json
+{ "companions": [ { "name": "reviewer", "address": "session/reviewer",
+                    "status": "working", "cwd": "/path/to/repo" } ] }
+```
+
+A named herdr agent that holds no lease on the bus is not listed: it cannot be talked to. The bus
+roster (`msgq sessions`) is the other half of that picture — it lists everyone reachable, whether
+or not they live in a herdr tab.
 
 ## How a companion is wired
 

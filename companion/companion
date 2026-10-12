@@ -3,6 +3,7 @@
 # companion - start and stop companion pi agents, wired to the message bus.
 #
 #   companion spawn <name> [options]   start a companion in a new herdr tab
+#   companion list [--json]            list the companions that are running
 #   companion close <name>             close that companion's tab
 #
 # A companion is a real `pi` process in its own herdr tab, running the message-bus
@@ -237,6 +238,62 @@ cmd_spawn() {
 	fi
 }
 
+# The running companions: the named herdr agents that are also on the bus. Both halves
+# are needed — herdr knows the status and the directory, the bus knows whether a message
+# would be heard — and the name is the key they already share.
+cmd_list() {
+	local json_out=0 dry_run=0
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--json) json_out=1; shift ;;
+		--dry-run) dry_run=1; shift ;;
+		-*) die "unknown option for list: $1" ;;
+		*) die "unexpected argument: $1" ;;
+		esac
+	done
+
+	if [ "$dry_run" = 1 ]; then
+		show herdr agent list
+		show bus sessions --json
+		return 0
+	fi
+
+	require_herdr
+	require_bus_tools
+
+	local agents bus_listing joined
+	agents=$(herdr agent list 2>/dev/null) || die "could not read herdr's agents"
+	bus_listing=$(bus sessions --json 2>/dev/null) || die "could not read the bus"
+
+	# A herdr agent with no name is not a companion, and a name the bus does not carry
+	# is a tab that is not listening: neither can be talked to, so neither is listed.
+	joined=$(jq -n \
+		--argjson agents "$(printf '%s' "$agents" | jq '.result.agents // []')" \
+		--argjson bus "$(printf '%s' "$bus_listing" | jq -s '.')" '
+		[ $agents[]
+		  | select(.name != null and .name != "")
+		  | .name as $n
+		  | ($bus | map(select(.address == ("session/" + $n))) | .[0]) as $lease
+		  | select($lease != null)
+		  | { name: $n,
+		      address: ("session/" + $n),
+		      status: (.agent_status // "unknown"),
+		      cwd: (.cwd // null) }
+		] | { companions: . }') || die "could not join herdr's agents with the bus"
+
+	if [ "$json_out" = 1 ]; then
+		printf '%s\n' "$joined"
+		return 0
+	fi
+
+	if [ "$(printf '%s' "$joined" | jq '.companions | length')" = 0 ]; then
+		printf 'no companions are running\n'
+		return 0
+	fi
+	printf '%s' "$joined" | jq -r '.companions[] | "  \(.name)  \(.status)  \(.cwd)"'
+}
+
 cmd_close() {
 	local requested="" dry_run=0
 
@@ -273,7 +330,8 @@ cmd_close() {
 
 case "${1:-}" in
 spawn) shift; cmd_spawn "$@" ;;
+list) shift; cmd_list "$@" ;;
 close) shift; cmd_close "$@" ;;
-""|-h|--help|help) sed -n '2,30p' "$0" | sed 's/^#\{1,2\} \{0,1\}//' ;;
+""|-h|--help|help) sed -n '2,32p' "$0" | sed 's/^#\{1,2\} \{0,1\}//' ;;
 *) die "unknown command: $1 (try: $PROG help)" ;;
 esac
