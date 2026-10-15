@@ -4,6 +4,10 @@
   "private": true,
   "description": "pi extension that consumes the msgq message bus",
   "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
+  },
   "dependencies": {
     "@russellthehippo/honker-node": "0.5.1"
   }
