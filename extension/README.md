@@ -85,11 +85,24 @@ Record types under `honor`:
 | `prompt` | starts a turn | held, then delivered as one coalesced turn |
 | `steer` | starts a turn | held, then delivered as one coalesced turn |
 | `follow_up` | starts a turn | held, then delivered as one coalesced turn |
+| `command` | runs it, as if typed | queued as follow-up work, never coalesced |
 
 Two extra rules always apply:
 
 - A record whose sender equals the session's own address **never** starts a turn.
 - Unknown record types are shown as display-only.
+
+A `command` record is not content: its body is a command line, delivered as **input**, so the session
+runs it exactly as it would have if it had been typed — a prompt template expands, a skill loads, an
+extension command runs, and anything unrecognized passes through as ordinary text. A command must
+therefore be the whole message, so the sender cannot travel inside it: a note naming them is
+delivered immediately before. And a command is never coalesced, because a batch is one message and a
+command has to be the whole text.
+
+Worth being plain about what that means: dispatching goes **around the model**. A trusted sender can
+run an extension command's code, without anything deliberating in between, and `/skill:x` is
+dispatched even where that skill is marked as belonging to a human's hands. The trusted set was
+already the gate on what may act here; this makes it considerably more load-bearing.
 
 Messages that arrive while the agent is running are **coalesced**: however many arrive
 during a run, they are delivered as a single message and cause at most one more model request.
@@ -152,6 +165,30 @@ trusting everyone who can write the bus.
 
 Wait for them from a shell with `msgq publish --await` or `msgq await <offset>`.
 
+## What a message refers to
+
+A record's id is `<address>#<offset>`: the stream that holds it, and the offset it was assigned
+there. `msgq publish --print-id` prints it, and `--reply-to` accepts one.
+
+When a delivered record carries `reply_to`, the extension resolves the record it names and says so
+before the body, quoting it when it can still be read:
+
+```text
+[msgq] from session/reviewer on session/planner
+[about session/reviewer#7 from session/planner: "review this diff"]
+looks fine to me
+```
+
+This is the same rule for a reply and for an acknowledgement, because both reference the same way —
+so "the answer arrived" and "they finished without answering" are read the same way too. When the
+referenced record is gone, the id is named without a quote and delivery continues.
+
+Two things are deliberate. The line is in the **content**, which the model reads: a session woken
+by an answer has no idea what it is being told about, and the transcript it already has is the
+human's copy, not the model's. And nothing is **remembered**: the reference is resolved at delivery
+straight from the bus, so a reply to a question asked from a shell, by a script, or before this
+session started resolves exactly like one asked a moment ago.
+
 ## Working with other agents
 
 Two tools put the bus in the agent's hands.
@@ -181,9 +218,89 @@ Three options make this work safely:
   with the `peers` tool. Without it a peer answers into its own transcript and the asker waits in
   vain.
 
+A spawn can widen that allowlist with **`accept`**, a comma-separated set of extra senders. The
+parent stays the default, so widening is deliberate:
+
+```
+companions({action:"spawn", name:"reviewer", accept:"cli/ci-bot@host"})
+```
+
+Worth being precise about what that is: `from` is unverified, so the allowlist was never
+authentication. It scopes which senders a shell-capable agent will *routinely* obey, and the real
+boundary is who can write the bus file. Widen it narrowly.
+
+### An exchange always ends
+
+Answering is a convention, not a rule: a peer is told, in the message it receives, to answer with the
+`peers` tool, and nothing enforces it. So two things make sure an exchange ends in words rather than
+in silence.
+
+- **A question that goes unanswered is asked for once more.** When a run is about to stop and the
+  question this session was most recently asked is still unanswered, the extension delivers one more
+  entry: answer it, or reply that nothing needed reporting. Once per question, never after an answer,
+  and the session says so when it happens — so how often the convention needs rescuing is visible
+  from use rather than assumed.
+- **What you send reports its own completion.** Sending asks to be told when the run that included
+  the message ends, so a sender that chose not to wait still learns the peer finished, including when
+  it finished without answering. That report arrives as a notification: it never starts a turn.
+
+Declining is an answer. A peer that looks at a question and decides nothing needed saying has answered
+correctly, and the way to say so is in the entry, so that stopping quietly is a choice rather than a
+hole.
+
+The extension still speaks nothing of its own here: it asks the agent, the agent answers, and the
+reply goes out by the same path every other message this session sends takes.
+
+### Knowing who you are
+
+`peers({action:"list"})` reports the peers, and before them **this session's own identity** — the
+same report a human gets from `/peers me`:
+
+```
+session/planner
+  bus         /Users/me/.pi/agent/msgq/msgq.db
+  follows     session/planner
+  policy      honor
+  presence    registered
+  trust       session/parent
+  reports to  session/parent
+  depth       1 of 2
+```
+
+That answers the questions a delegating agent otherwise guesses at: which address on the roster is
+its own, whether its policy will let a message act at all, who it is allowed to obey, where its
+messages go by default, and whether it may delegate further. A fact that is not configured is
+stated as absent rather than left out, so a session that was never delegated to says so. All of it
+comes from what the session already knows, so it works when the bus does not.
+
 The tools shell out to the `msgq` CLI and the `companion` command, so the wire and the herdr glue
 each live in one place. `MSGQ_BIN` and `MSGQ_COMPANION` point at them when they are not installed on
 `PATH` — which is also how the `spawn` command passes them into a companion.
+
+### The skills it ships
+
+Loading the extension makes two skills available.
+
+**`msgq-notify`** tells the model how a process *outside* the session reaches this one: a shell
+script, a background job, a CI hook, a watcher. It covers finding a session's address, waking it
+with a message, running something detached that reports when it finishes, asking and answering,
+and asking to be told that a message arrived. It also states the two rules that fail silently: a
+session cannot wake itself, because a record whose sender is its own address never starts a turn;
+and a session with a trust list ignores a sender outside it.
+
+**`msgq-delegate`** is the other direction: delegating work to another session, writing a task a
+fresh process can act on, when to block and when to be woken, running several delegates at once,
+and what to do with an answer that arrives from another agent.
+
+Both are advertised by name and description only; their instructions are read when a task calls for
+them, and not otherwise. They live in `extension/skills/` and are declared by the `pi` manifest in
+`extension/package.json`, so loading the extension is what makes them available — and a companion
+spawned with this extension inherits them too. Either can also be loaded on its own:
+
+```bash
+pi --skill ./extension/skills/msgq-notify
+pi --skill ./extension/skills/msgq-delegate
+```
 
 ## Commands for you
 

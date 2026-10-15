@@ -175,13 +175,56 @@ test("the identity report names every fact the session holds", () => {
 		text,
 		[
 			"session/planner",
-			"  bus       /home/me/.pi/agent/msgq/msgq.db",
-			"  follows   session/planner, group/ci",
-			"  policy    honor",
-			"  presence  registered",
-			"  trust     session/parent",
+			"  bus         /home/me/.pi/agent/msgq/msgq.db",
+			"  follows     session/planner, group/ci",
+			"  policy      honor",
+			"  presence    registered",
+			"  trust       session/parent",
+			"  reports to  (none)",
+			"  depth       (none: nobody spawned this session)",
 		].join("\n"),
 	);
+});
+
+test("a delegated session is told where it reports and how deep it is", () => {
+	const text = formatIdentity({
+		self: "session/reviewer-2",
+		bus: "db",
+		addresses: ["session/reviewer-2"],
+		policy: "honor",
+		presence: "registered",
+		trusted: ["session/planner"],
+		reportTo: "session/planner",
+		depth: { depth: 1, cap: 2 },
+	});
+	assert.match(text, /reports to  session\/planner/);
+	assert.match(text, /depth       1 of 2/);
+});
+
+test("a depth with no cap given is still stated", () => {
+	const text = formatIdentity({
+		self: "session/x",
+		bus: "db",
+		addresses: [],
+		policy: "display",
+		presence: "off",
+		trusted: [],
+		depth: { depth: 3 },
+	});
+	assert.match(text, /depth       3$/m);
+});
+
+test("an absent depth is stated as absent, not as zero", () => {
+	const text = formatIdentity({
+		self: "session/x",
+		bus: "db",
+		addresses: [],
+		policy: "display",
+		presence: "off",
+		trusted: [],
+	});
+	assert.match(text, /depth       \(none: nobody spawned this session\)/);
+	assert.doesNotMatch(text, /depth       0/);
 });
 
 test("the identity report distinguishes off from lost", () => {
@@ -192,8 +235,8 @@ test("the identity report distinguishes off from lost", () => {
 		policy: "display",
 		trusted: [],
 	};
-	assert.match(formatIdentity({ ...base, presence: "off" }), /presence  off \(disabled\)/);
-	assert.match(formatIdentity({ ...base, presence: "lost" }), /presence  not registered/);
+	assert.match(formatIdentity({ ...base, presence: "off" }), /presence\s+off \(disabled\)/);
+	assert.match(formatIdentity({ ...base, presence: "lost" }), /presence\s+not registered/);
 });
 
 test("the identity report admits a session with no bus address", () => {
@@ -206,8 +249,8 @@ test("the identity report admits a session with no bus address", () => {
 		trusted: [],
 	});
 	assert.match(text, /\(none: the message bus did not start\)/);
-	assert.match(text, /follows   \(none\)/);
-	assert.match(text, /trust     \(none set: every sender\)/);
+	assert.match(text, /follows\s+\(none\)/);
+	assert.match(text, /trust\s+\(none set: every sender\)/);
 });
 
 test("companion entries parse from one json object", () => {

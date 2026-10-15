@@ -14,7 +14,11 @@ const peers = {
 	self: "session/planner",
 	reportTo: "session/planner",
 	lastInbound: { from: "session/reviewer", offset: 42 },
+	expectCompletion: true,
 };
+
+/** The same session, sending something that did not ask to be told how it ended. */
+const quiet = { ...peers, expectCompletion: false };
 
 function cmd(plan: Command | { error: string }): Command {
 	assert.equal(isError(plan), false, `unexpected error: ${JSON.stringify(plan)}`);
@@ -31,20 +35,83 @@ test("list asks the bus who is reachable", () => {
 test("send publishes a turn-bearing message as this session", () => {
 	assert.deepEqual(cmd(planPeerAction({ action: "send", to: "session/x", message: "hi" }, peers)), {
 		command: "msgq",
-		args: ["publish", "session/x", "hi", "--type", "prompt", "--from", "session/planner"],
+		args: [
+			"publish",
+			"session/x",
+			"hi",
+			"--type",
+			"prompt",
+			"--from",
+			"session/planner",
+			"--ack",
+			"completed",
+		],
 	});
 });
 
-test("send falls back to the reporting address", () => {
-	assert.deepEqual(cmd(planPeerAction({ action: "send", message: "hi" }, peers)).args, [
+test("send asks to be told when the peer's run completes", () => {
+	// A sender that chose not to wait still learns the peer finished, including when it
+	// finished without answering.
+	const args = cmd(planPeerAction({ action: "send", to: "session/x", message: "hi" }, peers)).args;
+	assert.deepEqual(args.slice(-2), ["--ack", "completed"]);
+});
+
+test("a send that did not ask is left alone", () => {
+	// The whole planner is shared with the human's own commands, and a completion report is
+	// for a delegation rather than for every message a person types.
+	assert.deepEqual(cmd(planPeerAction({ action: "send", to: "session/x", message: "hi" }, quiet)).args, [
 		"publish",
-		"session/planner",
+		"session/x",
 		"hi",
 		"--type",
 		"prompt",
 		"--from",
 		"session/planner",
 	]);
+});
+
+test("sending to itself never asks to be told how it ended", () => {
+	// Nothing is being waited on, and the acknowledgement would come straight back.
+	assert.equal(
+		cmd(planPeerAction({ action: "send", to: "session/planner", message: "hi" }, peers)).args.includes("--ack"),
+		false,
+	);
+});
+
+test("asking and replying are unchanged", () => {
+	// An ask already requests the whole lifecycle; a reply is an answer, not a request.
+	assert.equal(
+		cmd(planPeerAction({ action: "ask", to: "session/x", message: "hi" }, peers)).args.includes("--ack"),
+		false,
+	);
+	assert.equal(
+		cmd(planPeerAction({ action: "reply", message: "ok" }, peers)).args.includes("--ack"),
+		false,
+	);
+});
+
+test("send falls back to the reporting address", () => {
+	const plan = cmd(
+		planPeerAction({ action: "send", message: "hi" }, { ...peers, reportTo: "session/parent" }),
+	);
+	assert.deepEqual(plan.args, [
+		"publish",
+		"session/parent",
+		"hi",
+		"--type",
+		"prompt",
+		"--from",
+		"session/planner",
+		"--ack",
+		"completed",
+	]);
+});
+
+test("a fallback that lands on this session does not ask to be told either", () => {
+	assert.equal(
+		cmd(planPeerAction({ action: "send", message: "hi" }, peers)).args.includes("--ack"),
+		false,
+	);
 });
 
 test("send without a recipient or a message is refused", () => {
@@ -187,4 +254,71 @@ test("close names the companion", () => {
 	assert.ok(
 		isError(planCompanionAction({ action: "close" }, { companionBin: "companion", self: "x" })),
 	);
+});
+
+test("a spawn trusts the parent alone by default", () => {
+	assert.deepEqual(
+		cmd(planCompanionAction({ action: "spawn", name: "reviewer" }, { companionBin: "companion", self: "session/p" })).args,
+		["spawn", "reviewer", "--parent", "session/p", "--json"],
+	);
+});
+
+test("a spawn widens the trusted set when asked", () => {
+	const plan = cmd(
+		planCompanionAction(
+			{ action: "spawn", name: "reviewer", accept: "cli/second@test,group/family" },
+			{ companionBin: "companion", self: "session/p" },
+		),
+	);
+	assert.deepEqual(plan.args, [
+		"spawn",
+		"reviewer",
+		"--parent",
+		"session/p",
+		"--json",
+		"--accept",
+		"cli/second@test,group/family",
+	]);
+});
+
+test("a spawn carries the working directory and the trusted set together", () => {
+	const plan = cmd(
+		planCompanionAction(
+			{ action: "spawn", name: "reviewer", cwd: "/src/api", accept: "cli/ci@host" },
+			{ companionBin: "companion", self: "session/p" },
+		),
+	);
+	assert.deepEqual(plan.args.slice(-4), ["--cwd", "/src/api", "--accept", "cli/ci@host"]);
+});
+
+test("send can carry a command instead of a message", () => {
+	const plan = cmd(
+		planPeerAction({ action: "send", to: "session/x", message: "/harsh-review the parser", command: true }, peers),
+	);
+	assert.deepEqual(plan.args, [
+		"publish",
+		"session/x",
+		"/harsh-review the parser",
+		"--type",
+		"command",
+		"--from",
+		"session/planner",
+		"--ack",
+		"completed",
+	]);
+});
+
+test("asking a command is refused, and the refusal names the fix", () => {
+	const plan = planPeerAction({ action: "ask", to: "session/x", message: "/harsh-review", command: true }, peers);
+	assert.equal(isError(plan), true);
+	assert.match(
+		(plan as { error: string }).error,
+		/put the request for an answer in its own arguments/,
+	);
+});
+
+test("only sending takes a command", () => {
+	const plan = planPeerAction({ action: "reply", message: "ok", command: true }, peers);
+	assert.equal(isError(plan), true);
+	assert.match((plan as { error: string }).error, /only 'send' takes a command/);
 });

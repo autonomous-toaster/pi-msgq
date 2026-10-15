@@ -3,7 +3,7 @@
 // No host imports on purpose: the commands are thin, and everything they decide
 // on their own is decided here, where it is unit-testable without a session.
 
-import { canonicalizeAddress } from "./config.ts";
+import { canonicalizeAddress, type DelegationDepth } from "./config.ts";
 
 /** A resolved address, or why one could not be resolved. */
 export type Resolved = { ok: true; address: string } | { ok: false; reason: string };
@@ -147,6 +147,10 @@ export interface IdentityFacts {
 	policy: string;
 	presence: "registered" | "lost" | "off";
 	trusted: string[];
+	/** The recipient this session's messages go to when none is named, when one is set. */
+	reportTo?: string;
+	/** The delegation depth this session was started at, when somebody started it. */
+	depth?: DelegationDepth;
 }
 
 /** How presence reads in the identity report. */
@@ -154,6 +158,11 @@ function presenceText(presence: IdentityFacts["presence"]): string {
 	if (presence === "registered") return "registered";
 	if (presence === "off") return "off (disabled)";
 	return "not registered";
+}
+
+/** How a delegation depth reads: how deep, and the cap it was told about. */
+function depthText(depth: DelegationDepth): string {
+	return depth.cap === undefined ? `${depth.depth}` : `${depth.depth} of ${depth.cap}`;
 }
 
 /**
@@ -167,6 +176,9 @@ export function formatIdentity(facts: IdentityFacts): string {
 		["policy", facts.policy],
 		["presence", presenceText(facts.presence)],
 		["trust", facts.trusted.length > 0 ? facts.trusted.join(", ") : "(none set: every sender)"],
+		// Stated even when absent: a reader who never sees the row cannot know it exists.
+		["reports to", facts.reportTo || "(none)"],
+		["depth", facts.depth ? depthText(facts.depth) : "(none: nobody spawned this session)"],
 	];
 	const width = Math.max(...rows.map(([label]) => label.length));
 	const header = facts.self || "(none: the message bus did not start)";

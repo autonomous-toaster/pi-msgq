@@ -893,17 +893,32 @@ async function scenarioDelegate() {
 async function scenarioCommandSurface() {
 	const { child, send } = startPi();
 	const { data } = await send({ id: "c", type: "get_commands" });
-	// Other extensions are loaded from the user's own config; this one is the one
-	// living in this checkout.
-	const mine = data.commands.filter((entry) => entry.sourceInfo?.path === EXTENSION);
-	const names = mine.map((entry) => entry.name).sort();
-	const described = mine.every((entry) => String(entry.description ?? "").length > 20);
+	// Other extensions come from the user's own config. A directory `-e` resolves through the
+	// package manifest, so what this checkout contributes is a path that is the extension
+	// directory or lives inside it — the extension itself, and the skill it ships.
+	const ours = data.commands.filter((entry) => {
+		const path = String(entry.sourceInfo?.path ?? "");
+		return path === EXTENSION || path.startsWith(`${EXTENSION}/`);
+	});
+	const commands = ours
+		.filter((entry) => entry.source === "extension")
+		.map((entry) => entry.name)
+		.sort();
+	const skills = ours
+		.filter((entry) => entry.source === "skill")
+		.map((entry) => entry.name)
+		.sort();
+	const described = ours.every((entry) => String(entry.description ?? "").length > 20);
 	shutdown(child);
 
+	const ok =
+		JSON.stringify(commands) === JSON.stringify(["companions", "peer", "peers", "reply"]) &&
+		JSON.stringify(skills) === JSON.stringify(["skill:msgq-delegate", "skill:msgq-notify"]) &&
+		described;
 	report(
 		"command-surface",
-		JSON.stringify(names) === JSON.stringify(["companions", "peer", "peers", "reply"]) && described,
-		`commands=${JSON.stringify(names)} described=${described}`,
+		ok,
+		`commands=${JSON.stringify(commands)} skills=${JSON.stringify(skills)} described=${described}`,
 	);
 }
 
@@ -1364,6 +1379,442 @@ async function scenarioCommandWithoutHerdr() {
 	);
 }
 
+async function scenarioReferenceQuoted() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-ref-")), "msgq.db");
+	const session = startPi([], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+
+	// The referenced record, in the stream named by the sender that will refer to it.
+	const id = execFileSync(
+		CLI,
+		["--db", own, "publish", "cli/asker", "review this diff", "--from", "cli/asker", "--print-id"],
+		{ encoding: "utf8" },
+	).trim();
+
+	// The referencing record, sent from the same address, so the reference is exact.
+	// A note, so the default display policy shows it without starting a turn.
+	execFileSync(CLI, [
+		"--db", own, "publish", address, "looks fine to me",
+		"--from", "cli/asker", "--type", "note", "--reply-to", id,
+	]);
+	await wait(2500);
+
+	const { data } = await session.send({ id: "e", type: "get_entries" });
+	const { custom } = split(data.entries);
+	const content = String(custom[0]?.content ?? "");
+	shutdown(session.child);
+
+	const expected = `[about ${id} from cli/asker: "review this diff"]`;
+	const ok = custom.length === 1 && content.includes(expected);
+	report("reference-quoted", ok, `id=${id} content=${JSON.stringify(content)}`);
+}
+
+async function scenarioReferenceAck() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-refack-")), "msgq.db");
+	const session = startPi([], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+
+	// The record being acknowledged, in the stream named by the address that acknowledges it.
+	const id = execFileSync(
+		CLI,
+		["--db", own, "publish", "cli/asker", "run the suite", "--from", "cli/asker", "--print-id"],
+		{ encoding: "utf8" },
+	).trim();
+	const offset = Number(id.split("#")[1]);
+
+	const ack = JSON.stringify({
+		v: 1,
+		type: "event",
+		from: "cli/asker",
+		to: address,
+		reply_to: offset,
+		event: { kind: "ack", phase: "completed", outcome: "ok" },
+	});
+	execFileSync(CLI, ["--db", own, "publish", address, "--json", ack]);
+	await wait(2500);
+
+	const { data } = await session.send({ id: "e", type: "get_entries" });
+	const { custom } = split(data.entries);
+	const content = String(custom[0]?.content ?? "");
+	shutdown(session.child);
+
+	// An acknowledgement references the same way a reply does, so progress is read the
+	// same way an answer is.
+	const expected = `[about ${id} from cli/asker: "run the suite"]`;
+	const ok = content.includes(expected);
+	report("reference-ack", ok, `id=${id} content=${JSON.stringify(content)}`);
+}
+
+async function scenarioReferenceDangling() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-refgone-")), "msgq.db");
+	const session = startPi([], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+
+	// Nothing is at that offset in the sender's stream.
+	execFileSync(CLI, [
+		"--db", own, "publish", address, "who is this?",
+		"--from", "cli/asker", "--type", "note", "--reply-to", "cli/asker#99",
+	]);
+	await wait(2500);
+
+	const { data } = await session.send({ id: "e", type: "get_entries" });
+	const { custom } = split(data.entries);
+	const content = String(custom[0]?.content ?? "");
+	const alive = await session.send({ id: "a", type: "get_state" });
+	shutdown(session.child);
+
+	const ok =
+		custom.length === 1 &&
+		content.includes("[about cli/asker#99]") &&
+		!content.includes('from cli/asker:') &&
+		alive.success === true;
+	report("reference-dangling", ok, `content=${JSON.stringify(content)} alive=${alive.success}`);
+}
+
+async function scenarioNotifyWakes() {
+	// The skill's pattern, walked without an agent in the loop: a process that is not the
+	// session publishes to it, from its own address, and the session is woken.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-notify-")), "msgq.db");
+	const session = startPi(["--msgq-policy", "honor"], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+	console.log("session:", address, "policy: honor (a job wakes it)");
+
+	execFileSync(CLI, [
+		"--db", own, "publish", address, "the background job finished",
+		"--from", "cli/bg@test", "--type", "steer",
+	]);
+	await session.waitForEvent("agent_settled", 90_000);
+	await wait(1500);
+
+	const { data } = await session.send({ id: "e", type: "get_entries" });
+	const { custom, assistants } = split(data.entries);
+	const woken = custom.some((entry) => String(entry.content).includes("the background job finished"));
+	shutdown(session.child);
+
+	report(
+		"notify-wakes",
+		woken && assistants.length >= 1,
+		`woken=${woken} assistants=${assistants.length}`,
+	);
+}
+
+/** The text the peers tool returned, from the session's own transcript. */
+async function peersToolText(session) {
+	const { data } = await session.send({ id: "e", type: "get_entries" });
+	return data.entries
+		.filter(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message?.role === "toolResult" &&
+				entry.message?.toolName === "peers",
+		)
+		.flatMap((entry) => entry.message.content ?? [])
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+}
+
+async function scenarioDelegateIdentity() {
+	// The tool path needs a model: nothing in RPC calls a tool directly.
+	const asked =
+		'Call the peers tool with action "list". Then reply with the first line of what it returned, verbatim.';
+
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-ident-")), "msgq.db");
+	const named = startPi(["--name", "planner"], { MSGQ_DB: own }, { noTools: false });
+	named.child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: asked })}\n`);
+	await named.waitForEvent("agent_settled", 180_000);
+	await wait(1500);
+	const namedText = await peersToolText(named);
+	shutdown(named.child);
+
+	// The same tool where the bus cannot be read at all: the session still knows who it is.
+	const dir = mkdtempSync(resolve(tmpdir(), "msgq-identbad-"));
+	const blocker = resolve(dir, "not-a-dir");
+	writeFileSync(blocker, "x");
+	const lonely = startPi(["--name", "lonely"], { MSGQ_DB: resolve(blocker, "msgq.db") }, {
+		noTools: false,
+	});
+	lonely.child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: asked })}\n`);
+	await lonely.waitForEvent("agent_settled", 180_000);
+	await wait(1500);
+	const lonelyText = await peersToolText(lonely);
+	shutdown(lonely.child);
+
+	const ok =
+		namedText.includes("session/planner") &&
+		namedText.includes("  bus ") &&
+		namedText.includes("  depth ") &&
+		// The roster is the tab-separated `msgq sessions` output, and it comes after.
+		namedText.includes("\t") &&
+		namedText.indexOf("  bus ") < namedText.indexOf("\t") &&
+		lonelyText.includes("session/lonely") &&
+		lonelyText.includes("  depth ");
+	report(
+		"delegate-identity",
+		ok,
+		`named=${JSON.stringify(namedText.slice(0, 180))} lonely=${JSON.stringify(lonelyText.slice(0, 140))}`,
+	);
+}
+
+async function scenarioDelegateDepth() {
+	// A live spawn, and the delegate asked what it is allowed to do. It is the one thing
+	// the dry run cannot show: whether the cap actually reaches the child.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-depth-")), "msgq.db");
+	const companion = resolve(REPO, "companion/companion");
+	const env = {
+		...process.env,
+		MSGQ_DB: own,
+		MSGQ_BIN: CLI,
+		MSGQ_COMPANION: companion,
+		MSGQ_SPAWN_EXTRA: `-e ${resolve(REPO, "extension")}`,
+	};
+	execFileSync(companion, ["spawn", "helper", "--parent", "session/probe", "--json"], {
+		env,
+		encoding: "utf8",
+	});
+
+	let answer = "";
+	try {
+		answer = execFileSync(
+			CLI,
+			[
+				"--db", own, "ask", "session/helper",
+				"Run the peers tool with action 'list', then answer with just the depth line from its output.",
+				"--from", "session/probe", "--timeout", "240",
+			],
+			{ encoding: "utf8" },
+		);
+	} catch (error) {
+		answer = String(error.stdout ?? "");
+	}
+	try {
+		execFileSync(companion, ["close", "helper"], { env, encoding: "utf8" });
+	} catch {
+		/* already gone */
+	}
+
+	// Depth 1, and the cap it was told about, rather than discovering it by being refused.
+	const ok = /1 of 1/.test(answer);
+	report("delegate-depth", ok, `answer=${JSON.stringify(answer.trim().slice(0, 200))}`);
+}
+
+async function scenarioDelegateTrust() {
+	// A spawned companion's trusted set, read from its own acknowledgements rather than by
+	// waiting on a model: `delivery=turn` means it acted, `delivery=display` means it did not.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-dtrust-")), "msgq.db");
+	const companion = resolve(REPO, "companion/companion");
+	const env = {
+		...process.env,
+		MSGQ_DB: own,
+		MSGQ_BIN: CLI,
+		MSGQ_COMPANION: companion,
+		MSGQ_SPAWN_EXTRA: `-e ${resolve(REPO, "extension")}`,
+	};
+	// Trusting its parent and one other sender; following a topic it is not told to trust.
+	execFileSync(
+		companion,
+		[
+			"spawn", "helper", "--parent", "session/probe",
+			"--accept", "cli/second@test", "--topics", "group/watch", "--json",
+		],
+		{ env, encoding: "utf8" },
+	);
+
+	const delivery = (address, from, message) => {
+		// `received` is terminal for a display delivery and not for a turn, so `completed` is
+		// asked for too: the trusted case then waits for the turn instead of for a timeout.
+		const record = JSON.stringify({
+			v: 1, type: "prompt", from, to: address, message, meta: { ack: "received,completed" },
+		});
+		try {
+			return execFileSync(
+				CLI,
+				["--db", own, "publish", address, "--json", record, "--await", "--timeout", "120"],
+				{ encoding: "utf8" },
+			);
+		} catch (error) {
+			return String(error.stdout ?? "");
+		}
+	};
+
+	// A bounded instruction: the trusted case really does start a turn in the companion, and a
+	// vague body would leave a real agent free to improvise in this working tree.
+	const trusted = delivery("session/helper", "cli/second@test", "Reply with exactly: ok. Nothing else.");
+	const untrusted = delivery("session/helper", "cli/third@test", "from a sender it does not");
+	// The topic it follows but was never told to trust.
+	const watched = delivery("group/watch", "cli/third@test", "watched, not obeyed");
+
+	try {
+		execFileSync(companion, ["close", "helper"], { env, encoding: "utf8" });
+	} catch {
+		/* already gone */
+	}
+
+	const ok =
+		trusted.includes("delivery=turn") &&
+		untrusted.includes("delivery=display") &&
+		watched.includes("delivery=display");
+	report(
+		"delegate-trust",
+		ok,
+		`trusted=${JSON.stringify(trusted.trim())} untrusted=${JSON.stringify(untrusted.trim())} watched=${JSON.stringify(watched.trim())}`,
+	);
+}
+
+async function scenarioCompletionOwed() {
+	// A peer with no tools cannot answer, so the question it was asked is guaranteed to survive the
+	// run: the case the nudge exists for, made deterministic. What is asserted is the mechanism —
+	// one entry, once — not the model's compliance.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-owed-")), "msgq.db");
+	const session = startPi(["--msgq-policy", "honor"], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+
+	// A question, in the shape `ask` publishes one.
+	const record = JSON.stringify({
+		v: 1, type: "prompt", from: "cli/asker@test", to: address,
+		message: "What is the capital of France?", meta: { reply: true },
+	});
+	execFileSync(CLI, ["--db", own, "publish", address, "--json", record]);
+	await session.waitForEvent("agent_settled", 120_000);
+
+	// The nudge should follow, and a second run with it.
+	const entries = async () => (await session.send({ id: `e${Date.now()}`, type: "get_entries" })).data.entries;
+	let nodges = [];
+	for (let i = 0; i < 60; i++) {
+		await wait(1000);
+		nodges = (await entries()).filter(
+			(entry) => entry.type === "custom_message" && String(entry.content).includes("asked you a question"),
+		);
+		if (nodges.length > 0) break;
+	}
+	// Give the run the nudge caused time to finish, so a second one could have appeared.
+	await wait(15_000);
+
+	const all = await entries();
+	shutdown(session.child);
+	const finalNudges = all.filter(
+		(entry) => entry.type === "custom_message" && String(entry.content).includes("asked you a question"),
+	);
+	const assistants = all.filter(
+		(entry) => entry.type === "message" && entry.message?.role === "assistant",
+	);
+
+	const ok = finalNudges.length === 1 && assistants.length >= 2;
+	// It also says so, so how often the convention needs rescuing is knowable from use.
+	const said = session.ui.some(
+		(record) => record.method === "notify" && String(record.message).includes("asked for the answer owed"),
+	);
+	report(
+		"completion-owed",
+		ok && said,
+		`nudges=${finalNudges.length} assistants=${assistants.length} said=${said}`,
+	);
+}
+
+async function scenarioCompletionReported() {
+	// Exactly the record the peers tool now sends: a message that asks when the peer's run completes.
+	// The peer cannot reply (no tools), so what arrives is the completion and nothing else.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-done-")), "msgq.db");
+	const session = startPi(["--msgq-policy", "honor"], { MSGQ_DB: own });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+
+	const record = JSON.stringify({
+		v: 1, type: "prompt", from: "cli/asker@test", to: address,
+		message: "Say ok, and do not reply.", meta: { ack: "completed" },
+	});
+	let out = "";
+	try {
+		out = execFileSync(
+			CLI,
+			["--db", own, "publish", address, "--json", record, "--await", "--timeout", "120"],
+			{ encoding: "utf8" },
+		);
+	} catch (error) {
+		out = String(error.stdout ?? "");
+	}
+	shutdown(session.child);
+
+	// The report is a notification: the sender learns the run completed, and nothing wakes it.
+	const ok = out.includes("completed") && out.includes("outcome=ok");
+	report("completion-reported", ok, `out=${JSON.stringify(out.trim())}`);
+}
+
+async function scenarioDispatchCommand() {
+	// A command is dispatched, not described. `/peers me` is an extension command, so it runs
+	// immediately and starts no turn: the proof that this was input rather than content.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-dispatch-")), "msgq.db");
+	const session = startPi(["--msgq-policy", "honor", "--msgq-trust", "session/parent"], {
+		MSGQ_DB: own,
+	});
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+
+	const command = (from, body, ack) => {
+		const record = { v: 1, type: "command", from, to: address, message: body };
+		if (ack) record.meta = { ack };
+		const args = ["--db", own, "publish", address, "--json", JSON.stringify(record)];
+		// Only waiting when something was asked for: a completion is what --await waits on.
+		if (ack) args.push("--await", "--timeout", "60");
+		try {
+			return execFileSync(CLI, args, { encoding: "utf8" });
+		} catch (error) {
+			return String(error.stdout ?? "");
+		}
+	};
+
+	// An extension command runs at once, and starts no turn of its own.
+	command("session/parent", "/peers me");
+	await wait(2500);
+	const ran = session.ui.some(
+		(record) => record.method === "notify" && String(record.message).includes("  bus "),
+	);
+
+	// A skill command expands into the prompt the session then runs. A second command, published
+	// while that run is in flight, must be queued and still run — not gathered into a batch, where
+	// it would stop being a command.
+	command("session/parent", "/skill:msgq-delegate");
+	command("session/parent", "/peers me");
+	await session.waitForEvent("agent_settled", 180_000);
+	await wait(3000);
+
+	const { data } = await session.send({ id: "e", type: "get_entries" });
+	const entries = data.entries;
+	const ranReports = session.ui.filter(
+		(record) => record.method === "notify" && String(record.message).includes("  bus "),
+	).length;
+	const noteAt = entries.findIndex(
+		(entry) =>
+			entry.type === "custom_message" &&
+			String(entry.content).includes("the command that follows comes from them"),
+	);
+	const skillAt = entries.findIndex(
+		(entry) =>
+			entry.type === "message" &&
+			entry.message?.role === "user" &&
+			JSON.stringify(entry.message.content).includes("msgq-delegate"),
+	);
+
+	// An untrusted sender's command is shown, and nothing runs.
+	const refused = command("cli/stranger@test", "/peers me", "received");
+	shutdown(session.child);
+
+	// The note is delivered before the command, since a command cannot carry its sender. And the
+	// second command ran, which a buffered one could not have.
+	const ok =
+		ran && ranReports >= 2 && noteAt >= 0 && skillAt > noteAt && refused.includes("delivery=display");
+	report(
+		"dispatch-command",
+		ok,
+		`ran=${ran} ranReports=${ranReports} noteAt=${noteAt} skillAt=${skillAt} refused=${JSON.stringify(refused.trim())}`,
+	);
+}
+
 const scenario = process.argv[2];
 if (scenario === "default-note") await scenarioDefaultNote();
 else if (scenario === "honor-prompt") await scenarioHonorPrompt();
@@ -1401,6 +1852,16 @@ else if (scenario === "command-no-dialog") await scenarioCommandNoDialog();
 else if (scenario === "companion-list") await scenarioCompanionList();
 else if (scenario === "command-companions") await scenarioCommandCompanions();
 else if (scenario === "command-without-herdr") await scenarioCommandWithoutHerdr();
+else if (scenario === "reference-quoted") await scenarioReferenceQuoted();
+else if (scenario === "reference-ack") await scenarioReferenceAck();
+else if (scenario === "reference-dangling") await scenarioReferenceDangling();
+else if (scenario === "notify-wakes") await scenarioNotifyWakes();
+else if (scenario === "delegate-identity") await scenarioDelegateIdentity();
+else if (scenario === "delegate-depth") await scenarioDelegateDepth();
+else if (scenario === "delegate-trust") await scenarioDelegateTrust();
+else if (scenario === "completion-owed") await scenarioCompletionOwed();
+else if (scenario === "completion-reported") await scenarioCompletionReported();
+else if (scenario === "dispatch-command") await scenarioDispatchCommand();
 else {
 	console.error(
 		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|delegate|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog|companion-list|command-companions|command-without-herdr>",

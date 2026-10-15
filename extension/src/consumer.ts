@@ -172,6 +172,28 @@ export class Bus {
 	}
 
 	/**
+	 * Read one record at a known offset, without subscribing.
+	 *
+	 * Offsets are global to the database, so a single stream's offsets are sparse: asking
+	 * for the records after `offset - 1` can return a later one. What comes back is
+	 * therefore compared against the offset asked for, and a mismatch means the record is
+	 * not in that stream.
+	 *
+	 * This advances no cursor and takes responsibility for nothing: it is how a reference
+	 * is resolved to the record it names, and resolving one must not acknowledge or
+	 * redeliver anything.
+	 */
+	readOne(address: string, offset: number): BusEvent | undefined {
+		if (this.closed || offset < 0) return undefined;
+		try {
+			const event = this.db.stream(address).readSince(Math.max(0, offset - 1), 1)[0];
+			return event && event.offset === offset ? event : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
 	 * Acquire a lease. Returns undefined when the name is already held by
 	 * someone else, which the holder must treat as "not registered".
 	 */

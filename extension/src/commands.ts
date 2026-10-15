@@ -31,6 +31,8 @@ export interface CommandDeps {
 	companionBin(): string;
 	/** The message this session received most recently, for replies. */
 	lastInbound(): { from: string; offset: number } | undefined;
+	/** A reply went out for the message at this offset, so nothing is owed for it. */
+	answered(offset: number): void;
 }
 
 /** A command needs a dialog, and this session cannot show one. */
@@ -117,22 +119,23 @@ async function runSend(
 	deps: CommandDeps,
 	plan: { command: string; args: string[] },
 	checkRecipient: boolean,
-): Promise<void> {
+): Promise<boolean> {
 	const result = await runPlanned(pi, plan, { binEnv: "MSGQ_BIN" });
 	if (!result.ok) {
 		say(ctx, `could not send: ${result.text}`, "warning");
-		return;
+		return false;
 	}
 	const address = plan.args[1] ?? "";
 	say(ctx, `sent to ${address}`);
 
-	if (!checkRecipient) return;
+	if (!checkRecipient) return true;
 	// The message is durable, but a consumer that starts later begins at the head
 	// of its stream, so "nobody is listening" is worth saying out loud.
 	const roster = await readRoster(pi, ctx, deps);
 	if (roster && !roster.some((entry) => entry.address === address)) {
 		say(ctx, `nothing is listening at ${address} right now`, "warning");
 	}
+	return true;
 }
 
 /**
@@ -172,17 +175,22 @@ async function sendReply(
 	deps: CommandDeps,
 	message: string,
 ): Promise<void> {
+	const inbound = deps.lastInbound();
+	if (!inbound) return;
 	const self = deps.identity().self;
 	const plan = planPeerAction(
 		{ action: "reply", message },
-		{ msgqBin: deps.msgqBin(), self, reportTo: undefined, lastInbound: deps.lastInbound() },
+		{ msgqBin: deps.msgqBin(), self, reportTo: undefined, lastInbound: inbound },
 	);
 	if (isError(plan)) {
 		say(ctx, plan.error, "warning");
 		return;
 	}
 	// The recipient just wrote to us, so there is nobody to warn about.
-	await runSend(pi, ctx, deps, plan, false);
+	if (await runSend(pi, ctx, deps, plan, false)) {
+		// The question this session owed an answer to is settled.
+		deps.answered(inbound.offset);
+	}
 }
 
 /** Register the four commands. Called once, as the extension is loaded. */

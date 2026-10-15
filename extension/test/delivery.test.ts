@@ -4,7 +4,10 @@ import { test } from "node:test";
 import {
 	Coalescer,
 	formatBatch,
+	formatCommandNote,
 	formatMessage,
+	formatOwed,
+	formatReference,
 	planDelivery,
 	wantsReply,
 } from "../src/delivery.ts";
@@ -74,6 +77,41 @@ test("a record asking for an answer carries a reply hint", () => {
 	assert.doesNotMatch(formatMessage(plain, "group/a"), /peers tool/);
 });
 
+test("a reference names the record it refers to, and quotes it", () => {
+	assert.equal(
+		formatReference({
+			id: "session/reviewer#7",
+			record: record({ from: "session/planner", message: "review this diff" }),
+		}),
+		'[about session/reviewer#7 from session/planner: "review this diff"]',
+	);
+});
+
+test("a reference that cannot be read still names the id", () => {
+	// The reader can at least tell that something is being answered.
+	assert.equal(formatReference({ id: "session/reviewer#7" }), "[about session/reviewer#7]");
+});
+
+test("a referenced record with no body is named without a quote", () => {
+	assert.equal(
+		formatReference({
+			id: "cli/x#3",
+			record: record({ from: "cli/x", type: "event", message: undefined }),
+		}),
+		"[about cli/x#3 from cli/x]",
+	);
+});
+
+test("a quoted body stays on one line", () => {
+	assert.equal(
+		formatReference({
+			id: "cli/x#3",
+			record: record({ from: "cli/x", message: "one\n   two" }),
+		}),
+		'[about cli/x#3 from cli/x: "one two"]',
+	);
+});
+
 test("messages carry provenance", () => {
 	const text = formatMessage(record(), "group/a");
 	assert.match(text, /cli\/alice@mac/);
@@ -118,4 +156,52 @@ test("batch rendering lists every record with provenance", () => {
 	assert.match(text, /cli\/b@h/);
 	assert.match(text, /one/);
 	assert.match(text, /two/);
+});
+
+test("the entry for an owed answer names the question and both ways out", () => {
+	// Declining has to be offered, or the entry teaches that silence is a bug.
+	const text = formatOwed({ from: "session/planner", id: "session/planner#7" });
+	assert.match(text, /session\/planner asked you a question \(session\/planner#7\)/);
+	assert.match(text, /peers tool/);
+	assert.match(text, /nothing needed reporting/);
+	assert.match(text, /Do not simply stop/);
+});
+
+test("a command is planned for dispatch, never for a batch", () => {
+	const command = record({ type: "command", message: "/harsh-review the parser" });
+	assert.equal(planDelivery(command, "honor", SELF, false), "dispatch");
+	// Even mid-run: a batch is one message, and a command has to be the whole text.
+	assert.equal(planDelivery(command, "honor", SELF, true), "dispatch");
+});
+
+test("a command is gated exactly like anything else that acts", () => {
+	const command = record({ type: "command", message: "/harsh-review" });
+	assert.equal(planDelivery(command, "display", SELF, false), "display");
+	assert.equal(planDelivery({ ...command, from: SELF }, "honor", SELF, false), "display");
+	assert.equal(
+		planDelivery(command, "honor", SELF, false, ["session/parent"]),
+		"display",
+		"an untrusted sender's command must not run",
+	);
+	assert.equal(
+		planDelivery({ ...command, message: "" }, "honor", SELF, false),
+		"display",
+	);
+});
+
+test("the note before a command says who is speaking", () => {
+	const text = formatCommandNote(record({ type: "command", from: "session/planner" }), "session/reviewer");
+	assert.match(text, /\[msgq\] from session\/planner on session\/reviewer/);
+	// The distinction provenance exists for: the next message is not the user's.
+	assert.match(text, /not from your user/);
+	// The body itself is not repeated here; it is the command.
+	assert.doesNotMatch(text, /hello/);
+});
+
+test("the note before a command carries a reference too", () => {
+	const text = formatCommandNote(record({ from: "session/planner" }), "session/reviewer", {
+		id: "session/planner#4",
+		record: record({ from: "session/reviewer", message: "run this" }),
+	});
+	assert.match(text, /\[about session\/planner#4 from session\/reviewer: "run this"\]/);
 });

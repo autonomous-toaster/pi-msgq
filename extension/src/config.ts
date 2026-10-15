@@ -47,6 +47,53 @@ export function canonicalizeAddress(input: string): string {
 	return `${scheme}/${rest}`;
 }
 
+/**
+ * The separator between the address and the offset in a record id. Mirrors the
+ * CLI's `address::ID_SEPARATOR`: one convention, spelled the same in both.
+ */
+export const ID_SEPARATOR = "#";
+
+/**
+ * Form a record id: the address whose stream holds the record, then its offset.
+ *
+ * Derived, never stored, and shared with the CLI's `address::record_id` — the same
+ * convention in two places, like the address grammar above.
+ */
+export function recordId(address: string, offset: number): string {
+	return `${address}${ID_SEPARATOR}${offset}`;
+}
+
+/** The delegation depth a session was started at, and the cap it was told about. */
+export interface DelegationDepth {
+	depth: number;
+	/** Absent when the cap was not passed along with the depth. */
+	cap?: number;
+}
+
+/** A non-negative whole number, or undefined. */
+function parseCount(raw: string | undefined): number | undefined {
+	const value = raw?.trim();
+	if (!value) return undefined;
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed < 0) return undefined;
+	return parsed;
+}
+
+/**
+ * Read the delegation depth out of the environment.
+ *
+ * `companion spawn` sets `MSGQ_DEPTH` for the agent it starts and passes the cap alongside it,
+ * so a delegate can tell whether it may delegate before it tries. A session nobody spawned has
+ * neither, and its depth is absent rather than zero.
+ */
+export function parseDepth(
+	env: Record<string, string | undefined>,
+): DelegationDepth | undefined {
+	const depth = parseCount(env.MSGQ_DEPTH);
+	if (depth === undefined) return undefined;
+	return { depth, cap: parseCount(env.COMPANION_MAX_DEPTH) };
+}
+
 /** Parse a comma-separated address list, canonicalizing and de-duplicating. */
 export function parseTopics(raw: string | undefined | null): string[] {
 	if (!raw) return [];

@@ -129,6 +129,45 @@ test("two consumers advance independently", async () => {
 	bus.close();
 });
 
+test("a single record can be read at a known offset without consuming", () => {
+	const db = tempDb();
+	// Offsets are global to the database, so a stream's are sparse: publishing to another
+	// stream in between is what makes the offset check below mean something.
+	const first = publish(db, "group/a", "the question");
+	publish(db, "group/b", "unrelated");
+	const later = publish(db, "group/a", "later");
+	assert.notEqual(later, first + 1, "the offsets in this fixture must be sparse");
+
+	const bus = new Bus(db, INTERVAL);
+	const sub = bus.subscribe(
+		"group/a",
+		"c1",
+		() => {},
+		(error) => {
+			throw error;
+		},
+	);
+	const reader = native.open(db, { watcherPollIntervalMs: INTERVAL });
+	const before = reader.stream("group/a").getOffset("c1");
+
+	const found = bus.readOne("group/a", first);
+	assert.equal((found?.payload as any).message, "the question");
+
+	// An offset that belongs to another stream, or to no record at all, is not this
+	// stream's record, and must not be mistaken for the one that was asked for.
+	assert.equal(bus.readOne("group/a", first + 1), undefined);
+	assert.equal(bus.readOne("group/b", first), undefined);
+	assert.equal(
+		reader.stream("group/a").getOffset("c1"),
+		before,
+		"reading must not advance a cursor",
+	);
+
+	reader.close();
+	sub.close();
+	bus.close();
+});
+
 test("resumes from the saved cursor after reopening", async () => {
 	const db = tempDb();
 

@@ -24,6 +24,8 @@ export interface PeerParams {
 	to?: string;
 	message?: string;
 	timeoutSeconds?: number;
+	/** Send a command for the peer to run, instead of a message for it to read. */
+	command?: boolean;
 }
 
 /** What the peers planner needs to know about this session. */
@@ -36,6 +38,8 @@ export interface PeerContext {
 	reportTo?: string;
 	/** The most recently received message, for replies. */
 	lastInbound?: { from: string; offset: number };
+	/** Whether an outbound message should ask to be told when the peer's run completes. */
+	expectCompletion?: boolean;
 }
 
 /** Default window for ask, in seconds. */
@@ -54,6 +58,18 @@ export function planPeerAction(params: PeerParams, context: PeerContext): Comman
 	if (action === "list") {
 		return { command: context.msgqBin, args: ["sessions"] }; // needs no identity
 	}
+
+	// A command must be the whole message, so nothing can be wrapped around it: not a reply
+	// instruction, and not a question. Only sending one makes sense.
+	if (params.command && action !== "send") {
+		return {
+			error:
+			action === "ask"
+				? "a command cannot be asked: a command has to be the whole message, so put the request for an answer in its own arguments"
+				: "only 'send' takes a command",
+		};
+	}
+
 	if (!context.self) return { error: NO_IDENTITY };
 
 	if (action === "send") {
@@ -62,10 +78,20 @@ export function planPeerAction(params: PeerParams, context: PeerContext): Comman
 		if (!params.message) return { error: "no message to send" };
 		// Send as this session, not as the CLI's default sender: the peer's trusted
 		// sender list, and its notion of who to answer, both depend on it.
-		return {
-			command: context.msgqBin,
-			args: ["publish", to, params.message, "--type", "prompt", "--from", context.self],
-		};
+		const args = [
+			"publish",
+			to,
+			params.message,
+			"--type",
+			params.command ? "command" : "prompt",
+			"--from",
+			context.self,
+		];
+		// A sender that chose not to wait still learns the peer's run finished, including when it
+		// finished without answering. Not for a message to oneself: there is nothing to wait for,
+		// and the acknowledgement would come straight back.
+		if (context.expectCompletion && to !== context.self) args.push("--ack", "completed");
+		return { command: context.msgqBin, args };
 	}
 
 	if (action === "ask") {
@@ -107,6 +133,8 @@ export interface CompanionParams {
 	action: "spawn" | "close";
 	name?: string;
 	cwd?: string;
+	/** Extra senders the companion will act on, comma-separated. */
+	accept?: string;
 }
 
 /** What the companions planner needs to know. */
@@ -130,6 +158,8 @@ export function planCompanionAction(
 		if (!context.self) return { error: NO_IDENTITY };
 		const args = ["spawn", params.name, "--parent", context.self, "--json"];
 		if (params.cwd) args.push("--cwd", params.cwd);
+		// The parent is the default trusted set; this widens it deliberately.
+		if (params.accept) args.push("--accept", params.accept);
 		return { command: context.companionBin, args };
 	}
 
