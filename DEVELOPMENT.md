@@ -149,6 +149,31 @@ Two things are worth knowing when you write more:
 - **The extension writes to the bus only for presence and acknowledgements.** The tools and the
   commands shell out to `msgq` instead. If you add a way to send, keep it that way.
 
+## The manifest, and the trap in it
+
+`extension/package.json` carries a `pi` block that declares what the folder ships:
+
+```json
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
+  }
+```
+
+Both lines are load-bearing, and forgetting the first one is **silent**. When `pi -e ./extension`
+resolves a directory, a manifest (or a conventional `skills/` directory) makes it treat the folder
+as a *package* and stop registering the folder itself as an extension — so a skill added carelessly
+takes the bus extension with it. Declaring `extensions` is what puts it back.
+
+This is not something you have to remember to test: every end-to-end scenario starts with
+`pi -e ./extension`, so a wrong manifest fails the whole suite rather than hiding.
+
+To check what loaded, look at what a session can run: typing `/` lists it. Expect the extension's
+four commands — `/peers`, `/peer`, `/reply`, `/companions` — and both skills, as
+`/skill:msgq-notify` and `/skill:msgq-delegate`. All of it comes from the one `-e`, so seeing the
+commands but not the skills means the skills are not being found, and seeing none of it means the
+manifest lost the extension entry.
+
 ## Repository layout
 
 ```
