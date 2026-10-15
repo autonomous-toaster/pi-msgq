@@ -34,6 +34,38 @@ pub fn canonicalize(input: &str) -> Result<String, Error> {
     }
 }
 
+/// The separator between the address and the offset in a record id.
+pub const ID_SEPARATOR: char = '#';
+
+/// Form a record id: the address whose stream holds the record, then its offset.
+///
+/// An id is derived, never stored: both halves are already known to whoever
+/// published the record and to whoever received it.
+pub fn record_id(address: &str, offset: i64) -> String {
+    format!("{address}{ID_SEPARATOR}{offset}")
+}
+
+/// Parse a record id into its canonical address and its offset.
+///
+/// Split on the *last* separator, because an address's name is unvalidated and
+/// may itself contain one.
+pub fn parse_record_id(input: &str) -> Result<(String, i64), Error> {
+    let trimmed = input.trim();
+    let not_an_id = || {
+        Error::usage(format!(
+            "'{trimmed}' is not a record id; expected <address>{ID_SEPARATOR}<offset>"
+        ))
+    };
+    let (address, offset) = trimmed.rsplit_once(ID_SEPARATOR).ok_or_else(not_an_id)?;
+    let offset: i64 = offset.trim().parse().map_err(|_| not_an_id())?;
+    if offset < 0 {
+        return Err(Error::usage(format!(
+            "record id offset must not be negative: '{trimmed}'"
+        )));
+    }
+    Ok((canonicalize(address)?, offset))
+}
+
 /// Canonicalize a list of addresses, rejecting duplicates and empties.
 pub fn canonicalize_all(addresses: &[String]) -> Result<Vec<String>, Error> {
     if addresses.is_empty() {
@@ -95,5 +127,38 @@ mod tests {
             canonicalize("session/Api").unwrap(),
             canonicalize("session/api").unwrap()
         );
+    }
+
+    #[test]
+    fn a_record_id_is_the_address_and_the_offset() {
+        assert_eq!(record_id("session/reviewer", 7), "session/reviewer#7");
+        assert_eq!(
+            parse_record_id("session/reviewer#7").unwrap(),
+            ("session/reviewer".to_string(), 7)
+        );
+    }
+
+    #[test]
+    fn a_record_id_round_trips_through_an_address_containing_the_separator() {
+        // The default sender contains @ and may contain #: the offset is what
+        // follows the last separator.
+        let id = record_id("cli/alice@mac", 12);
+        assert_eq!(id, "cli/alice@mac#12");
+        assert_eq!(
+            parse_record_id(&id).unwrap(),
+            ("cli/alice@mac".to_string(), 12)
+        );
+        assert_eq!(
+            parse_record_id("session/a#b#3").unwrap(),
+            ("session/a#b".to_string(), 3)
+        );
+    }
+
+    #[test]
+    fn a_malformed_record_id_is_rejected() {
+        assert!(parse_record_id("session/reviewer").is_err());
+        assert!(parse_record_id("session/reviewer#x").is_err());
+        assert!(parse_record_id("#7").is_err());
+        assert!(parse_record_id("session/reviewer#-1").is_err());
     }
 }

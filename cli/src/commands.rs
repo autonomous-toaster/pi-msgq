@@ -45,8 +45,10 @@ pub struct PublishArgs {
     pub json: bool,
     /// `--ack`: `true` for every phase, or a comma-separated phase list.
     pub ack: Option<String>,
-    /// `--reply-to`: the offset of the message this one answers.
-    pub reply_to: Option<i64>,
+    /// `--reply-to`: the offset of the message this one answers, or its id.
+    pub reply_to: Option<String>,
+    /// Print the record's id instead of its offset.
+    pub print_id: bool,
     pub await_ack: bool,
     pub timeout: u64,
 }
@@ -107,7 +109,12 @@ pub fn publish(db_path: &Path, args: PublishArgs) -> Result<(), Error> {
     };
 
     let offset = store.publish(&canonical, &value)?;
-    println!("{offset}");
+    // A bare offset stays the default: it is what scripts already parse.
+    if args.print_id {
+        println!("{}", address::record_id(&canonical, offset));
+    } else {
+        println!("{offset}");
+    }
 
     if let Some((stream, from_offset)) = reply {
         await_terminal(&store, &stream, from_offset, offset, args.timeout, false)?;
@@ -354,7 +361,7 @@ fn build_record(canonical: &str, args: &PublishArgs) -> Result<Value, Error> {
             Some("-") | None => read_stdin()?,
             Some(s) => s.to_string(),
         };
-        let value: Value = serde_json::from_str(&raw)
+        let mut value: Value = serde_json::from_str(&raw)
             .map_err(|e| Error::usage(format!("invalid JSON record: {e}")))?;
         let rec = record::parse_and_validate(&value)?;
         let to = address::canonicalize(&rec.to)?;
@@ -362,6 +369,10 @@ fn build_record(canonical: &str, args: &PublishArgs) -> Result<Value, Error> {
             return Err(Error::usage(format!(
                 "record 'to' ({to}) does not match address ({canonical})"
             )));
+        }
+        // A record supplied whole may carry its own `reply_to`; the flag overrides it.
+        if let Some(raw) = &args.reply_to {
+            value["reply_to"] = json!(resolve_reply_to(raw, &rec.from)?);
         }
         Ok(value)
     } else {
@@ -388,10 +399,35 @@ fn build_record(canonical: &str, args: &PublishArgs) -> Result<Value, Error> {
             };
             rec.meta = Some(json!({ "ack": ack }));
         }
-        rec.reply_to = args.reply_to;
+        rec.reply_to = args
+            .reply_to
+            .as_deref()
+            .map(|raw| resolve_reply_to(raw, &from))
+            .transpose()?;
         record::validate(&rec)?;
         record::to_value(&rec)
     }
+}
+
+/// Resolve `--reply-to`: a bare offset, or an id naming the record being answered.
+///
+/// An id carries the address whose stream holds the record, and a reference is an
+/// offset in the stream named by the replying record's own sender, so the address
+/// in the id has to be that sender.
+fn resolve_reply_to(raw: &str, from: &str) -> Result<i64, Error> {
+    let trimmed = raw.trim();
+    if let Ok(offset) = trimmed.parse::<i64>() {
+        return Ok(offset);
+    }
+    let (address, offset) = address::parse_record_id(trimmed)?;
+    let sender = address::canonicalize(from)?;
+    if address != sender {
+        let id = address::record_id(&address, offset);
+        return Err(Error::usage(format!(
+            "cannot answer {id}: this record is sent from {sender}, and a reference points into the sender's own stream"
+        )));
+    }
+    Ok(offset)
 }
 
 /// Stateless read: never creates or advances a consumer cursor.

@@ -36,7 +36,7 @@ enum Command {
         /// Sender address (default: cli/<user>@<host>).
         #[arg(long)]
         from: Option<String>,
-        /// Record type: prompt, steer, follow_up, or note.
+        /// Record type: prompt, steer, follow_up, command, or note.
         #[arg(long = "type", value_name = "TYPE")]
         kind: Option<String>,
         /// Treat MESSAGE (or stdin) as a full JSON record.
@@ -45,9 +45,12 @@ enum Command {
         /// Request acknowledgements: `--ack` for every phase, or `--ack started,completed`.
         #[arg(long, value_name = "PHASES", num_args = 0..=1, default_missing_value = "true")]
         ack: Option<String>,
-        /// The offset of the message this one answers.
-        #[arg(long, value_name = "OFFSET")]
-        reply_to: Option<i64>,
+        /// The offset of the message this one answers, or its id `<address>#<offset>`.
+        #[arg(long, value_name = "ID")]
+        reply_to: Option<String>,
+        /// Print the record's id instead of its offset.
+        #[arg(long = "print-id")]
+        print_id: bool,
         /// Wait for acknowledgements after publishing.
         #[arg(long = "await")]
         await_ack: bool,
@@ -207,6 +210,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             json,
             ack,
             reply_to,
+            print_id,
             await_ack,
             timeout,
         } => commands::publish(
@@ -219,6 +223,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 json,
                 ack,
                 reply_to,
+                print_id,
                 await_ack,
                 timeout,
             },

@@ -320,6 +320,98 @@ fn publish_reply_to_references_an_earlier_message() {
 }
 
 #[test]
+fn publish_print_id_reports_the_record_id() {
+    let db = temp_db();
+    // The bare offset stays the default: it is what scripts already parse.
+    assert_eq!(
+        run(&db, &["publish", "session/a", "one"]).stdout.trim(),
+        "1"
+    );
+    assert_eq!(
+        run(&db, &["publish", "session/a", "two", "--print-id"])
+            .stdout
+            .trim(),
+        "session/a#2"
+    );
+    // A bare name is canonicalized, so the id names the stream rather than what was typed.
+    // Its own database: offsets are global to the database, not per stream, so the value
+    // here would otherwise depend on what the earlier publishes in this test did.
+    let other = temp_db();
+    assert_eq!(
+        run(&other, &["publish", "build.done", "three", "--print-id"])
+            .stdout
+            .trim(),
+        "group/build.done#1"
+    );
+}
+
+#[test]
+fn publish_reply_to_accepts_an_id() {
+    let db = temp_db();
+    assert_eq!(
+        run(
+            &db,
+            &["publish", "cli/asker", "question", "--from", "cli/asker"]
+        )
+        .stdout
+        .trim(),
+        "1"
+    );
+
+    let answer = run(
+        &db,
+        &[
+            "publish",
+            "session/w",
+            "answer",
+            "--from",
+            "cli/asker",
+            "--reply-to",
+            "cli/asker#1",
+        ],
+    );
+    assert_eq!(answer.code, 0, "{}", answer.stderr);
+    let out = run(&db, &["read", "session/w", "--from-start", "--json"]);
+    assert!(out.stdout.contains("\"reply_to\":1"), "{}", out.stdout);
+}
+
+#[test]
+fn publish_reply_to_refuses_another_senders_id() {
+    let db = temp_db();
+    run(
+        &db,
+        &["publish", "cli/asker", "question", "--from", "cli/asker"],
+    );
+
+    // A reference points into the sender's own stream, so an id naming somebody
+    // else is not a reference this record could carry.
+    let out = run(
+        &db,
+        &[
+            "publish",
+            "session/w",
+            "answer",
+            "--from",
+            "session/w",
+            "--reply-to",
+            "cli/asker#1",
+        ],
+    );
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains("cannot answer cli/asker#1"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        run(&db, &["read", "session/w", "--from-start", "--json"])
+            .stdout
+            .trim(),
+        ""
+    );
+}
+
+#[test]
 fn ask_returns_the_reply() {
     let db = temp_db();
     let child = spawn_ask(

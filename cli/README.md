@@ -105,17 +105,38 @@ extension can dispatch it with no translation.
 | Field | Required | Notes |
 |---|---|---|
 | `v` | yes | protocol version, currently `1` |
-| `type` | yes | one of `prompt`, `steer`, `follow_up`, `note`, `event` |
+| `type` | yes | one of `prompt`, `steer`, `follow_up`, `note`, `command`, `event` |
 | `from` | yes | sender address (defaults to `cli/<user>@<host>`) |
 | `to` | yes | recipient address; must equal the stream it is published to |
 | `message` | for message types | the body |
 | `images` | no | pi `ImageContent` blocks |
 | `event` | for `type: "event"` | a pi session event, instead of `message` |
-| `reply_to` | no | a stream offset, for threading |
+| `reply_to` | no | the offset of the message this one answers; see [Record ids](#record-ids) |
 | `meta` | no | free-form; never read by the bus |
 
 There is deliberately no publisher-supplied timestamp. The bus stamps `created_at` on insert
 and that is the only time source.
+
+### Record ids
+
+Every record has an id: `<address>#<offset>`, the stream that holds it and the offset it was
+assigned there. Both halves are already in the record and in what `publish` prints, so an id is
+derived rather than stored — it is valid for every record ever published, including ones written
+before you read this.
+
+```
+session/api-worker#42
+  \_____________/  \/
+   the stream      the offset in it
+```
+
+`reply_to` names the record a message is about. It is an offset in the stream named by *that*
+record's own `from`, so the record a reference names is always `<from>#<reply_to>`. That is what
+makes a reference exact rather than a guess, and it is why a reply is published by the address the
+original was addressed to: only that address received it.
+
+Offsets are global to the database, not per stream, so one stream's offsets are sparse. An id is
+still the pair, because the offset alone does not say which stream to look in.
 
 ### How `type` maps onto pi
 
@@ -124,6 +145,7 @@ and that is the only time source.
 | `prompt` | `sendUserMessage(message)` — starts or queues a turn |
 | `steer` | `sendUserMessage(message, { deliverAs: "steer" })` — mid-run, at the next model boundary |
 | `follow_up` | `sendUserMessage(message, { deliverAs: "followUp" })` — after the current run |
+| `command` | `sendUserMessage(message, { expandPromptTemplates: true })` — the session runs it as if typed |
 | `note` | `sendMessage({ customType, content, display: true })` — display only, no turn |
 | `event` | consumed by extensions; not injected into the conversation |
 
@@ -161,10 +183,27 @@ msgq publish <address> "text" --from cli/ci@host
 msgq publish <address> -                   # body from stdin
 msgq publish <address> --json '<record>'   # a full JSON record
 msgq publish <address> --json -            # record from stdin
+
+msgq publish <address> "an answer" --reply-to 7                     # by offset
+msgq publish <address> "an answer" --reply-to session/api-worker#7   # or by id
+msgq publish <address> "/harsh-review the parser" --type command    # for the peer to run
+msgq publish <address> "a question" --print-id    # print the id, not the offset
 ```
 
 The bus never rewrites a record supplied with `--json`; unknown fields are preserved. A
 record's `to` must match the address argument. `--type event` requires `--json`.
+
+A bare offset is still what `publish` prints by default, so scripts that parse it are unaffected;
+`--print-id` is opt-in. An id given to `--reply-to` must name the record's own sender, since a
+reference points into that sender's stream — answering something that was addressed to somebody
+else is a usage error, and nothing is written.
+
+`--type command` publishes a **command record**, whose `message` is a command line rather than
+something to read: the receiving session runs it as if it had been typed. The command must be the
+whole body, because that is what a command is, so anything the sender wants known about itself has
+to travel outside the body. The bus does not know which commands exist and does not check: an
+unknown one is still a valid record, and a consumer that does not know the type shows it like any
+other.
 
 ### `read`
 
@@ -322,8 +361,8 @@ closes first, which is reported as "still running" (the peer is fine, it is just
 `--timeout <seconds>` defaults to 600, and `0` waits without a limit.
 
 Replies are ordinary records carrying `reply_to`, so `msgq publish --reply-to <offset>` will craft
-one by hand. In practice you rarely do: a peer that is asked a question is told, in the message it
-receives, to answer with the `peers` tool.
+one by hand, and `--reply-to <address>#<offset>` names one exactly. In practice you rarely do: a
+peer that is asked a question is told, in the message it receives, to answer with the `peers` tool.
 
 ## Non-goals
 

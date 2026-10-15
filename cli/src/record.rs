@@ -12,7 +12,7 @@ use crate::error::Error;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Record types this version produces.
-pub const KNOWN_TYPES: [&str; 5] = ["prompt", "steer", "follow_up", "note", "event"];
+pub const KNOWN_TYPES: [&str; 6] = ["prompt", "steer", "follow_up", "note", "command", "event"];
 
 /// A msgq message record.
 ///
@@ -127,6 +127,22 @@ fn hostname() -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn command_is_a_message_type() {
+        // A command carries a command line, and the bus does not know which commands exist.
+        let rec = Record::message(
+            "command",
+            "cli/a@b",
+            "session/x",
+            "/harsh-review the parser",
+        );
+        assert!(validate(&rec).is_ok());
+        let value = to_value(&rec).unwrap();
+        assert_eq!(value["type"], json!("command"));
+        assert_eq!(value["message"], json!("/harsh-review the parser"));
+        assert_eq!(parse_and_validate(&value).unwrap(), rec);
+    }
 
     #[test]
     fn round_trip_message_record() {
