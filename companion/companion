@@ -13,7 +13,8 @@
 # Options for spawn:
 #   --cwd PATH           working directory (default: the caller's)
 #   --workspace ID       herdr workspace (default: the caller's)
-#   --parent ADDRESS     the address the companion reports to; also its only trusted sender
+#   --parent ADDRESS     the address the companion reports to, and its default trusted sender
+#   --accept ADDRESSES   extra senders it will act on, comma-separated
 #   --model P/M          provider/model for the companion (default: pi's own default)
 #   --trust | --no-trust grant or withhold project trust for the companion
 #   --topics LIST        extra bus addresses for the companion to follow
@@ -28,7 +29,7 @@
 #   MSGQ_DB              the bus to use and to give the companion
 #   MSGQ_SPAWN_EXTRA     extra pi arguments (e.g. "-e /path/to/extension" in development)
 #   MSGQ_DEPTH           the caller's delegation depth (set by spawn for the child)
-#   COMPANION_MAX_DEPTH  the delegation cap (default: 1)
+#   COMPANION_MAX_DEPTH  the delegation cap (default: 1), passed to the child with the depth
 
 set -uo pipefail
 
@@ -118,7 +119,7 @@ parse_field() { # json, jq expression
 }
 
 cmd_spawn() {
-	local requested="" cwd="" workspace="" parent="" model="" topics=""
+	local requested="" cwd="" workspace="" parent="" model="" topics="" accept=""
 	local trust="" allow_depth=0 focus=0 json_out=0 dry_run=0 timeout=""
 
 	while [ $# -gt 0 ]; do
@@ -126,6 +127,7 @@ cmd_spawn() {
 		--cwd) cwd="${2:-}"; shift 2 ;;
 		--workspace) workspace="${2:-}"; shift 2 ;;
 		--parent) parent="${2:-}"; shift 2 ;;
+		--accept) accept="${2:-}"; shift 2 ;;
 		--model) model="${2:-}"; shift 2 ;;
 		--topics) topics="${2:-}"; shift 2 ;;
 		--trust) trust="yes"; shift ;;
@@ -151,7 +153,8 @@ cmd_spawn() {
 
 	cwd="${cwd:-$PWD}"
 	[ -d "$cwd" ] || die "no such directory: $cwd"
-	[ -z "$parent" ] && warn "no --parent given; the companion will trust no sender allowlist"
+	[ -z "$parent" ] && [ -z "$accept" ] &&
+		warn "no --parent and no --accept given; the companion will trust no sender allowlist"
 
 	# The name has to satisfy herdr's agent grammar, because it is the same string
 	# everywhere: herdr agent, pi session name, and bus address.
@@ -172,10 +175,15 @@ cmd_spawn() {
 	[ -n "$granted" ] || die "could not grant a name for '$requested'"
 	local address="session/$granted"
 
-	# The pi invocation: a plain pi, bus-enabled, named, pointed at its parent, and
-	# with the parent as its only trusted sender.
+	# The pi invocation: a plain pi, bus-enabled, named, pointed at its parent, and told which
+	# senders it may act on. The set is what a shell-capable agent will routinely obey, so the
+	# default is the parent alone and the caller widens it deliberately.
+	local trusted="$parent"
+	[ -n "$accept" ] && trusted="${parent:+$parent,}$accept"
+
 	local pi_args=(--name "$granted" --msgq-policy honor)
-	[ -n "$parent" ] && pi_args+=(--msgq-report-to "$parent" --msgq-trust "$parent")
+	[ -n "$parent" ] && pi_args+=(--msgq-report-to "$parent")
+	[ -n "$trusted" ] && pi_args+=(--msgq-trust "$trusted")
 	[ -n "$topics" ] && pi_args+=(--msgq-topics "$topics")
 	[ -n "$model" ] && pi_args+=(--model "$model")
 	case "$trust" in
@@ -189,7 +197,7 @@ cmd_spawn() {
 	# default follows the UI focus, which may be someone else's pane.
 	workspace="${workspace:-${HERDR_WORKSPACE_ID:-}}"
 
-	local env_args=(--env "MSGQ_DEPTH=$depth")
+	local env_args=(--env "MSGQ_DEPTH=$depth" --env "COMPANION_MAX_DEPTH=$MAX_DEPTH")
 	# The herdr server does not share our environment, so anything the companion needs to
 	# resolve travels explicitly: the bus, and the binaries its own tools delegate to.
 	[ -n "${MSGQ_DB:-}" ] && env_args+=(--env "MSGQ_DB=$MSGQ_DB")

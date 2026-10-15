@@ -33,7 +33,8 @@ companion help                        this text
 |---|---|
 | `--cwd PATH` | where the companion runs (default: your working directory) |
 | `--workspace ID` | herdr workspace (default: yours) |
-| `--parent ADDRESS` | who the companion reports to, and its **only** trusted sender |
+| `--parent ADDRESS` | who the companion reports to, and its default trusted sender |
+| `--accept ADDRESSES` | extra senders it will act on, comma-separated |
 | `--model P/M` | provider/model for the companion (default: pi's own default) |
 | `--trust` / `--no-trust` | grant or withhold project trust for that directory |
 | `--topics LIST` | extra bus addresses for it to follow |
@@ -80,8 +81,20 @@ herdr agent start reviewer --kind pi --pane <root_pane> -- \
   the address `session/<name>`. The command de-duplicates it, so a second `reviewer` becomes
   `reviewer-2`, and the address follows whatever was granted.
 - **`--parent` is both channels**: an environment variable, inherited by anything the companion
-  starts, and a pi argument. It is also its trusted-sender allowlist, so a companion answers its
-  parent and nobody else.
+  starts, and a pi argument. It is also its default trusted sender.
+- **`--accept` widens who it obeys**, and defaults to nobody but the parent:
+
+  ```bash
+  companion spawn reviewer --parent session/planner --accept cli/ci-bot@host
+  ```
+
+  The companion acts on its parent and on `cli/ci-bot@host`, and on nobody else — another
+  companion, an unrelated session, or a group it merely follows with `--topics` is shown and never
+  acted on. Worth being precise about what that is: `from` is unverified, so this set was never
+  authentication. It scopes what a shell-capable agent will *routinely* obey, and the real boundary
+  is who can write the bus file. Widen it narrowly.
+- **Depth and the cap both travel**, as `MSGQ_DEPTH` and `COMPANION_MAX_DEPTH`, so a delegate can
+  tell whether it may delegate rather than discovering it by being refused.
 - Spawning **blocks until the companion registers on the bus**. A new consumer starts at the end of
   its stream, so a message sent before its subscription existed would be skipped as history.
   Presence is only registered after the subscription, so it is proof, not a guess.
@@ -94,7 +107,7 @@ herdr agent start reviewer --kind pi --pane <root_pane> -- \
 | `MSGQ_DB` | the bus, passed through to the companion |
 | `MSGQ_SPAWN_EXTRA` | extra pi arguments, e.g. `-e /path/to/extension` during development |
 | `MSGQ_DEPTH` | the caller's delegation depth, set by spawn for the child |
-| `COMPANION_MAX_DEPTH` | how deep companions may spawn companions (default: 1) |
+| `COMPANION_MAX_DEPTH` | how deep companions may spawn companions (default: 1), passed to the child with the depth |
 
 The herdr server does not share your shell's environment, so these travel to the tab explicitly
 rather than being inherited.
