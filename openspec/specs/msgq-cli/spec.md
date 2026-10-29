@@ -24,6 +24,7 @@ The CLI SHALL resolve the database path in this order: the `--db` argument, then
 #### Scenario: First use creates the database
 - **WHEN** the resolved database file does not exist
 - **THEN** the CLI creates it and initializes the schema, and the command proceeds
+
 ### Requirement: Address grammar and canonicalization
 An address SHALL identify both a recipient and the stream it is written to. When an address contains `/`, its prefix MUST be one of `session`, `cwd`, `group`, or `cli`; any other prefix is a usage error. An address without `/` SHALL be canonicalized to `group/<name>`. Addresses SHALL be case-sensitive with surrounding whitespace trimmed. An empty address, or a scheme-only address such as `session/`, SHALL be rejected.
 
@@ -42,6 +43,7 @@ An address SHALL identify both a recipient and the stream it is written to. When
 #### Scenario: Case sensitivity
 - **WHEN** `session/Api` and `session/api` are used
 - **THEN** they address two distinct streams
+
 ### Requirement: Message record contract
 A published message SHALL be a JSON object carrying `v`, `type`, `from`, and `to`, and for message-bearing types a `message`. `v` MUST be `1`. `type` SHALL be one of `prompt`, `steer`, `follow_up`, `note`, or `event`, and consumers MUST tolerate unknown types. `images`, `reply_to`, and `meta` SHALL be optional. When `type` is `event`, an `event` object MUST be present in place of `message`. A record SHALL NOT carry a publisher-supplied timestamp field.
 
@@ -56,12 +58,14 @@ A published message SHALL be a JSON object carrying `v`, `type`, `from`, and `to
 #### Scenario: Event record
 - **WHEN** `type` is `event`
 - **THEN** the record carries an `event` object and is accepted by the bus
+
 ### Requirement: Payload passthrough
 When a complete record is supplied through `--json` or on stdin, the CLI SHALL store it without adding, removing, or rewriting any field of the record body.
 
 #### Scenario: Unknown fields preserved
 - **WHEN** a supplied record contains fields the CLI does not recognize
 - **THEN** those fields are preserved in the stored record
+
 ### Requirement: Publish
 `msgq publish <address> [message]` SHALL append one message to the stream named by the canonical address and print the assigned offset to stdout. It SHALL be able to report the record's id instead of that offset, to request acknowledgements on the record it publishes, and to reference the message it is replying to, by offset or by id.
 
@@ -96,6 +100,7 @@ When a complete record is supplied through `--json` or on stdin, the CLI SHALL s
 #### Scenario: Referencing another sender's id
 - **WHEN** `--reply-to` names an id whose address is not the record's own sender
 - **THEN** the command exits with a usage error and writes nothing
+
 ### Requirement: Stateless read
 `msgq read <address>...` SHALL return messages from the named streams without creating or advancing any consumer cursor.
 
@@ -114,6 +119,7 @@ When a complete record is supplied through `--json` or on stdin, the CLI SHALL s
 #### Scenario: Repeated read does not consume
 - **WHEN** read is invoked twice with the same arguments
 - **THEN** the second invocation still returns the same messages because no cursor was advanced
+
 ### Requirement: Cursor-based follow
 `msgq follow <address>... --consumer <name>` SHALL resume from the consumer's saved offset and advance that offset as messages are delivered. A consumer with no saved offset SHALL start at the current end of the stream unless `--from-start` or `--from N` is provided. The consumer offset SHALL be persisted before each message is reported, so an interruption replays at most one message.
 
@@ -128,6 +134,7 @@ When a complete record is supplied through `--json` or on stdin, the CLI SHALL s
 #### Scenario: Explicit replay
 - **WHEN** `--from-start` is provided
 - **THEN** the full history is delivered and the cursor advances
+
 ### Requirement: Topics listing
 `msgq topics` SHALL list each distinct address with its message count and highest offset.
 
@@ -138,6 +145,7 @@ When a complete record is supplied through `--json` or on stdin, the CLI SHALL s
 #### Scenario: No messages
 - **WHEN** no messages have been published
 - **THEN** the command succeeds and lists nothing
+
 ### Requirement: Consumers and cursors
 `msgq consumers [--topic T]` SHALL list consumer names with their topic and offset. `msgq consumers rm <name> [--topic T]` SHALL remove matching cursors. `msgq cursor get|set|reset` SHALL read, set, or clear a consumer cursor.
 
@@ -148,8 +156,14 @@ When a complete record is supplied through `--json` or on stdin, the CLI SHALL s
 #### Scenario: Consumer removal
 - **WHEN** a consumer is removed
 - **THEN** it no longer appears in the consumers listing
+
 ### Requirement: Database info and protocol metadata
-`msgq db info` SHALL report the resolved path, existence, size, per-stream message counts, consumer counts, and the bus protocol version. The bus SHALL record `protocol_version` and `created_by` in a table it owns and SHALL NOT modify the engine's internal tables on the write path.
+`msgq db info` SHALL report the resolved path, existence, size, per-stream message counts, consumer
+counts, the bus protocol version, and the health of the bus: for each consumer, how far behind the
+head of its streams it is, and for each addressed stream, the age of its oldest record. It SHALL
+report the age of the presence address separately, because that address carries every session's
+churn. The bus SHALL record `protocol_version` and `created_by` in a table it owns and SHALL NOT
+modify the engine's internal tables on the write path.
 
 #### Scenario: New database records protocol version
 - **WHEN** the database is created
@@ -158,6 +172,13 @@ When a complete record is supplied through `--json` or on stdin, the CLI SHALL s
 #### Scenario: Info reports provenance
 - **WHEN** `msgq db info` runs
 - **THEN** it reports the protocol version and the resolved file path
+
+#### Scenario: Info answers whether anything is stuck
+- **WHEN** `msgq db info` runs on a bus in use
+- **THEN** it reports each consumer's lag and each stream's oldest-record age, so a stalled participant
+  is visible without reading the streams
+
+
 ### Requirement: Output modes and exit codes
 Commands SHALL print human-readable output by default and raw stored records as JSON lines when
 `--json` is provided. The exit status SHALL be 0 on success, 1 on a runtime or database error,
@@ -174,6 +195,7 @@ Commands SHALL print human-readable output by default and raw stored records as 
 #### Scenario: Await timeout
 - **WHEN** an await finishes without a terminal acknowledgement
 - **THEN** the CLI exits with status 3
+
 ### Requirement: Concurrency safety
 Only one process SHALL follow a given consumer and address pair at a time. The CLI SHALL take an advisory lock for the lifetime of a follow and SHALL fail loudly when another process holds it. The CLI SHALL rely on WAL mode and a bounded busy timeout so concurrent publishers and readers remain consistent.
 
@@ -184,29 +206,40 @@ Only one process SHALL follow a given consumer and address pair at a time. The C
 #### Scenario: Concurrent publish and follow
 - **WHEN** a publisher and a follower run at the same time
 - **THEN** both succeed
+
 ### Requirement: File permissions
 When the CLI creates the database, it SHALL restrict its permissions to the owner. It SHALL NOT tighten permissions on a database it did not create.
 
 #### Scenario: Owner-only on creation
 - **WHEN** the CLI creates a new database
 - **THEN** the file is readable and writable only by its owner
+
 ### Requirement: Sessions listing
-`msgq sessions` SHALL list the live participants recorded as unexpired leases in the bus. Each
-entry SHALL show the participant's address, kind, state, and remaining lifetime. Expired leases
-SHALL be excluded, at most one entry SHALL be shown per participant, and `--json` SHALL emit one
-JSON object per participant.
+`msgq sessions` SHALL list the live participants recorded as unexpired presence records in the bus.
+Each entry SHALL show the participant's address, kind, state, and remaining lifetime. Records older
+than the participant's declared lifetime SHALL be excluded, at most one entry SHALL be shown per
+participant, and `--json` SHALL emit one JSON object per participant. The listing SHALL be derived from
+records alone, so that any participant able to publish is listed, whether or not it is a pi session.
 
 #### Scenario: Lists a live session
-- **WHEN** a session holds an unexpired lease
+- **WHEN** a participant has published a presence record that has not yet expired
 - **THEN** `msgq sessions` shows its address and its state
 
+#### Scenario: Any participant can appear
+- **WHEN** a process publishes a presence record using nothing but the command-line client
+- **THEN** it is listed alongside pi sessions
+
 #### Scenario: Excludes expired leases
-- **WHEN** a lease has expired
+- **WHEN** a presence record is older than the lifetime it declares
 - **THEN** that participant is not listed
 
+#### Scenario: Retraction is immediate
+- **WHEN** a participant retracts its presence before shutting down
+- **THEN** it is not listed, without waiting for the lifetime to elapse
+
 #### Scenario: One entry per participant
-- **WHEN** more than one lease row exists for the same participant
-- **THEN** the listing shows a single entry for it
+- **WHEN** more than one presence record exists for the same participant
+- **THEN** the listing shows a single entry for it, reflecting the most active state and the newest record
 
 #### Scenario: Kind is reported
 - **WHEN** participants of more than one kind are present
@@ -214,11 +247,12 @@ JSON object per participant.
 
 #### Scenario: JSON output
 - **WHEN** `--json` is given
-- **THEN** each participant is emitted as one JSON object per line
+- **THEN** each participant is emitted as one JSON object per line, with the same fields as before
 
 #### Scenario: Nobody online
-- **WHEN** no lease is live
+- **WHEN** no presence record is live
 - **THEN** the command succeeds and lists nothing
+
 ### Requirement: Awaiting acknowledgements
 `msgq send --await <address> [message]` SHALL publish the message and then wait for
 acknowledgements of it. `msgq await <offset>` SHALL wait for acknowledgements of an offset that was
@@ -261,6 +295,7 @@ because `--json` on `publish` already selects JSON record input.
 #### Scenario: JSON output
 - **WHEN** `msgq await --json` is given
 - **THEN** each acknowledgement is emitted as one JSON object per line
+
 ### Requirement: Acknowledgement rendering
 Human-readable output SHALL render an acknowledgement as a lifecycle line rather than a raw JSON
 blob, naming it as an acknowledgement and showing the offset it refers to, its phase, and any
@@ -273,6 +308,7 @@ delivery or outcome detail. JSON output SHALL remain the raw stored record.
 #### Scenario: JSON unchanged
 - **WHEN** `--json` is given
 - **THEN** the acknowledgement is printed as its raw stored record
+
 ### Requirement: Awaiting a reply
 `msgq ask <address> [message]` SHALL publish a message that asks for an answer and then wait for
 one. It SHALL finish when the recipient replies, when a terminal acknowledgement for that message
@@ -295,6 +331,7 @@ SHALL default to a finite value and MAY be disabled.
 #### Scenario: Wait window disabled
 - **WHEN** the wait window is disabled
 - **THEN** the command waits until the recipient replies or finishes
+
 ### Requirement: Record identity
 Every record SHALL have an id of the form `<address>#<offset>`: the canonical address whose stream
 holds it, and the offset it was assigned. The id SHALL be derived from what the
@@ -317,3 +354,43 @@ published. A record's reply reference SHALL be an offset in the stream named by 
 #### Scenario: Earlier records have ids too
 - **WHEN** a record published before this change is read
 - **THEN** an id can be formed for it from its address and its offset
+
+### Requirement: Retention
+
+`msgq prune` SHALL remove records older than a stated age, and SHALL refuse to remove a record that
+any consumer has not yet passed, so that pruning can never destroy work that is still owed. It SHALL
+report what it would remove before doing it unless explicitly told to proceed, and SHALL preserve the
+most recent presence record of every address regardless of age.
+
+#### Scenario: Old records go
+- **WHEN** `msgq prune --older-than` names an age and records are older than it
+- **THEN** those records are removed and the database shrinks
+
+#### Scenario: Pinned cursors are respected
+- **WHEN** a consumer's cursor sits before a record that would otherwise be pruned
+- **THEN** that record is kept, and the reason is reported
+
+#### Scenario: Presence survives
+- **WHEN** every presence record for an address is older than the stated age
+- **THEN** the most recent one is kept, so the participant still ages out on its own terms
+
+#### Scenario: Nothing is removed unasked
+- **WHEN** `msgq prune` runs without being told to proceed
+- **THEN** it reports what it would remove and removes nothing
+
+### Requirement: Cursor collection
+
+Cursors belonging to participants that are no longer live SHALL be removable, so that a bus used for
+months does not accumulate one cursor per address per dead session.
+
+#### Scenario: Dead participant's cursors go
+- **WHEN** cursors are collected and the participant has no live presence record
+- **THEN** its cursors are removed
+
+#### Scenario: Live participants are untouched
+- **WHEN** cursors are collected and the participant is live
+- **THEN** its cursors are kept, including the one that would otherwise look idle
+
+#### Scenario: Collecting is reported
+- **WHEN** cursors are collected
+- **THEN** the number removed is reported

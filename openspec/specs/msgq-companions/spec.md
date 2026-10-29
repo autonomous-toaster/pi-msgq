@@ -30,6 +30,7 @@ working directory, and its herdr tab and pane.
 #### Scenario: Not reachable
 - **WHEN** the companion does not become reachable within the spawn timeout
 - **THEN** the command fails and names the tab and pane it created
+
 ### Requirement: Companion naming
 The command SHALL grant a unique name. When the requested name is already held by a live companion
 it SHALL derive a suffixed alternative, and the bus address SHALL follow the granted name. It SHALL
@@ -46,6 +47,7 @@ refuse rather than reuse a taken name, and SHALL stop after a bounded number of 
 #### Scenario: Bounded attempts
 - **WHEN** no alternative name is free within the bound
 - **THEN** the command fails without spawning
+
 ### Requirement: Companion working directory
 The command SHALL accept a working directory, defaulting to the caller's. The companion SHALL run in
 that directory so it discovers that project's resources, and the directory SHALL be reported.
@@ -57,6 +59,7 @@ that directory so it discovers that project's resources, and the directory SHALL
 #### Scenario: Explicit directory
 - **WHEN** a working directory is given
 - **THEN** the companion runs there, and the reported directory is that one
+
 ### Requirement: Wired to its parent
 The command SHALL give the companion its parent's bus address, both as an environment variable and
 as a command-line argument, so the companion can address its parent and so anything it starts
@@ -69,6 +72,7 @@ inherits that context.
 #### Scenario: Inherited by descendants
 - **WHEN** the companion starts a process of its own
 - **THEN** that process inherits the parent address
+
 ### Requirement: Project trust
 The command SHALL be able to grant or withhold project trust for the companion explicitly, and
 SHALL report a companion that is blocked at startup instead of appearing to hang.
@@ -84,6 +88,7 @@ SHALL report a companion that is blocked at startup instead of appearing to hang
 #### Scenario: Blocked at startup
 - **WHEN** the companion is blocked at startup
 - **THEN** the command reports that rather than waiting for the full timeout
+
 ### Requirement: Companion depth
 A spawned companion SHALL be told its delegation depth, and the command SHALL refuse to spawn
 beyond a cap unless the caller explicitly overrides it.
@@ -95,6 +100,7 @@ beyond a cap unless the caller explicitly overrides it.
 #### Scenario: Cap enforced
 - **WHEN** a companion at the cap tries to spawn another
 - **THEN** the command refuses unless the override is given
+
 ### Requirement: Closing a companion
 `companion close <name>` SHALL close that companion's herdr tab, and SHALL report when no such
 companion exists.
@@ -106,6 +112,7 @@ companion exists.
 #### Scenario: Unknown companion
 - **WHEN** no live companion has that name
 - **THEN** the command reports that without failing destructively
+
 ### Requirement: Dry run
 The command SHALL be able to print the operations it would perform without performing them, so its
 behaviour is inspectable and testable without a live herdr.
@@ -117,6 +124,7 @@ behaviour is inspectable and testable without a live herdr.
 #### Scenario: Inspectable without herdr
 - **WHEN** a dry run is requested where herdr is unavailable
 - **THEN** it still prints the commands
+
 ### Requirement: Listing companions
 `companion list` SHALL report the companions that are running: every named agent herdr reports
 that is also a participant on the bus, matched by the name shared between the herdr agent, the pi
@@ -143,3 +151,32 @@ and SHALL be able to emit its result as one JSON object.
 #### Scenario: Outside herdr
 - **WHEN** herdr is unavailable
 - **THEN** the command reports that rather than failing destructively
+
+### Requirement: Launcher contract
+
+Starting a companion SHALL be understood as one implementation of a stated contract, not as a
+capability of the bus: a launcher SHALL start a `pi` process that loads the extension for a stated
+directory, SHALL name it so that it is reachable at an address, SHALL tell it whom to report to and
+whom to trust, SHALL pass the bus location and the tool paths it needs, SHALL wait until that address
+appears on the roster, and SHALL be able to stop it. `companion` SHALL satisfy this contract and SHALL
+be documented as one implementation of it. Every requirement of this capability SHALL be achievable
+by any other launcher that satisfies the contract.
+
+#### Scenario: Another launcher
+- **WHEN** a launcher other than `companion` follows the contract
+- **THEN** the companions it starts are indistinguishable on the bus from those `companion` starts
+
+#### Scenario: The bus without a launcher
+- **WHEN** no launcher is installed
+- **THEN** publishing, reading, following, the roster and both agent tools still work, and only
+  starting a companion is unavailable
+
+#### Scenario: The contract is readable without the dependency
+- **WHEN** a reader has no herdr and no launcher installed
+- **THEN** the dry run of a spawn prints the exact commands a launcher would run, so the contract can be
+  read without satisfying it
+
+#### Scenario: The prerequisite stays with the launcher
+- **WHEN** the bus's requirements are documented
+- **THEN** the launcher's own prerequisite is documented with the launcher, and is not required to
+  publish, read, follow, or appear on the roster

@@ -29,6 +29,7 @@ and cleanup SHALL be idempotent across reload, session replacement, and process 
 #### Scenario: Idempotent shutdown
 - **WHEN** shutdown runs more than once for the same runtime
 - **THEN** releasing resources a second time has no effect and raises no error
+
 ### Requirement: Bus access
 The extension SHALL consume the message bus at the same location the CLI uses: the `MSGQ_DB`
 environment variable when set, otherwise the default `~/.pi/agent/msgq/msgq.db`. It SHALL use
@@ -46,6 +47,7 @@ when the file does not exist, and SHALL close the engine handle on shutdown.
 #### Scenario: Bus created on first use
 - **WHEN** the extension starts and the bus file does not exist
 - **THEN** the engine creates it and the extension proceeds
+
 ### Requirement: Default subscription
 The extension SHALL subscribe to the session's own address `session/<self>`, where `<self>` is
 the session alias when one is set, otherwise the session identifier.
@@ -57,6 +59,7 @@ the session alias when one is set, otherwise the session identifier.
 #### Scenario: Unnamed session
 - **WHEN** the session has no alias
 - **THEN** the extension subscribes to an address derived from the session identifier
+
 ### Requirement: Additional subscriptions
 The extension SHALL accept additional addresses from configuration, as a comma-separated list
 supplied by both a command-line flag and an environment variable. Each additional address SHALL
@@ -70,6 +73,7 @@ message rather than being ignored.
 #### Scenario: Invalid address
 - **WHEN** configuration contains an address with an unknown scheme
 - **THEN** the extension reports the error and does not start consuming
+
 ### Requirement: Consumer identity and isolation
 The extension SHALL use a consumer identity that is unique per session, formed from the session
 alias when present together with the session identifier. Two sessions SHALL NOT share a cursor
@@ -78,6 +82,7 @@ for the same address.
 #### Scenario: Duplicate aliases
 - **WHEN** two sessions both use the alias `worker`
 - **THEN** each has its own consumer identity and advancing one does not advance the other
+
 ### Requirement: Cursor durability
 The extension SHALL persist the consumer offset once it has taken responsibility for a record, so
 an interruption redelivers work that was not yet acted on rather than losing it. Responsibility is
@@ -95,6 +100,7 @@ batch. A consumer with no saved offset SHALL start at the current end of its str
 #### Scenario: No history replay on first attach
 - **WHEN** a session subscribes to an address that already has records
 - **THEN** previously published records are not replayed
+
 ### Requirement: Delivery policy
 The extension SHALL apply a subscriber policy that caps publisher intent. Under the `display` policy, every record SHALL be delivered as a display-only message and SHALL NOT start a turn. Under the `honor` policy, the record's `type` SHALL determine delivery, but only for senders the session trusts: when a trusted sender set is configured, a record from any other sender SHALL be delivered display-only. The default policy SHALL be `display`. An unrecognized policy value SHALL disable the extension with a clear message.
 
@@ -117,6 +123,7 @@ The extension SHALL apply a subscriber policy that caps publisher intent. Under 
 #### Scenario: Unknown policy rejected
 - **WHEN** configuration sets an unrecognized policy
 - **THEN** the extension reports the error and does not start consuming
+
 ### Requirement: Record decoding
 The extension SHALL decode the record envelope and SHALL tolerate types and fields it does not
 recognize, delivering unknown types as display-only messages. A payload that cannot be decoded
@@ -129,6 +136,7 @@ SHALL be skipped without stopping consumption, and the skip SHALL be reported.
 #### Scenario: Malformed payload
 - **WHEN** a stream entry cannot be decoded as a record
 - **THEN** it is skipped, reported, and consumption continues
+
 ### Requirement: Display-only delivery
 The extension SHALL deliver display-only messages as custom messages that are visible in the
 transcript and SHALL NOT start a turn. Display-only delivery SHALL be safe to perform while the
@@ -141,6 +149,7 @@ agent is running.
 #### Scenario: Note while streaming
 - **WHEN** a `note` record arrives while the agent is running
 - **THEN** it appears in the transcript once the current turn ends and no new turn is queued
+
 ### Requirement: Provenance in delivered messages
 Every delivered message SHALL identify the sender address and the address it was received on, so
 the model can distinguish external messages from user input.
@@ -148,6 +157,7 @@ the model can distinguish external messages from user input.
 #### Scenario: Sender is visible
 - **WHEN** a record published from `cli/alice@mac` to `session/api-worker` is delivered
 - **THEN** the delivered message names both `cli/alice@mac` and `session/api-worker`
+
 ### Requirement: Transcript rendering
 The extension SHALL register a renderer for its message type so delivered messages read as
 structured transcript entries rather than raw text. The renderer SHALL show the bus label, the
@@ -176,6 +186,7 @@ unchanged, and a message without structured details SHALL still render.
 #### Scenario: Missing details
 - **WHEN** a delivered message carries no structured details
 - **THEN** the renderer falls back to the message content instead of failing
+
 ### Requirement: Turn-bearing delivery under honor
 Under the `honor` policy, a `prompt` record SHALL start a turn when the agent is idle. While the
 agent is running, `steer` and `follow_up` records SHALL be delivered using the corresponding
@@ -192,6 +203,7 @@ pi delivery modes, and a `prompt` record SHALL be treated as follow-up work.
 #### Scenario: Follow-up after the run
 - **WHEN** the policy is `honor`, the agent is running, and a `follow_up` record arrives
 - **THEN** it is delivered after the current run finishes
+
 ### Requirement: Coalescing of turn-bearing records
 Turn-bearing records that arrive while the agent is running SHALL be buffered and delivered as a
 single message, and SHALL cause at most one additional model request.
@@ -199,12 +211,14 @@ single message, and SHALL cause at most one additional model request.
 #### Scenario: Many records, one continuation
 - **WHEN** several turn-bearing records arrive during one run under the `honor` policy
 - **THEN** they are delivered together as one message and exactly one continuation follows
+
 ### Requirement: Self-trigger guard
 A record whose sender address equals the session's own address SHALL NOT start a turn.
 
 #### Scenario: Self-addressed record
 - **WHEN** a record arrives whose `from` equals the session's own address under the `honor` policy
 - **THEN** it is delivered as display-only and no turn starts
+
 ### Requirement: Graceful degradation
 When the bus is unreadable or the record version is unsupported, the extension SHALL NOT crash
 the session. It SHALL stop consuming and report the condition where the session has a UI.
@@ -216,53 +230,58 @@ the session. It SHALL stop consuming and report the condition where the session 
 #### Scenario: Unsupported record version
 - **WHEN** a record carries a protocol version the extension does not support
 - **THEN** the record is skipped, reported, and consumption continues
+
 ### Requirement: Presence registration
-A live session SHALL register a time-limited lease in the bus and renew it while it runs. The
-lease SHALL be renewed often enough that a single missed renewal does not make the session appear
-offline, and SHALL be released when the session shuts down. Presence registration SHALL be
-enabled by default and MAY be disabled by configuration.
+A live session SHALL register presence by publishing a time-limited presence record to the bus's
+presence address, and SHALL renew it while it runs. The record SHALL declare its lifetime and SHALL
+be renewed often enough that a single missed renewal does not make the session appear offline, and
+the session SHALL retract its presence when it shuts down. Presence registration SHALL be enabled by
+default and MAY be disabled by configuration.
 
 #### Scenario: Registered on start
 - **WHEN** a session starts and presence is enabled
-- **THEN** a lease identifying that session exists in the bus
+- **THEN** a presence record identifying that session exists in the bus
 
 #### Scenario: Renewal keeps it live
 - **WHEN** the session keeps running
-- **THEN** its lease remains unexpired without further action
+- **THEN** its most recent presence record stays younger than the lifetime it declares, without
+  further action
 
 #### Scenario: Released on clean shutdown
 - **WHEN** the session shuts down cleanly
-- **THEN** its lease is released
+- **THEN** it publishes a presence record that retracts it
 
 #### Scenario: Crash ages out
-- **WHEN** the session stops without releasing its lease
-- **THEN** the lease expires on its own
+- **WHEN** the session stops without retracting its presence
+- **THEN** the record ages out on its own
 
 #### Scenario: Presence disabled
 - **WHEN** presence is disabled by configuration
-- **THEN** no lease is created and message consumption still starts
+- **THEN** no presence record is published and message consumption still starts
+
 ### Requirement: Presence identity
-The lease SHALL identify the session by its session identifier and SHALL carry the session alias
-when one is set, using the same identity the extension already uses for its consumer cursors. The
-lease SHALL be distinguishable from every other lease in the bus.
+The presence record SHALL identify the session by its session identifier and SHALL carry the session
+alias when one is set, using the same identity the extension already uses for its consumer cursors.
+The participant SHALL be distinguishable from every other participant in the bus.
 
 #### Scenario: Unnamed session
 - **WHEN** a session has no alias
-- **THEN** its lease is identified by the session identifier
+- **THEN** its presence is identified by the session identifier
 
 #### Scenario: Aliased session
 - **WHEN** a session has an alias
-- **THEN** the lease carries that alias and the session is discoverable by it
+- **THEN** the presence record carries that alias and the session is discoverable by it
 
 #### Scenario: Shared alias
 - **WHEN** two sessions use the same alias
-- **THEN** they hold distinct leases and neither displaces the other
+- **THEN** both are listed as distinct participants and neither displaces the other
+
 ### Requirement: Presence state
-The lease SHALL carry the session state, which SHALL be one of `idle`, `busy`, or `blocked`. The
-state SHALL become busy while the agent is running, return to idle once the agent settles, and
-become blocked while the session waits on a user-facing prompt. A state change SHALL be recorded
-promptly rather than waiting for the next renewal. A mid-session rename SHALL be reflected in the
-session's alias and address.
+The presence record SHALL carry the session state, which SHALL be one of `idle`, `busy`, or
+`blocked`. The state SHALL become busy while the agent is running, return to idle once the agent
+settles, and become blocked while the session waits on a user-facing prompt. A state change SHALL be
+published promptly rather than waiting for the next renewal. A mid-session rename SHALL be reflected
+in the session's alias and address.
 
 #### Scenario: Idle at rest
 - **WHEN** the session is idle
@@ -283,38 +302,47 @@ session's alias and address.
 #### Scenario: Renamed mid-session
 - **WHEN** the session is renamed while it is running
 - **THEN** its presence reflects the new alias without a restart
+
 ### Requirement: Scoped write exception
-The extension SHALL write presence leases and acknowledgement records only, and SHALL NOT publish
-any other message record to the bus. Its presence writes SHALL NOT alter the message stream,
-consumer cursors, or the record contract.
+The extension SHALL publish acknowledgement records and presence records only, and SHALL NOT publish
+any message record to the bus. Presence records SHALL be published to the presence address and to no
+other address, so that presence never appears in a stream a session reads as conversation. Neither
+kind SHALL alter the record contract, and neither SHALL advance any consumer cursor other than the
+extension's own where it consumes them.
 
 #### Scenario: No message publishing
 - **WHEN** the extension runs
 - **THEN** no message record is published except an acknowledgement
 
 #### Scenario: Streams untouched
-- **WHEN** presence is registered, renewed, or released
-- **THEN** no stream offset and no consumer cursor changes as a result
+- **WHEN** presence is registered, renewed, retracted, or changes state
+- **THEN** the only stream appended to is the presence address: no conversation stream offset and no consumer cursor changes as a result
 
 #### Scenario: No arbitrary publishing
 - **WHEN** the extension handles a record it was asked to acknowledge
 - **THEN** the record it publishes is an acknowledgement and nothing else
+
 ### Requirement: Presence resilience
-A failure to acquire, renew, or release a lease SHALL NOT stop message consumption and SHALL NOT
-crash the session. The extension SHALL attempt to re-acquire a lease it no longer holds, and SHALL
-report the condition where the session has a UI.
+A failure to publish, renew, or retract presence SHALL NOT stop message consumption and SHALL NOT
+crash the session. The extension SHALL retry on the next renewal, SHALL treat an unpublished presence
+as absent rather than current, and SHALL report the condition where the session has a UI.
 
 #### Scenario: Renewal lost
-- **WHEN** a renewal reports that the lease is no longer held
-- **THEN** the extension attempts to re-acquire and continues consuming
+- **WHEN** a renewal cannot be published
+- **THEN** the extension keeps consuming and retries at the next renewal
 
 #### Scenario: Acquire fails
-- **WHEN** the lease cannot be acquired
+- **WHEN** the first presence record cannot be published
 - **THEN** consumption still starts and the condition is reported
 
 #### Scenario: Lease squatted
-- **WHEN** another process holds the session's lease
-- **THEN** consumption continues and the condition is reported
+- **WHEN** another process publishes presence for this session's address
+- **THEN** consumption continues, the entry is not silently doubled, and the condition is reported
+
+#### Scenario: Presence is not claimed when it was not published
+- **WHEN** a publication is not confirmed
+- **THEN** the session does not describe itself as registered
+
 ### Requirement: Acknowledgement lifecycle
 When a sender requests acknowledgement, the extension SHALL emit an acknowledgement for a record at
 the points it observes: on taking responsibility for the record, when a run that includes it
@@ -343,6 +371,7 @@ SHALL report the run outcome. No acknowledgement SHALL follow a terminal one.
 #### Scenario: No request, no acknowledgement
 - **WHEN** a record does not request acknowledgement
 - **THEN** no acknowledgement is emitted for it
+
 ### Requirement: Acknowledgement addressing
 An acknowledgement SHALL be addressed to the record's sender, SHALL carry the original record's
 offset as its reply reference, and SHALL identify the acknowledging session as its sender. The
@@ -364,6 +393,7 @@ so a reader can fold duplicates. An acknowledgement SHALL never itself be acknow
 #### Scenario: No acknowledgement of an acknowledgement
 - **WHEN** an acknowledgement is received
 - **THEN** it is never itself acknowledged
+
 ### Requirement: Acknowledgement resilience
 A failure to publish an acknowledgement SHALL NOT stop message consumption and SHALL NOT crash the
 session. A record that cannot be decoded SHALL NOT be acknowledged. An acknowledgement SHALL NOT
@@ -380,6 +410,7 @@ start a turn.
 #### Scenario: Notification only
 - **WHEN** an acknowledgement is delivered to a session
 - **THEN** it never starts a turn
+
 ### Requirement: Peer tool
 The extension SHALL expose a tool that lets the model work with other agents on the bus. It SHALL
 be able to list the reachable peers, send a message, ask a question and receive the answer, and
@@ -401,6 +432,7 @@ require the peer to have been started by this session.
 #### Scenario: Any peer, not only companions
 - **WHEN** the model sends to an address it did not start itself
 - **THEN** the message is sent like any other
+
 ### Requirement: Companion tool
 The extension SHALL expose a tool that starts and closes companions by delegating to the companion
 command. Starting SHALL report the granted name and the address the companion can be reached at.
@@ -416,6 +448,7 @@ command. Starting SHALL report the granted name and the address the companion ca
 #### Scenario: Failure is reported
 - **WHEN** the companion command fails
 - **THEN** the tool reports the failure instead of returning a name
+
 ### Requirement: Reporting address
 The extension SHALL accept a reporting address from configuration and from the environment, and
 SHALL use it as the default recipient when a tool call does not name one.
@@ -427,6 +460,7 @@ SHALL use it as the default recipient when a tool call does not name one.
 #### Scenario: Environment is honoured
 - **WHEN** the environment carries a parent address and no configuration overrides it
 - **THEN** it is used as the reporting address
+
 ### Requirement: Human command surface
 The extension SHALL register commands a human runs from the prompt without the model: `/peers`,
 `/peer`, `/reply`, and `/companions`. Each SHALL appear in the session's command list with a
@@ -451,6 +485,7 @@ already delivers one.
 #### Scenario: Nothing waits for a reply
 - **WHEN** a human sends a message that asks a question
 - **THEN** the command returns without a reply and any answer arrives later as an inbound message
+
 ### Requirement: Address resolution
 Wherever a command accepts an address, `me` SHALL resolve to the session's own address, and a bare
 name SHALL resolve to `session/<name>`. An address that already carries a scheme SHALL be used as
@@ -476,6 +511,7 @@ currently held by any participant, without failing.
 #### Scenario: Nobody is listening
 - **WHEN** a command sends to an address no participant currently holds
 - **THEN** it reports that the recipient was not present, and the message is still sent
+
 ### Requirement: Peers command
 `/peers` SHALL list the participants currently reachable on the bus, showing each one's address and
 state. Choosing a peer SHALL offer to compose a message to that peer and send it. Nothing SHALL be
@@ -496,6 +532,7 @@ sent when the composition is abandoned.
 #### Scenario: Composition abandoned
 - **WHEN** a human abandons the composition
 - **THEN** nothing is sent
+
 ### Requirement: Session identity report
 `/peers me` SHALL report this session's own identity instead of a list of others: its bus address,
 the bus location, the addresses it subscribes to, its delivery policy, whether presence is
@@ -521,6 +558,7 @@ and SHALL report the remaining facts even when the bus cannot be read.
 #### Scenario: Unreadable bus
 - **WHEN** the bus cannot be read
 - **THEN** every fact the session already knows is still shown
+
 ### Requirement: Peer command
 `/peer <address> [message]` SHALL send a message to that address as this session. When the message
 is not given it SHALL be composed before sending. When the address is not given, the choice of
@@ -542,6 +580,7 @@ so a peer does not read it as a passing remark.
 #### Scenario: No message and no address
 - **WHEN** a human runs `/peer` with nothing
 - **THEN** the peers are offered first, and the message is composed once one is chosen
+
 ### Requirement: Reply command
 `/reply [message]` SHALL answer the message this session most recently received, addressing its
 sender and carrying that message's offset as the reply reference. When no message has been
@@ -563,6 +602,7 @@ anything.
 #### Scenario: Nothing to answer
 - **WHEN** a human runs `/reply` and no message has been received
 - **THEN** the command says there is nothing to reply to and nothing is sent
+
 ### Requirement: Companions command
 `/companions` SHALL report the companions this session can see, each with its name, bus address,
 herdr status, and working directory. Where herdr is unavailable the command SHALL report that
@@ -579,6 +619,7 @@ rather than failing, and the other commands SHALL remain usable.
 #### Scenario: Outside herdr
 - **WHEN** herdr is unavailable
 - **THEN** the command reports that, and `/peers`, `/peer`, and `/reply` still work
+
 ### Requirement: Command resilience
 A failure in a command SHALL NOT crash the session and SHALL NOT leave the bus in a changed state.
 A failure SHALL be reported where the session has a UI. A command run where no human can answer a
@@ -595,6 +636,7 @@ dialog SHALL report that it needs one rather than failing obscurely.
 #### Scenario: The bus is unreadable
 - **WHEN** the bus cannot be read and a command needs it
 - **THEN** the failure is reported and consumption and the session are unaffected
+
 ### Requirement: Reference annotation
 When a delivered record carries a reply reference, the delivered content SHALL identify the record
 it refers to by its id, and SHALL quote that record's sender and body when the record can be read.
@@ -621,6 +663,7 @@ still name its id rather than failing or omitting it.
 #### Scenario: Reading is not consuming
 - **WHEN** a reference is resolved
 - **THEN** no consumer cursor moves, and no record is acknowledged or redelivered as a result
+
 ### Requirement: Shipped skill
 The extension SHALL make a skill available to every session that loads it, so the model is told how
 a process outside the session reaches this one. The skill SHALL be advertised by name and
