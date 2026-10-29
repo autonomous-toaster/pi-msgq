@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,15 @@ const INTERVAL = 50;
 
 function tempDb(): string {
 	return join(mkdtempSync(join(tmpdir(), "msgq-ext-")), "msgq.db");
+}
+
+/** The size of a database's write-ahead log, or 0 before one exists. */
+function walSize(db: string): number {
+	try {
+		return statSync(`${db}-wal`).size;
+	} catch {
+		return 0;
+	}
 }
 
 function wait(ms: number): Promise<void> {
@@ -262,4 +271,30 @@ test("close is idempotent", () => {
 	bus.close();
 	bus.close();
 	assert.ok(true);
+});
+
+test("the log is emptied on the way out, with another handle still open", () => {
+	const db = tempDb();
+	const writer = native.open(db, { watcherPollIntervalMs: INTERVAL });
+	const payload = "x".repeat(10_000);
+	for (let i = 0; i < 200; i += 1) writer.stream("group/a").publish({ v: 1, i, payload });
+	const before = walSize(db);
+	assert.ok(before > 1_000_000, `expected a grown log, got ${before}`);
+
+	const bus = new Bus(db, INTERVAL);
+	bus.truncateWal();
+
+	assert.ok(walSize(db) < before, `expected the log to shrink from ${before}`);
+
+	// The records are in the database now, so the handle that stayed open can still read.
+	assert.equal(writer.stream("group/a").readSince(0, 1).length, 1);
+
+	bus.close();
+	writer.close();
+});
+
+test("emptying the log after close does nothing", () => {
+	const bus = new Bus(tempDb(), INTERVAL);
+	bus.close();
+	bus.truncateWal();
 });

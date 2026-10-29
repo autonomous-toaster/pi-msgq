@@ -219,6 +219,27 @@ export class Bus {
 		};
 	}
 
+	/**
+	 * Fold the write-ahead log back into the database and empty it.
+	 *
+	 * The engine parks its automatic checkpoint at 10000 pages (~40 MB) and sets no
+	 * journal size limit, so a WAL grows to that mark and then keeps it: the frames are
+	 * folded in, the file is not shrunk. Truncating on the way out returns the space
+	 * instead of leaving every session's peak on disk until the last handle closes.
+	 *
+	 * Best-effort in both directions. A checkpoint that cannot run changes nothing about
+	 * the data — the frames are replayed either way — and one that finds a reader still
+	 * busy gives up rather than stalling the caller.
+	 */
+	truncateWal(): void {
+		if (this.closed) return;
+		try {
+			this.db.query("PRAGMA wal_checkpoint(TRUNCATE)");
+		} catch {
+			// Nothing is lost: the log is the database's problem, not the caller's.
+		}
+	}
+
 	/** Release the engine handle. Idempotent. */
 	close(): void {
 		if (this.closed) return;

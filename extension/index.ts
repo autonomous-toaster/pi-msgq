@@ -209,6 +209,9 @@ export default function (pi: ExtensionAPI) {
 		for (const subscription of subscriptions) subscription.close();
 		subscriptions = [];
 		coalescer = new Coalescer();
+		// Before the handle goes: this session's readers are closed, so the log can be folded
+		// back and emptied instead of sitting at its high-water mark for whoever is left.
+		bus?.truncateWal();
 		bus?.close();
 		bus = null;
 		context = undefined;
