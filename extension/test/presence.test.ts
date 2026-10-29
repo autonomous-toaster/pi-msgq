@@ -143,3 +143,56 @@ test("a lost lease is re-acquired on renew", () => {
 	fresh.bus.close();
 	bus.close();
 });
+
+/**
+ * A bus whose writes fail, standing in for the engine returning an error — a full
+ * disk, most often. Presence is best-effort by contract, so none of it may throw.
+ */
+function failingBus(options: { failAcquireAfter?: number } = {}): Bus {
+	let acquisitions = 0;
+	return {
+		acquireLease() {
+			acquisitions += 1;
+			if (options.failAcquireAfter !== undefined && acquisitions > options.failAcquireAfter) {
+				throw new Error("database or disk is full");
+			}
+			return {
+				name: "lease",
+				owner: "owner",
+				heartbeat() {
+					throw new Error("database or disk is full");
+				},
+				release() {},
+			};
+		},
+	} as unknown as Bus;
+}
+
+test("a bus write that fails is not fatal and keeps its reason", () => {
+	const presence = new Presence(failingBus({ failAcquireAfter: 0 }), {
+		kind: "session",
+		id: "01a127d9",
+		owner: "api-worker#01a127d9",
+		state: "idle",
+	});
+
+	assert.equal(presence.start(), false);
+	assert.equal(presence.held, false);
+	assert.match(String((presence.error as Error).message), /disk is full/);
+});
+
+test("a heartbeat that fails is not fatal and keeps its reason", () => {
+	// The first acquisition hands back a lease whose heartbeat throws: exactly the
+	// timer path that used to end the process.
+	const presence = new Presence(failingBus({ failAcquireAfter: 1 }), {
+		kind: "session",
+		id: "01a127d9",
+		owner: "api-worker#01a127d9",
+		state: "idle",
+	});
+
+	assert.equal(presence.start(), true);
+	assert.equal(presence.renew(), false);
+	assert.equal(presence.held, false);
+	assert.match(String((presence.error as Error).message), /disk is full/);
+});

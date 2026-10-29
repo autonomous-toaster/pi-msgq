@@ -150,12 +150,20 @@ export default function (pi: ExtensionAPI) {
 		if (context?.hasUI) context.ui.setStatus(STATUS_KEY, text);
 	}
 
+	/** Why a presence write did not land, in words: the bus error, or the usual cause. */
+	function presenceWhy(): string {
+		const failure = presence?.error;
+		if (failure === undefined) return "the lease is held elsewhere";
+		if (failure instanceof Error) return failure.message || "the write failed without a reason";
+		return String(failure);
+	}
+
 	/** Move presence to a new state, reporting a lost lease without failing. */
 	function setPresenceState(state: PresenceState): void {
 		if (!presence) return;
 		presenceHeld = presence.setState(state);
 		if (!presenceHeld) {
-			report(`msgq presence is not registered (${state})`, "warning");
+			report(`msgq presence is not registered (${state}): ${presenceWhy()}`, "warning");
 		}
 	}
 
@@ -599,14 +607,21 @@ export default function (pi: ExtensionAPI) {
 			});
 			presenceHeld = presence.start();
 			if (!presenceHeld) {
-				report("msgq presence is not registered (lease held elsewhere)", "warning");
+				report(`msgq presence is not registered (${presenceWhy()})`, "warning");
 			}
 			const renewMs = Math.max(1, Math.floor(presenceTtl / 3)) * 1000;
 			renewTimer = setInterval(() => {
 				if (!presence) return;
+				const held = presenceHeld;
+				// A presence write is best-effort and cannot throw: a full disk or a closed
+				// handle must not take the session down with it.
 				presenceHeld = presence.renew();
-				if (!presenceHeld) {
-					report("msgq presence was lost and could not be re-registered", "warning");
+				// Only the change is news. Reporting every failure would repeat the same line
+				// each TTL, and a bus that came back would go unmentioned.
+				if (held && !presenceHeld) {
+					report(`msgq presence was lost: ${presenceWhy()}`, "warning");
+				} else if (!held && presenceHeld) {
+					report("msgq presence is registered", "info");
 				}
 			}, renewMs);
 			renewTimer.unref?.();
@@ -728,7 +743,7 @@ export default function (pi: ExtensionAPI) {
 		if (presence) {
 			presenceHeld = presence.setOwner(consumer);
 			if (!presenceHeld) {
-				report("msgq presence could not re-register after a rename", "warning");
+				report(`msgq presence could not re-register after a rename: ${presenceWhy()}`, "warning");
 			}
 		}
 	});

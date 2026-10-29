@@ -34,6 +34,8 @@ export class Presence {
 	private state: PresenceState;
 	private owner: string;
 	private closed = false;
+	/** Why the last attempt failed, when it did. Cleared once one succeeds. */
+	private failure: unknown;
 
 	constructor(bus: Bus, options: PresenceOptions) {
 		this.bus = bus;
@@ -71,6 +73,15 @@ export class Presence {
 		return this.lease !== undefined;
 	}
 
+	/**
+	 * Why the last attempt failed, if it did. Every presence write is best-effort, so a
+	 * failure is handed back here instead of thrown: the caller reports it and the session
+	 * carries on. Undefined means nothing went wrong.
+	 */
+	get error(): unknown {
+		return this.failure;
+	}
+
 	/** Register presence. Returns false when the lease is already held elsewhere. */
 	start(): boolean {
 		if (this.closed) return false;
@@ -102,7 +113,17 @@ export class Presence {
 	renew(): boolean {
 		if (this.closed) return false;
 		if (!this.lease) return this.acquire();
-		if (this.lease.heartbeat(this.ttl)) return true;
+		try {
+			if (this.lease.heartbeat(this.ttl)) {
+				this.failure = undefined;
+				return true;
+			}
+		} catch (error) {
+			// A bus write fails for reasons that have nothing to do with this presence: a
+			// full disk, a handle closed underneath us. The reason is kept for the caller
+			// and the lease is re-acquired below, the same as for a lost one.
+			this.failure = error;
+		}
 		this.lease = undefined;
 		return this.acquire();
 	}
@@ -114,12 +135,25 @@ export class Presence {
 	}
 
 	private acquire(): boolean {
-		this.lease = this.bus.acquireLease(this.name, this.owner, this.ttl);
+		try {
+			this.lease = this.bus.acquireLease(this.name, this.owner, this.ttl);
+		} catch (error) {
+			this.failure = error;
+			this.lease = undefined;
+			return false;
+		}
+		// No throw: the write went through, even if the name is someone else's.
+		this.failure = undefined;
 		return this.lease !== undefined;
 	}
 
 	private drop(): void {
-		this.lease?.release();
+		try {
+			this.lease?.release();
+		} catch {
+			// Releasing a lease that cannot be written changes nothing worth reporting:
+			// the row expires on its own TTL.
+		}
 		this.lease = undefined;
 	}
 }
