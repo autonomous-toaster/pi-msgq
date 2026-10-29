@@ -10,6 +10,16 @@ use honker::{Database, Lock, StreamEvent, UpdateEvents};
 use crate::error::Error;
 use crate::record::PROTOCOL_VERSION;
 
+/// One stream's size, and how old its oldest record is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamSummary {
+    pub topic: String,
+    pub records: i64,
+    /// When the oldest record still stored in this stream was written.
+    pub oldest_at: i64,
+    pub newest_offset: i64,
+}
+
 /// An open message bus.
 pub struct Store {
     db: Database,
@@ -60,6 +70,151 @@ impl Store {
                 )
                 .map_err(|e| e.to_string())?;
                 Ok(())
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// Return the space a prune freed: rewrite the file, then fold the log back and empty it.
+    ///
+    /// Both halves matter on a WAL database. VACUUM rewrites the table into a fresh file, but it
+    /// writes through the write-ahead log, so the pages it vacates are still in the log until a
+    /// checkpoint folds them in. Best-effort throughout: VACUUM needs room for a second copy and an
+    /// exclusive lock, and a failure changes nothing about the records, which are already gone.
+    pub fn compact(&self) -> Result<(), Error> {
+        self.db
+            .with_conn(|c| -> Result<(), String> {
+                c.execute_batch("VACUUM").map_err(|e| e.to_string())?;
+                c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// One stream's size, and how old its oldest record is.
+    pub fn stream_summaries(&self) -> Result<Vec<StreamSummary>, Error> {
+        self.db
+            .with_conn(|c| -> Result<Vec<StreamSummary>, String> {
+                let mut stmt = c
+                    .prepare(
+                        "SELECT topic, COUNT(*), MIN(created_at), MAX(offset) \
+                         FROM _honker_stream GROUP BY topic ORDER BY topic",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok(StreamSummary {
+                            topic: r.get(0)?,
+                            records: r.get(1)?,
+                            oldest_at: r.get(2)?,
+                            newest_offset: r.get(3)?,
+                        })
+                    })
+                    .map_err(|e| e.to_string())?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(|e| e.to_string())?);
+                }
+                Ok(out)
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// The highest offset in a stream whose record is older than `threshold`.
+    ///
+    /// Records are appended in time order, so "older than" is always a prefix: the answer is where
+    /// that prefix ends. `None` means nothing in this stream is that old (and offset 0 is a real
+    /// offset, so the distinction matters).
+    pub fn prefix_end(&self, topic: &str, threshold: i64) -> Result<Option<i64>, Error> {
+        self.db
+            .with_conn(|c| -> Result<Option<i64>, String> {
+                // The threshold is this process's own arithmetic, so it is safe to inline; the
+                // topic comes from the caller and stays a parameter.
+                c.query_row(
+                    &format!(
+                        "SELECT MAX(offset) FROM _honker_stream \
+                         WHERE topic = ?1 AND created_at < {threshold}"
+                    ),
+                    [topic],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .map_err(|e| e.to_string())
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// Records in a stream at or below `cut`, ignoring the offsets named in `keep`.
+    pub fn count_stream_prefix(&self, topic: &str, cut: i64, keep: &[i64]) -> Result<i64, Error> {
+        self.db
+            .with_conn(|c| -> Result<i64, String> {
+                c.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM _honker_stream WHERE topic = ?1 AND offset <= {cut}{}",
+                        self.keep_clause(keep)
+                    ),
+                    [topic],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(|e| e.to_string())
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// Delete records in a stream at or below `cut`, ignoring the offsets named in `keep`.
+    ///
+    /// The offsets in `keep` come from this database, so a literal list is safe and needs no
+    /// parameter juggling.
+    pub fn delete_stream_prefix(
+        &self,
+        topic: &str,
+        cut: i64,
+        keep: &[i64],
+    ) -> Result<usize, Error> {
+        self.db
+            .with_conn(|c| -> Result<usize, String> {
+                c.execute(
+                    &format!(
+                        "DELETE FROM _honker_stream WHERE topic = ?1 AND offset <= {cut}{}",
+                        self.keep_clause(keep)
+                    ),
+                    [topic],
+                )
+                .map_err(|e| e.to_string())
+            })
+            .map_err(Error::runtime)
+    }
+
+    fn keep_clause(&self, keep: &[i64]) -> String {
+        if keep.is_empty() {
+            return String::new();
+        }
+        let list = keep
+            .iter()
+            .map(|offset| offset.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(" AND offset NOT IN ({list})")
+    }
+
+    /// The newest presence record for every participant, which retention never removes.
+    pub fn newest_presence_offsets(&self, topic: &str) -> Result<Vec<i64>, Error> {
+        self.db
+            .with_conn(|c| -> Result<Vec<i64>, String> {
+                let mut stmt = c
+                    .prepare(
+                        "SELECT MAX(offset) FROM _honker_stream \
+                         WHERE topic = ?1 AND json_valid(payload) \
+                         GROUP BY COALESCE(json_extract(payload, '$.event.participant'), \
+                                           json_extract(payload, '$.from'))",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([topic], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(|e| e.to_string())?);
+                }
+                Ok(out)
             })
             .map_err(Error::runtime)
     }
@@ -215,35 +370,6 @@ impl Store {
                     [Some(name), topic],
                 )
                 .map_err(|e| e.to_string())
-            })
-            .map_err(Error::runtime)
-    }
-
-    /// Unexpired participant leases: `(name, owner, expires_at)`.
-    pub fn list_leases(&self) -> Result<Vec<(String, String, i64)>, Error> {
-        self.db
-            .with_conn(|c| -> Result<Vec<(String, String, i64)>, String> {
-                let mut stmt = c
-                    .prepare(
-                        "SELECT name, owner, expires_at FROM _honker_locks \
-                         WHERE name LIKE 'msgq:participant:%' AND expires_at > unixepoch() \
-                         ORDER BY name",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map([], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, i64>(2)?,
-                        ))
-                    })
-                    .map_err(|e| e.to_string())?;
-                let mut out = Vec::new();
-                for row in rows {
-                    out.push(row.map_err(|e| e.to_string())?);
-                }
-                Ok(out)
             })
             .map_err(Error::runtime)
     }

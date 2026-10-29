@@ -1,0 +1,7 @@
+{
+  "v": 1,
+  "type": "note",
+  "from": "cli/me@host",
+  "to": "session/planner",
+  "message": "the build is green"
+}

@@ -164,15 +164,17 @@ msgq [--db <PATH>] <COMMAND>
 | `read <ADDRESS>...` | stateless read; never creates or advances a cursor |
 | `follow <ADDRESS>... --consumer <NAME>` | durable subscription; advances the consumer's cursors |
 | `topics` | list addresses with message count and highest offset |
-| `sessions` | list live participants holding a bus lease |
+| `sessions` | list live participants, from the presence records they publish |
 | `await <OFFSET>` | wait for acknowledgements of a published message |
 | `ask <ADDRESS> [MESSAGE]` | ask a peer a question and wait for the answer |
 | `consumers [--topic <T>]` | list consumer cursors |
 | `consumers rm <NAME> [--topic <T>]` | remove consumer cursors |
+| `consumers gc [--apply]` | collect the cursors of sessions that are no longer live |
 | `cursor get <CONSUMER> <TOPIC>` | print a saved offset, or `0` |
 | `cursor set <CONSUMER> <TOPIC> <OFFSET>` | save an offset (monotonic) |
 | `cursor reset <CONSUMER> <TOPIC>` | clear an offset |
-| `db info` | path, size, contents, protocol version |
+| `db info` | path, size, contents, protocol version, per-consumer lag, record ages |
+| `prune --older-than <AGE> [--apply]` | remove records older than an age, never one a consumer has not passed |
 
 ### `publish`
 
@@ -267,8 +269,8 @@ record contract and address grammar stay independent of it.
 
 ## Presence
 
-Live sessions advertise themselves with a short **lease** in the bus: renewed while the session
-runs, released when it stops. `msgq sessions` lists them.
+Live participants advertise themselves with a short **record** on the presence address
+(`group/presence`): renewed while they run, retracted when they stop. `msgq sessions` reads them.
 
 ```text
 $ msgq sessions
@@ -279,10 +281,39 @@ session/01a12cc5    session  idle             30
 Columns are address, kind, state, and remaining lifetime in seconds. `--json` emits one object
 per participant.
 
-A session that crashes simply stops renewing, so its lease expires on its own — there is nothing
-to clean up and no daemon involved. Presence is **advisory**: it tells you who is reachable right
-now, but publishing to an offline session still queues durably. Leases come from the pi
-extension, so `msgq sessions` is empty unless at least one session has it loaded.
+Presence is a record, so it is not a pi feature: any process that can publish can appear, with
+nothing but this CLI.
+
+```bash
+msgq publish group/presence --json '{
+  "v": 1, "type": "event", "from": "cli/nightly-build@host", "to": "group/presence",
+  "event": {"kind": "presence", "state": "busy", "ttl": 600, "participant": "nightly-build"}
+}'
+```
+
+A participant is live while its newest record is younger than the lifetime it declares, judged by
+the bus's own clock. A clean shutdown publishes `state: "gone"`, which retracts it at once; a
+participant that crashes simply ages out, so there is nothing to clean up and no daemon involved.
+Presence is **advisory**: it tells you who is reachable right now, but publishing to an offline
+session still queues durably.
+
+## Retention
+
+Streams grow. Two commands bound them, both of which report before they act:
+
+```bash
+msgq prune --older-than 7d              # what would go, per stream
+msgq prune --older-than 7d --apply      # remove it, then compact the file
+msgq consumers gc --apply               # collect dead sessions' cursors
+```
+
+`prune` never removes a record at or below a consumer's cursor — that record is still owed to
+someone — and it always keeps the newest presence record of every participant, so a participant
+still ages out on its own terms. `--apply` also compacts: it rewrites the file and empties the
+write-ahead log, which is what actually returns the space.
+
+`consumers gc` only considers session-shaped consumer names (`<uuid>` or `<alias>#<uuid>`): a cursor
+named by a script is that script's business.
 
 ## Acknowledgements
 
@@ -367,8 +398,8 @@ peer that is asked a question is told, in the message it receives, to answer wit
 ## Non-goals
 
 - **No pi extension.** Injection, steering, and auto-trigger are designed-for, not implemented.
-- **No retention.** There is no `prune` yet; streams grow without bound. `db info` reports size
-  so growth is visible.
+- **No automatic retention.** `prune` and `consumers gc` are operator commands, deliberately: no
+  daemon deletes records on its own, and nothing runs them for you.
 - **No alias resolution.** `session/<x>` is a stream name. Resolving an alias to a stable
   session identity belongs with the extension, which knows its own alias.
 - **No authentication.** Any process that can write the database can publish, and `from` is

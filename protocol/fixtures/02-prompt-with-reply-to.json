@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "prompt",
+  "from": "session/planner",
+  "to": "session/reviewer",
+  "message": "review the parser diff and tell me what you find",
+  "reply_to": 42,
+  "meta": { "trace": "review-1" }
+}

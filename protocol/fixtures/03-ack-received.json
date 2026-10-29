@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "type": "event",
+  "from": "session/reviewer",
+  "to": "session/planner",
+  "reply_to": 42,
+  "event": { "kind": "ack", "phase": "received", "delivery": "queued" }
+}

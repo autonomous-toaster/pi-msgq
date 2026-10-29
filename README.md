@@ -14,7 +14,7 @@ work as a message, and gets the answer back.
         |
         |  msgq publish session/reviewer "review this diff"
         v
-   ~/.pi/agent/msgq/msgq.db      durable topics · presence leases · acknowledgements
+   ~/.pi/agent/msgq/msgq.db      durable topics · presence records · acknowledgements
         ^
         |  the extension subscribes and delivers into the session
         |
@@ -23,9 +23,15 @@ work as a message, and gets the answer back.
 
 | Folder | What it is |
 |---|---|
-| [`cli/`](cli/README.md) | `msgq`, the bus: publish, read, follow, await, ask, sessions |
+| [`cli/`](cli/README.md) | `msgq`, the bus: publish, read, follow, await, ask, sessions, prune |
 | [`extension/`](extension/README.md) | the pi extension: consumes the bus, gives your agent two tools and you four commands |
-| [`companion/`](companion/README.md) | `companion`: starts and stops companions in herdr tabs |
+| [`companion/`](companion/README.md) | `companion`: the reference launcher — starts and stops companions in herdr tabs |
+| [`PROTOCOL.md`](PROTOCOL.md) | what the wire promises, and the fixtures that keep two implementations agreeing |
+
+Three roles, and it helps to keep them apart: the **wire** is what other clients may depend on
+(`PROTOCOL.md`), the **extension** is the reference client, and the **launcher** and the end-to-end
+suite are the showcase. Nothing on the wire depends on the showcase, and any launcher that follows
+[the contract](companion/README.md#the-launcher-contract) can replace it.
 
 Building from a checkout, or running the tests? See [DEVELOPMENT.md](DEVELOPMENT.md).
 
@@ -47,6 +53,24 @@ Start a session worth talking to:
 ```bash
 pi -e ./extension --msgq-policy honor --name planner
 ```
+
+## A panel of reviewers, in one session
+
+The shape this was built for: one session that hands the same question to several peers with
+different instructions, and compares what comes back.
+
+```text
+start two companions called harsh and rust. ask harsh to /harsh-review the parser diff,
+ask rust to /rust-review it, and tell me which found more.
+```
+
+That is two spawns and two asks, and the comparison is yours to read — the bus carries messages, not
+verdicts. Each reviewer is a real `pi` in its own tab, with its own context, its own model (spawn
+with `--model`) and its own transcript.
+
+The launcher is what makes that one sentence. It is **optional**: `msgq` and both of the agent's
+tools work without it, and [the contract it satisfies](companion/README.md#the-launcher-contract) is
+written down so another launcher can take its place.
 
 `--msgq-policy honor` is the flag that matters. The default, `display`, shows incoming messages but
 never starts a turn: a session in that mode can be read, and cannot be asked to do anything.
@@ -156,10 +180,11 @@ Under the hood that is `companions({action:"spawn",name:"reviewer"})`, then
 |---|---|
 | `pi` (Node 22.19+) | everything |
 | a Rust toolchain with edition 2024 (1.85+) | building the CLI |
-| `herdr` 0.8+ and `jq`, and running inside herdr | companions only |
+| `jq` | the launcher, which reads the roster |
+| `herdr` 0.8+, inside herdr | the reference launcher only |
 
-Three of the four commands — everything but `/companions` — and both of the agent's tools work
-without herdr. Only listing and starting a companion need it.
+herdr is the showcase's prerequisite, not the bus's. Publishing, reading, following, the roster, and
+both of the agent's tools — `peers`, and every command but `/companions` — work without it.
 
 ## Troubleshooting
 

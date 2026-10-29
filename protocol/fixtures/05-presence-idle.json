@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "type": "event",
+  "from": "session/planner",
+  "to": "group/presence",
+  "event": {
+    "kind": "presence",
+    "state": "idle",
+    "ttl": 30,
+    "participant": "01a187d8-052a-76da-821c-31ccb93c2fc4",
+    "alias": "planner"
+  }
+}

@@ -158,6 +158,35 @@ export default function (pi: ExtensionAPI) {
 		return String(failure);
 	}
 
+	/**
+	 * Report a second participant publishing presence at this session's address.
+	 *
+	 * The wire cannot prevent it — `from` is a claim, and two sessions may legitimately share an
+	 * alias — but it must not be silent, so the roster is read once and the collision is named. A
+	 * roster that cannot be read changes nothing.
+	 */
+	async function reportPresenceCollision(): Promise<void> {
+		const address = self;
+		if (!address) return;
+		try {
+			const result = await pi.exec(msgqBin, ["--db", busPath, "sessions", "--json"], {});
+			if (result.code !== 0) return;
+			const count = result.stdout
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { address?: string })
+				.filter((entry) => entry.address === address).length;
+			if (count > 1) {
+				report(
+					`msgq: ${count} participants are publishing presence at ${address}; the roster lists all of them`,
+					"warning",
+				);
+			}
+		} catch {
+			// Reading the roster is a diagnostic here: failing to do it changes nothing.
+		}
+	}
+
 	/** Move presence to a new state, reporting a lost lease without failing. */
 	function setPresenceState(state: PresenceState): void {
 		if (!presence) return;
@@ -599,12 +628,13 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Presence: a scoped write exception. A failure here is never fatal.
+		// Presence: a scoped write exception, published as a record any client could publish. A failure
+		// here is never fatal.
 		if (presenceConfigured && bus) {
 			presence = new Presence(bus, {
-				kind: "session",
-				id: identity.sessionId,
-				owner: consumer,
+				address: self,
+				participant: identity.sessionId,
+				alias: identity.alias,
 				state: ctx.isIdle() ? "idle" : "busy",
 				ttlS: presenceTtl,
 			});
@@ -612,6 +642,7 @@ export default function (pi: ExtensionAPI) {
 			if (!presenceHeld) {
 				report(`msgq presence is not registered (${presenceWhy()})`, "warning");
 			}
+			void reportPresenceCollision();
 			const renewMs = Math.max(1, Math.floor(presenceTtl / 3)) * 1000;
 			renewTimer = setInterval(() => {
 				if (!presence) return;
@@ -744,7 +775,7 @@ export default function (pi: ExtensionAPI) {
 		consumer = consumerId(renamed);
 		resubscribe();
 		if (presence) {
-			presenceHeld = presence.setOwner(consumer);
+			presenceHeld = presence.setOwner({ address: self, alias: renamed.alias });
 			if (!presenceHeld) {
 				report(`msgq presence could not re-register after a rename: ${presenceWhy()}`, "warning");
 			}

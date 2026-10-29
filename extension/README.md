@@ -117,8 +117,9 @@ build is green
 
 ## Presence
 
-While a session runs it advertises itself on the bus with a short **lease**, renewed every
-10 seconds and released on shutdown. Anyone can then see what is online:
+While a session runs it advertises itself with a short **record** on the presence address
+(`group/presence`), renewed every 10 seconds and retracted on shutdown. Anyone can then see what is
+online:
 
 ```bash
 msgq sessions
@@ -133,9 +134,14 @@ The state follows the session: `idle` at rest, `busy` while a run is in progress
 `blocked` while it waits on a prompt. A mid-session `/name` change is reflected without a
 restart.
 
+Presence is a record, not an engine primitive, and that is deliberate: any process that can publish
+can appear on the roster with nothing but the CLI, which is why the listing is not a pi feature. It
+is the one stream this extension appends to, and it never appears in a conversation stream.
+
 Presence is **advisory** — it helps a sender or an operator find sessions, and it never gates
-delivery. A session that crashes stops renewing, so its lease expires on its own. Turn it off
-with `--msgq-presence off` or `MSGQ_PRESENCE=0`; consumption is unaffected either way.
+delivery. A session that crashes stops renewing, so its record ages out on its own after the
+lifetime it declared; a session that shuts down cleanly retracts it. Turn it off with
+`--msgq-presence off` or `MSGQ_PRESENCE=0`; consumption is unaffected either way.
 
 ## Acknowledgements
 
@@ -193,10 +199,15 @@ session started resolves exactly like one asked a moment ago.
 
 Two tools put the bus in the agent's hands.
 
-| Tool | Actions |
-|---|---|
-| `peers` | `list` who is reachable · `send` a message · `ask` a question and wait for the answer · `reply` to the message you last received |
-| `companions` | `spawn` a companion (a real pi in its own terminal tab, reachable at `session/<name>`) · `close` it |
+| Tool | Actions | Needs |
+|---|---|---|
+| `peers` | `list` who is reachable · `send` a message · `ask` a question and wait for the answer · `reply` to the message you last received | the bus only |
+| `companions` | `spawn` a companion (a real pi in its own terminal tab, reachable at `session/<name>`) · `close` it | a launcher: `companion`, herdr, jq |
+
+`peers` is the bus client and works anywhere the bus does. `companions` only asks a launcher to
+start a process, and the launcher is [one implementation of a contract](../companion/README.md#the-launcher-contract)
+— so an installation with no launcher still has the first tool, both skills, and every command but
+`/companions`.
 
 Spawning creates a process and nothing else: the task is simply the first message.
 
@@ -420,6 +431,6 @@ msgq publish session/api-worker --json '{"v":1,"type":"note","from":"ci/bot","to
 
 ## Notes
 
-- **Scoped writes:** the extension writes presence leases and acknowledgements only. It never publishes an arbitrary message, so it cannot start a conversation on the bus.
+- **Scoped writes:** the extension writes presence records and acknowledgements only. It never publishes an arbitrary message, so it cannot start a conversation on the bus.
 - Works in interactive, RPC, and print modes; terminal UI is used only when the session has one.
 - Loaded via `-e`, so it is not installed and does not appear in `pi list`.

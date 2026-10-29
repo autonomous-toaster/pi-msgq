@@ -23,6 +23,9 @@ const honker = require_("@russellthehippo/honker-node");
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXTENSION = process.env.MSGQ_EXTENSION ?? resolve(HERE, "..");
+/** The address every participant publishes presence to. */
+const PRESENCE_ADDRESS = "group/presence";
+
 const REPO = resolve(EXTENSION, "..");
 const CLI = process.env.MSGQ_BIN ?? resolve(REPO, "cli/target/debug/msgq");
 const PI = process.env.PI_BIN ?? "pi";
@@ -130,11 +133,26 @@ function readStream(address, db = DB) {
  * Take a presence lease by hand, so a scenario has a peer to talk to without
  * starting a second pi. The address is derived from the owner's alias.
  */
-function leasePeer(dbPath, alias, id, ttlS = 60) {
-	const native = honker.open(dbPath, { watcherPollIntervalMs: 50 });
-	const held = native.tryLock(`msgq:participant:session:idle:${id}`, `${alias}#${id}`, ttlS);
-	native.close();
-	return held;
+/**
+ * Announce a participant the way any client would: one presence record, published with nothing
+ * but the CLI. Presence is a record now, so a scenario does not need the engine to fake a peer.
+ */
+function announcePeer(dbPath, alias, id, ttlS = 60) {
+	const record = {
+		v: 1,
+		type: "event",
+		from: `session/${alias ?? id}`,
+		to: "group/presence",
+		event: { kind: "presence", state: "idle", ttl: ttlS, participant: id, alias },
+	};
+	try {
+		execFileSync(CLI, ["--db", dbPath, "publish", "group/presence", "--json", JSON.stringify(record)], {
+			stdio: "ignore",
+		});
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /** Run a slash command in a session and report what the prompt did with it. */
@@ -231,7 +249,9 @@ async function scenarioHonorPrompt() {
 	await wait(1000);
 
 	const { data } = await send({ id: "e", type: "get_entries" });
-	const { custom, assistants } = split(data.entries);
+	const { custom: allCustom, assistants } = split(data.entries);
+	// Other extensions may add entries of their own, so count the ones this one owns.
+	const custom = allCustom.filter((entry) => entry.customType === "msgq");
 	shutdown(child);
 
 	report(
@@ -484,15 +504,22 @@ async function scenarioScopedWrite() {
 	}
 
 	const native = honker.open(own, { watcherPollIntervalMs: 50 });
-	const streams = Number(native.query("SELECT COUNT(*) AS n FROM _honker_stream")[0].n);
+	const topics = native.query("SELECT DISTINCT topic FROM _honker_stream").map((row) => String(row.topic));
+	const streams = topics.length;
 	const leases = Number(
 		native.query("SELECT COUNT(*) AS n FROM _honker_locks WHERE name LIKE 'msgq:participant:%'")[0].n,
 	);
 	native.close();
 	shutdown(child);
 
-	const ok = online && streams === 0 && leases === 1;
-	report("scoped-write", ok, `online=${online} streams=${streams} participantLeases=${leases}`);
+	// Presence is a record now, so the one stream the extension appends to is the presence
+	// address — and nothing else. The engine's lock table is no longer part of presence at all.
+	const ok = online && streams === 1 && topics.length === 1 && topics[0] === PRESENCE_ADDRESS && leases === 0;
+	report(
+		"scoped-write",
+		ok,
+		`online=${online} streams=${streams} topics=${topics.join(",") || "-"} participantLeases=${leases}`,
+	);
 }
 
 async function scenarioCrashExpiry() {
@@ -585,21 +612,28 @@ async function scenarioRename() {
 }
 
 async function scenarioSquat() {
-	// A dedicated bus and a pinned session id, so we can take the lease first.
+	// A dedicated bus and a pinned session id. A foreign participant announces presence for the
+	// same address before the session exists. Under records there is no lease to win, so what has
+	// to hold is that the foreign record survives, the session appears beside it, consumption is
+	// unaffected, and the collision is said out loud instead of being silently doubled.
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-squat-")), "msgq.db");
 	const id = "00000000-0000-7000-8000-000000000002";
-	const name = `msgq:participant:session:idle:${id}`;
 	const address = `session/${id}`;
 
-	const native = honker.open(own, { watcherPollIntervalMs: 50 });
-	const stolen = native.tryLock(name, "other#squat", 60);
-	native.close();
-	if (!stolen) report("squat", false, "could not pre-take the lease");
+	const squatter = {
+		v: 1,
+		type: "event",
+		from: address,
+		to: PRESENCE_ADDRESS,
+		event: { kind: "presence", state: "idle", ttl: 120, participant: "squatter", alias: "squatter" },
+	};
+	execFileSync(CLI, ["--db", own, "publish", PRESENCE_ADDRESS, "--json", JSON.stringify(squatter)]);
 
-	const { child, send } = startPi(["--session-id", id, "--msgq-policy", "honor"], { MSGQ_DB: own });
+	const session = startPi(["--session-id", id, "--msgq-policy", "honor"], { MSGQ_DB: own });
+	const { child, send } = session;
 	await send({ id: "s", type: "get_state" });
 
-	// Consumption must continue even though presence could not register.
+	// Consumption must continue even though another participant claims this address.
 	execFileSync(CLI, ["--db", own, "publish", address, "squat delivery check"]);
 	await wait(2500);
 
@@ -608,16 +642,22 @@ async function scenarioSquat() {
 		(entry) => entry.type === "custom_message" && String(entry.content).includes("squat delivery check"),
 	);
 
-	const after = honker.open(own, { watcherPollIntervalMs: 50 });
-	const rows = after.query("SELECT owner FROM _honker_locks WHERE name = ?", [name]);
-	after.close();
-	const owner = rows[0]?.owner;
+	const roster = execFileSync(CLI, ["--db", own, "sessions", "--json"], { encoding: "utf8" })
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line));
+	const atAddress = roster.filter((entry) => entry.address === address);
+	const warned = notices(session).some((line) => line.includes("publishing presence at"));
+
 	shutdown(child);
-
-	const ok = delivered && owner === "other#squat";
-	report("squat", ok, `delivered=${delivered} owner=${owner}`);
+	const ok = delivered && atAddress.length === 2 && warned;
+	report(
+		"squat",
+		ok,
+		`delivered=${delivered} entriesAtAddress=${atAddress.length} warned=${warned}`,
+	);
 }
-
 
 async function scenarioPresenceOff() {
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-off-")), "msgq.db");
@@ -939,7 +979,7 @@ async function scenarioCommandNoPeers() {
 
 async function scenarioCommandPickAndSend() {
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-pick-")), "msgq.db");
-	if (!leasePeer(own, "reviewer", "peer-one")) report("command-pick-and-send", false, "could not make a peer");
+	if (!announcePeer(own, "reviewer", "peer-one")) report("command-pick-and-send", false, "could not make a peer");
 
 	const session = startPi([], { MSGQ_DB: own });
 	await session.send({ id: "s", type: "get_state" });
@@ -1054,7 +1094,7 @@ async function scenarioCommandPeerCompose() {
 
 async function scenarioCommandPeerPick() {
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-peerpick-")), "msgq.db");
-	if (!leasePeer(own, "reviewer", "peer-two")) report("command-peer-pick", false, "could not make a peer");
+	if (!announcePeer(own, "reviewer", "peer-two")) report("command-peer-pick", false, "could not make a peer");
 
 	const session = startPi([], { MSGQ_DB: own });
 	await session.send({ id: "s", type: "get_state" });
@@ -1204,7 +1244,7 @@ async function scenarioCommandIdentity() {
 async function scenarioCommandNoDialog() {
 	// A peer exists, so the pick would be needed, and there is no session to show one.
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-nodialog-")), "msgq.db");
-	if (!leasePeer(own, "reviewer", "peer-three")) report("command-no-dialog", false, "could not make a peer");
+	if (!announcePeer(own, "reviewer", "peer-three")) report("command-no-dialog", false, "could not make a peer");
 
 	const listing = oneShot("/peers", {}, own);
 	const pick = oneShot("/peer", {}, own);
@@ -1266,7 +1306,7 @@ async function scenarioCompanionList() {
 	const agents = fakeAgents();
 	// Only `reviewer` is on the bus; `lonely` is a tab that is not listening, and the
 	// third has no name at all.
-	const leased = leasePeer(own, "reviewer", "peer-list", 120);
+	const leased = announcePeer(own, "reviewer", "peer-list", 120);
 
 	const env = {
 		...process.env,
@@ -1319,7 +1359,7 @@ async function scenarioCommandCompanions() {
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-cmdcomp-")), "msgq.db");
 	const herdr = fakeHerdr();
 	const agents = fakeAgents();
-	leasePeer(own, "reviewer", "peer-comp", 120);
+	announcePeer(own, "reviewer", "peer-comp", 120);
 
 	const session = startPi([], {
 		MSGQ_DB: own,

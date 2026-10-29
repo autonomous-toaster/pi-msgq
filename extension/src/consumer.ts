@@ -32,19 +32,6 @@ export interface Subscription {
 	close(): void;
 }
 
-/** A held lease. */
-export interface Lease {
-	name: string;
-	owner: string;
-	heartbeat(ttlS: number): boolean;
-	release(): void;
-}
-
-interface NativeLock {
-	heartbeat(ttlS: number): boolean;
-	release(): boolean;
-}
-
 interface NativeUpdateEvents {
 	next(): Promise<void>;
 	close(): void;
@@ -61,7 +48,6 @@ interface NativeDatabase {
 	stream(name: string): NativeStream;
 	updateEvents(): NativeUpdateEvents;
 	query(sql: string, params?: unknown[]): Array<Record<string, unknown>>;
-	tryLock(name: string, owner: string, ttlS: number): NativeLock | null;
 	close(): void;
 }
 
@@ -191,32 +177,6 @@ export class Bus {
 		} catch {
 			return undefined;
 		}
-	}
-
-	/**
-	 * Acquire a lease. Returns undefined when the name is already held by
-	 * someone else, which the holder must treat as "not registered".
-	 */
-	acquireLease(name: string, owner: string, ttlS: number): Lease | undefined {
-		const lock = this.db.tryLock(name, owner, ttlS);
-		if (!lock) return undefined;
-		let released = false;
-		return {
-			name,
-			owner,
-			heartbeat(ttl) {
-				return lock.heartbeat(ttl);
-			},
-			release() {
-				if (released) return;
-				released = true;
-				try {
-					lock.release();
-				} catch {
-					// Releasing an already-released lease is not an error.
-				}
-			},
-		};
 	}
 
 	/**

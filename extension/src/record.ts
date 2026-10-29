@@ -6,8 +6,16 @@
 
 export const PROTOCOL_VERSION = 1;
 
-/** The record types this version understands. Unknown types still decode. */
-export const KNOWN_TYPES = ["prompt", "steer", "follow_up", "note", "event"] as const;
+/** The record types this version knows. A convention, not an allow-list: an unknown type still
+ * decodes, and is delivered as content. See `PROTOCOL.md`. */
+export const KNOWN_TYPES = [
+	"prompt",
+	"steer",
+	"follow_up",
+	"note",
+	"command",
+	"event",
+] as const;
 
 /** A decoded msgq record. Unknown top-level fields are preserved. */
 export interface MsgqRecord {

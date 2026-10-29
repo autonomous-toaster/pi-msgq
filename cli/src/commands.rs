@@ -1,6 +1,6 @@
 //! Command implementations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
@@ -374,6 +374,7 @@ fn build_record(canonical: &str, args: &PublishArgs) -> Result<Value, Error> {
         if let Some(raw) = &args.reply_to {
             value["reply_to"] = json!(resolve_reply_to(raw, &rec.from)?);
         }
+        note_unknown_type(&rec.kind);
         Ok(value)
     } else {
         let kind = args.kind.clone().unwrap_or_else(|| "prompt".to_string());
@@ -405,7 +406,21 @@ fn build_record(canonical: &str, args: &PublishArgs) -> Result<Value, Error> {
             .map(|raw| resolve_reply_to(raw, &from))
             .transpose()?;
         record::validate(&rec)?;
+        note_unknown_type(&kind);
         record::to_value(&rec)
+    }
+}
+
+/// Say so when a record names a type this version does not know.
+///
+/// The wire accepts it — a reader that does not know a type still has a record — so this is a note
+/// rather than a refusal. It is worth one line on stderr because the usual cause is a typo.
+fn note_unknown_type(kind: &str) {
+    if !record::is_known_type(kind) {
+        eprintln!(
+            "msgq: type '{kind}' is not one this version knows; publishing anyway, and a reader \
+             will deliver it as content"
+        );
     }
 }
 
@@ -601,36 +616,75 @@ pub fn consumers(
     Ok(())
 }
 
-/// List live participants from the bus leases.
-pub fn sessions(db_path: &Path, json_out: bool) -> Result<(), Error> {
-    let (store, _) = Store::open(db_path)?;
-    let leases = store.list_leases()?;
-    let now = unix_now();
+/// The presence tail, oldest first: what the roster and the collection commands both read.
+fn presence_tail(store: &Store) -> Result<Vec<(i64, presence::PresenceRecord)>, Error> {
+    let head = store.max_offset(presence::PRESENCE_ADDRESS)?;
+    let start = (head - presence::SCAN_RECORDS).max(0);
+    let events = store.read_since(presence::PRESENCE_ADDRESS, start, presence::SCAN_RECORDS)?;
 
-    // De-duplicate by participant id, preferring the most active state.
-    let mut best: BTreeMap<String, (u8, Roster)> = BTreeMap::new();
-    for (name, owner, expires_at) in leases {
-        let Some((kind, state, id)) = presence::parse_lease_name(&name) else {
+    let mut out = Vec::new();
+    for event in events {
+        let Ok(payload) = serde_json::from_slice::<Value>(&event.payload) else {
             continue;
         };
-        let rank = presence::state_rank(&state);
-        let entry = Roster {
-            address: presence::address_for(&kind, &id, &owner),
-            kind,
-            state,
-            alias: presence::alias_from_owner(&owner).map(|alias| alias.to_string()),
-            expires_at,
+        let Some(record) = presence::parse_presence(&payload) else {
+            continue;
         };
-        match best.get(&id) {
-            Some((existing, _)) if *existing <= rank => {}
-            _ => {
-                best.insert(id, (rank, entry));
-            }
+        out.push((event.created_at, record));
+    }
+    Ok(out)
+}
+
+/// Who is live, by participant. The roster and cursor collection agree by construction.
+fn live_participants(store: &Store) -> Result<BTreeSet<String>, Error> {
+    let now = unix_now();
+    let mut live: BTreeSet<String> = BTreeSet::new();
+    for (created_at, record) in presence_tail(store)? {
+        if presence::is_retraction(&record.state) {
+            live.remove(&record.participant);
+        } else if created_at + record.ttl > now {
+            live.insert(record.participant);
         }
     }
+    Ok(live)
+}
 
-    let mut entries: Vec<Roster> = best.into_values().map(|(_, entry)| entry).collect();
-    entries.sort_by(|a, b| a.address.cmp(&b.address));
+/// List live participants from the presence address.
+pub fn sessions(db_path: &Path, json_out: bool) -> Result<(), Error> {
+    let (store, _) = Store::open(db_path)?;
+    let now = unix_now();
+
+    // One entry per participant. Stream order is the truth: the last record for a participant is
+    // its current state, a retraction removes it, and a later record brings it back.
+    let mut best: BTreeMap<String, Roster> = BTreeMap::new();
+    for (created_at, record) in presence_tail(&store)? {
+        if presence::is_retraction(&record.state) {
+            best.remove(&record.participant);
+            continue;
+        }
+        let expires_at = created_at + record.ttl;
+        if expires_at <= now {
+            continue;
+        }
+        best.insert(
+            record.participant.clone(),
+            Roster {
+                address: record.address.clone(),
+                kind: presence::kind_of(&record.address),
+                state: record.state.clone(),
+                alias: record.alias.clone(),
+                expires_at,
+            },
+        );
+    }
+
+    let mut entries: Vec<Roster> = best.into_values().collect();
+    entries.sort_by(|a, b| {
+        a.address
+            .cmp(&b.address)
+            .then_with(|| a.state.cmp(&b.state))
+            .then_with(|| b.expires_at.cmp(&a.expires_at))
+    });
 
     if json_out {
         for entry in &entries {
@@ -658,6 +712,196 @@ pub fn sessions(db_path: &Path, json_out: bool) -> Result<(), Error> {
             );
         }
     }
+    Ok(())
+}
+
+/// Parse an age such as `7d`, `36h`, `90m` or `45s` into seconds.
+fn parse_age(raw: &str) -> Result<i64, Error> {
+    let trimmed = raw.trim();
+    let (digits, unit) = if let Some(rest) = trimmed.strip_suffix('d') {
+        (rest, 86_400)
+    } else if let Some(rest) = trimmed.strip_suffix('h') {
+        (rest, 3_600)
+    } else if let Some(rest) = trimmed.strip_suffix('m') {
+        (rest, 60)
+    } else if let Some(rest) = trimmed.strip_suffix('s') {
+        (rest, 1)
+    } else {
+        return Err(Error::usage(format!(
+            "'{trimmed}' is not an age; expected a number and one of d, h, m, s (for example 7d)"
+        )));
+    };
+    let count: i64 = digits.trim().parse().map_err(|_| {
+        Error::usage(format!(
+            "'{trimmed}' is not an age; expected a number and one of d, h, m, s (for example 7d)"
+        ))
+    })?;
+    if count <= 0 {
+        return Err(Error::usage(format!("'{trimmed}' must be a positive age")));
+    }
+    Ok(count * unit)
+}
+
+/// What `msgq prune` was asked to do.
+pub struct PruneArgs {
+    pub older_than: String,
+    pub apply: bool,
+}
+
+/// Remove records older than an age, never removing one a consumer has not passed.
+pub fn prune(db_path: &Path, args: PruneArgs) -> Result<(), Error> {
+    let age = parse_age(&args.older_than)?;
+    let (store, _) = Store::open(db_path)?;
+    let threshold = unix_now() - age;
+
+    // The oldest cursor in a stream pins everything from that record onwards: retention may only
+    // take what every consumer of that stream has already passed.
+    let mut pins: BTreeMap<String, (i64, BTreeSet<String>)> = BTreeMap::new();
+    for (name, topic, offset) in store.list_consumers(None)? {
+        let entry = pins.entry(topic).or_insert((offset, BTreeSet::new()));
+        entry.0 = entry.0.min(offset);
+        entry.1.insert(name);
+    }
+
+    // Presence is a window, not a history: the newest record of every participant is what the
+    // roster reads, so it stays even when it is older than the age asked for.
+    let presence_keep = store.newest_presence_offsets(presence::PRESENCE_ADDRESS)?;
+
+    let mut planned = 0i64;
+    let mut removed = 0i64;
+    let mut pinned_total = 0i64;
+    let mut report: Vec<String> = Vec::new();
+
+    for stream in store.stream_summaries()? {
+        // A cursor names the last record its consumer has taken responsibility for, so the
+        // removable range is inclusive at both ends.
+        let Some(end) = store.prefix_end(&stream.topic, threshold)? else {
+            continue;
+        };
+        let mut cut = end;
+        if let Some((pin, _)) = pins.get(&stream.topic) {
+            let capped = cut.min(*pin);
+            pinned_total += cut - capped;
+            cut = capped;
+        }
+        if cut < 0 {
+            continue;
+        }
+
+        let keep: &[i64] = if stream.topic == presence::PRESENCE_ADDRESS {
+            &presence_keep
+        } else {
+            &[]
+        };
+        let count = store.count_stream_prefix(&stream.topic, cut, keep)?;
+        if count <= 0 {
+            continue;
+        }
+        planned += count;
+        if args.apply {
+            removed += store.delete_stream_prefix(&stream.topic, cut, keep)? as i64;
+        }
+        report.push(format!(
+            "  {}\t{} of {}",
+            stream.topic, count, stream.records
+        ));
+    }
+
+    if report.is_empty() {
+        println!("nothing is older than {}", args.older_than);
+        return Ok(());
+    }
+    for line in &report {
+        println!("{line}");
+    }
+    if pinned_total > 0 {
+        // A bus accumulates a dead cursor per session per address, so naming all of them would be a
+        // wall of text. Name a few, say how many more there are, and let `db info` be the index.
+        let names: BTreeSet<&str> = pins
+            .values()
+            .flat_map(|(_, names)| names.iter().map(String::as_str))
+            .collect();
+        let shown: Vec<&str> = names.iter().take(5).copied().collect();
+        let more = names.len().saturating_sub(shown.len());
+        let tail = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "msgq: {pinned_total} record(s) kept because a consumer has not passed them ({}{tail})",
+            shown.join(", ")
+        );
+    }
+    if !presence_keep.is_empty() {
+        eprintln!(
+            "msgq: the newest presence record of {} participant(s) is kept",
+            presence_keep.len()
+        );
+    }
+    if args.apply {
+        println!("removed {removed} record(s)");
+        if removed > 0 {
+            // The pages a prune frees are reused, not returned; compacting is what makes the file
+            // smaller again, and it is allowed to fail.
+            match store.compact() {
+                Ok(()) => {}
+                Err(error) => eprintln!("msgq: the file could not be compacted: {error}"),
+            }
+        }
+    } else {
+        println!("would remove {planned} record(s); pass --apply to remove them");
+    }
+    Ok(())
+}
+
+/// A session-shaped consumer cursor: `<alias>#<uuid>` or a bare `<uuid>`.
+fn session_id_of(consumer: &str) -> Option<&str> {
+    let candidate = consumer
+        .rsplit_once('#')
+        .map(|(_, id)| id)
+        .unwrap_or(consumer);
+    is_session_id(candidate).then_some(candidate)
+}
+
+fn is_session_id(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, ch)| match index {
+            8 | 13 | 18 | 23 => ch == '-',
+            _ => ch.is_ascii_hexdigit(),
+        })
+}
+
+/// Remove the cursors of sessions that are no longer live.
+///
+/// Only session-shaped consumer names are considered: a cursor named by a script is that script's
+/// business, and collecting it would move its position without anybody asking.
+pub fn consumers_gc(db_path: &Path, apply: bool) -> Result<(), Error> {
+    let (store, _) = Store::open(db_path)?;
+    let live = live_participants(&store)?;
+
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    for (name, topic, _) in store.list_consumers(None)? {
+        let Some(id) = session_id_of(&name) else {
+            continue;
+        };
+        if live.contains(id) {
+            continue;
+        }
+        candidates.push((name, topic));
+    }
+
+    if !apply {
+        println!("{}", candidates.len());
+        eprintln!("msgq: pass --apply to remove them");
+        return Ok(());
+    }
+
+    let mut removed = 0usize;
+    for (name, topic) in &candidates {
+        removed += store.delete_consumers(name, Some(topic))?;
+    }
+    println!("{removed}");
     Ok(())
 }
 
@@ -699,6 +943,7 @@ pub fn cursor(db_path: &Path, action: CursorAction) -> Result<(), Error> {
 pub fn db_info(db_path: &Path) -> Result<(), Error> {
     let existed_before = db_path.exists();
     let (store, created) = Store::open(db_path)?;
+    let now = unix_now();
 
     let size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     let version = store
@@ -707,9 +952,9 @@ pub fn db_info(db_path: &Path) -> Result<(), Error> {
     let created_by = store
         .meta("created_by")?
         .unwrap_or_else(|| "unknown".to_string());
-    let topics = store.list_topics()?;
+    let streams = store.stream_summaries()?;
     let consumers = store.list_consumers(None)?;
-    let messages: i64 = topics.iter().map(|(_, count, _)| *count).sum();
+    let messages: i64 = streams.iter().map(|stream| stream.records).sum();
 
     println!("path:             {}", crate::config::display(db_path));
     println!(
@@ -718,22 +963,55 @@ pub fn db_info(db_path: &Path) -> Result<(), Error> {
     );
     println!("created:          {}", if created { "yes" } else { "no" });
     println!("size_bytes:       {size}");
+    // The log carries the recent writes while the bus is open, so the file alone under-reports it.
+    let wal_size = {
+        let mut path = db_path.as_os_str().to_os_string();
+        path.push("-wal");
+        std::fs::metadata(std::path::PathBuf::from(path))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
+    println!("wal_bytes:        {wal_size}");
     println!("protocol_version: {version}");
     println!("created_by:       {created_by}");
-    println!("topics:           {}", topics.len());
+    println!("topics:           {}", streams.len());
     println!("messages:         {messages}");
     println!("consumers:        {}", consumers.len());
 
-    if !topics.is_empty() {
-        println!("\nstreams:");
-        for (topic, count, max) in &topics {
-            println!("  {topic}\t{count}\t{max}");
+    let presence_age = streams
+        .iter()
+        .find(|stream| stream.topic == presence::PRESENCE_ADDRESS)
+        .map(|stream| (now - stream.oldest_at).max(0));
+    match presence_age {
+        Some(age) => println!("presence_age_s:   {age}"),
+        None => println!("presence_age_s:   -"),
+    }
+
+    if !streams.is_empty() {
+        // The third column is how long the oldest record has been sitting there: a stream that
+        // never ages is the one nobody is reading.
+        println!("\nstreams:          topic\trecords\tnewest\toldest_age_s");
+        for stream in &streams {
+            println!(
+                "  {}\t{}\t{}\t{}",
+                stream.topic,
+                stream.records,
+                stream.newest_offset,
+                (now - stream.oldest_at).max(0)
+            );
         }
     }
     if !consumers.is_empty() {
-        println!("\nconsumers:");
+        // Lag is the distance between a cursor and the head of its stream: the one number that
+        // says whether anything is stuck.
+        println!("\nconsumers:        name\ttopic\tcursor\tlag");
         for (name, topic, offset) in &consumers {
-            println!("  {name}\t{topic}\t{offset}");
+            let head = streams
+                .iter()
+                .find(|stream| stream.topic == *topic)
+                .map(|stream| stream.newest_offset)
+                .unwrap_or(*offset);
+            println!("  {name}\t{topic}\t{offset}\t{}", (head - offset).max(0));
         }
     }
     Ok(())

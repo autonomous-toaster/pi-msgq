@@ -1,0 +1,78 @@
+{
+  "v": 1,
+  "cases": [
+    {
+      "file": "01-note-minimal.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "the smallest record there is: four required keys and a body"
+    },
+    {
+      "file": "02-prompt-with-reply-to.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "reply_to and meta.trace are optional and survive a round trip"
+    },
+    {
+      "file": "03-ack-received.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "an acknowledgement is an ordinary event record"
+    },
+    {
+      "file": "04-ack-completed.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "the terminal acknowledgement phase"
+    },
+    {
+      "file": "05-presence-idle.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "presence is an ordinary event record on the presence address"
+    },
+    {
+      "file": "06-command.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "command is a known type in both implementations, not just one"
+    },
+    {
+      "file": "07-unknown-type.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "the known set is a convention, not an allow-list: neither side rejects a novel type"
+    },
+    {
+      "file": "08-unknown-meta-and-field.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "meta is open and unknown top-level fields are preserved"
+    },
+    {
+      "file": "09-future-version.json",
+      "publish": "reject",
+      "read": "reject",
+      "mentions": "2",
+      "why": "a version this build does not implement is refused by name, on both sides"
+    },
+    {
+      "file": "10-not-an-object.json",
+      "publish": "reject",
+      "read": "reject",
+      "why": "a record is a JSON object"
+    },
+    {
+      "file": "11-event-without-event.json",
+      "publish": "reject",
+      "read": "accept",
+      "why": "a publisher may not write an event record with no event; a reader tolerates what it did not write"
+    },
+    {
+      "file": "12-missing-recipient.json",
+      "publish": "reject",
+      "read": "reject",
+      "why": "to is required: it names the stream the record belongs to"
+    }
+  ]
+}

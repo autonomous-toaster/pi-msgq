@@ -1,10 +1,22 @@
-//! Presence lease parsing for the `sessions` listing.
+//! Presence records, as the roster reads them.
 //!
-//! Lease names are produced by the pi extension as
-//! `msgq:participant:<kind>:<state>:<id>`; this module is the reader side.
+//! Presence is public: any process that can publish may appear, which is the point. The record's
+//! shape is described in `PROTOCOL.md`; this module only parses it, tolerantly.
 
-/// Prefix shared by every participant lease.
-pub const PRESENCE_PREFIX: &str = "msgq:participant:";
+use serde_json::Value;
+
+/// The address every participant publishes presence to, and the roster reads.
+pub const PRESENCE_ADDRESS: &str = "group/presence";
+
+/// How many of the newest presence records the roster reads.
+///
+/// Presence is a fixed-size window in practice: one record per participant per renewal, so a few
+/// hundred of them cover far more live participants than a bus ever has. Reading the tail rather
+/// than the stream keeps `sessions` cheap on a bus that has been running for months.
+pub const SCAN_RECORDS: i64 = 512;
+
+/// The lifetime assumed when a record does not declare one.
+pub const DEFAULT_TTL_S: i64 = 30;
 
 /// One live participant, ready to print.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,100 +28,135 @@ pub struct Roster {
     pub expires_at: i64,
 }
 
-/// Parse a lease name into `(kind, state, id)`.
+/// One parsed presence record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceRecord {
+    /// The address the publisher answers at: the record's `from`.
+    pub address: String,
+    /// Stable identity, so two participants sharing an alias stay distinct.
+    pub participant: String,
+    pub alias: Option<String>,
+    pub state: String,
+    /// Declared lifetime of this record, in seconds.
+    pub ttl: i64,
+}
+
+/// Parse a stored payload as a presence record. Anything unrecognized is not presence.
 ///
-/// `id` is the trailing remainder, so an id containing `:` still parses.
-pub fn parse_lease_name(name: &str) -> Option<(String, String, String)> {
-    let rest = name.strip_prefix(PRESENCE_PREFIX)?;
-    let mut parts = rest.splitn(3, ':');
-    let kind = parts.next()?;
-    let state = parts.next()?;
-    let id = parts.next()?;
-    if kind.is_empty() || state.is_empty() || id.is_empty() {
+/// `participant` falls back to the address, so a client that publishes nothing but `from`, `state`
+/// and a lifetime still appears — which is the whole reason presence is a record.
+pub fn parse_presence(record: &Value) -> Option<PresenceRecord> {
+    if record.get("type")?.as_str()? != "event" {
         return None;
     }
-    Some((kind.to_string(), state.to_string(), id.to_string()))
-}
-
-/// The alias carried by an owner string (`<alias>#<id>`), if any.
-pub fn alias_from_owner(owner: &str) -> Option<&str> {
-    let (alias, _) = owner.split_once('#')?;
-    let alias = alias.trim();
-    if alias.is_empty() { None } else { Some(alias) }
-}
-
-/// The address a participant is discoverable at: `<kind>/<alias-or-id>`.
-pub fn address_for(kind: &str, id: &str, owner: &str) -> String {
-    let self_ref = alias_from_owner(owner).unwrap_or(id);
-    format!("{kind}/{self_ref}")
-}
-
-/// Sort rank used to de-duplicate by participant: busy, then idle, then blocked.
-pub fn state_rank(state: &str) -> u8 {
-    match state {
-        "busy" => 0,
-        "idle" => 1,
-        "blocked" => 2,
-        _ => 3,
+    let event = record.get("event")?.as_object()?;
+    if event.get("kind")?.as_str()? != "presence" {
+        return None;
     }
+
+    let address = record.get("from")?.as_str()?.trim();
+    if address.is_empty() {
+        return None;
+    }
+    let state = event.get("state")?.as_str()?.trim();
+    if state.is_empty() {
+        return None;
+    }
+
+    let ttl = event
+        .get("ttl")
+        .and_then(Value::as_i64)
+        .filter(|ttl| *ttl > 0)
+        .unwrap_or(DEFAULT_TTL_S);
+    let participant = event
+        .get("participant")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(address)
+        .to_string();
+    let alias = event
+        .get("alias")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    Some(PresenceRecord {
+        address: address.to_string(),
+        participant,
+        alias,
+        state: state.to_string(),
+        ttl,
+    })
+}
+
+/// Whether a record retracts presence instead of describing it.
+pub fn is_retraction(state: &str) -> bool {
+    state.eq_ignore_ascii_case("gone")
+}
+
+/// The scheme of an address, which is what a participant is: `session`, `cli`, `group`, `cwd`.
+pub fn kind_of(address: &str) -> String {
+    address
+        .split_once('/')
+        .map(|(scheme, _)| scheme)
+        .unwrap_or("group")
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn parses_a_participant_lease() {
-        assert_eq!(
-            parse_lease_name("msgq:participant:session:busy:01a127d9"),
-            Some(("session".into(), "busy".into(), "01a127d9".into()))
-        );
+    fn parses_a_complete_record() {
+        let payload = json!({
+            "v": 1, "type": "event", "from": "session/api-worker", "to": PRESENCE_ADDRESS,
+            "event": {"kind": "presence", "state": "busy", "ttl": 30,
+                      "participant": "01a127d9", "alias": "api-worker"}
+        });
+        let record = parse_presence(&payload).unwrap();
+        assert_eq!(record.address, "session/api-worker");
+        assert_eq!(record.participant, "01a127d9");
+        assert_eq!(record.alias.as_deref(), Some("api-worker"));
+        assert_eq!(record.state, "busy");
+        assert_eq!(record.ttl, 30);
     }
 
     #[test]
-    fn id_is_the_trailing_remainder() {
+    fn a_client_that_publishes_barely_anything_still_appears() {
+        let payload = json!({
+            "v": 1, "type": "event", "from": "cli/ci@host", "to": PRESENCE_ADDRESS,
+            "event": {"kind": "presence", "state": "idle"}
+        });
+        let record = parse_presence(&payload).unwrap();
         assert_eq!(
-            parse_lease_name("msgq:participant:cli:idle:a:b:c"),
-            Some(("cli".into(), "idle".into(), "a:b:c".into()))
+            record.participant, "cli/ci@host",
+            "the address is the fallback identity"
         );
+        assert_eq!(record.alias, None);
+        assert_eq!(record.ttl, DEFAULT_TTL_S);
+        assert_eq!(kind_of(&record.address), "cli");
     }
 
     #[test]
-    fn rejects_non_participant_names() {
-        for name in [
-            "msgq:other:session:busy:x",
-            "msgq:participant:session:busy",
-            "msgq:participant:session",
-            "msgq:participant:session:busy:",
-            "nonsense",
+    fn a_record_that_is_not_presence_is_ignored() {
+        for payload in [
+            json!({"v": 1, "type": "note", "from": "a", "to": "b", "message": "hi"}),
+            json!({"v": 1, "type": "event", "from": "a", "to": "b", "event": {"kind": "ack", "phase": "started"}}),
+            json!({"v": 1, "type": "event", "from": "a", "to": "b", "event": {"kind": "presence"}}),
+            json!({"v": 1, "type": "event", "to": "b", "event": {"kind": "presence", "state": "idle"}}),
+            json!(["not", "an", "object"]),
         ] {
-            assert_eq!(parse_lease_name(name), None, "{name}");
+            assert_eq!(parse_presence(&payload), None, "{payload}");
         }
     }
 
     #[test]
-    fn alias_comes_from_the_owner() {
-        assert_eq!(alias_from_owner("api-worker#01a127d9"), Some("api-worker"));
-        assert_eq!(alias_from_owner("01a127d9"), None);
-        assert_eq!(alias_from_owner("#01a127d9"), None);
-    }
-
-    #[test]
-    fn address_prefers_alias_then_id() {
-        assert_eq!(
-            address_for("session", "01a127d9", "api-worker#01a127d9"),
-            "session/api-worker"
-        );
-        assert_eq!(
-            address_for("session", "01a127d9", "01a127d9"),
-            "session/01a127d9"
-        );
-    }
-
-    #[test]
-    fn state_rank_prefers_busy() {
-        assert!(state_rank("busy") < state_rank("idle"));
-        assert!(state_rank("idle") < state_rank("blocked"));
-        assert!(state_rank("blocked") < state_rank("whatever"));
+    fn retraction_is_recognized() {
+        assert!(is_retraction("gone"));
+        assert!(!is_retraction("idle"));
     }
 }

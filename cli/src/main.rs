@@ -155,6 +155,15 @@ enum Command {
         #[command(subcommand)]
         action: DbCmd,
     },
+    /// Remove records older than an age, never one a consumer has not passed.
+    Prune {
+        /// Age: a number and one of d, h, m, s. Records older than it are removable.
+        #[arg(long, value_name = "AGE")]
+        older_than: String,
+        /// Remove what would be removed, instead of reporting it.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -165,6 +174,12 @@ enum ConsumersCmd {
         /// Restrict to one topic.
         #[arg(long)]
         topic: Option<String>,
+    },
+    /// Collect the cursors of sessions that are no longer live.
+    Gc {
+        /// Remove them, instead of reporting how many there are.
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -274,6 +289,9 @@ fn run(cli: Cli) -> Result<(), Error> {
         ),
         Command::Topics { json } => commands::topics(&db, json),
         Command::Sessions { json } => commands::sessions(&db, json),
+        Command::Prune { older_than, apply } => {
+            commands::prune(&db, commands::PruneArgs { older_than, apply })
+        }
         Command::Consumers {
             topic,
             json,
@@ -282,6 +300,9 @@ fn run(cli: Cli) -> Result<(), Error> {
             let action = match action {
                 None => ConsumersAction::List,
                 Some(ConsumersCmd::Rm { name, topic }) => ConsumersAction::Rm { name, topic },
+                Some(ConsumersCmd::Gc { apply }) => {
+                    return commands::consumers_gc(&db, apply);
+                }
             };
             commands::consumers(&db, topic.as_deref(), action, json)
         }

@@ -1,0 +1,7 @@
+{
+  "v": 1,
+  "type": "progress",
+  "from": "cli/ci@host",
+  "to": "group/builds",
+  "message": "3 of 5 jobs done"
+}

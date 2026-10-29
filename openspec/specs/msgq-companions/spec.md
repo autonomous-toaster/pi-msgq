@@ -2,8 +2,10 @@
 
 ## Purpose
 
-The `companion` command starts and stops companion agents: a real `pi` process in its own herdr
-tab, wired to the message bus so the two ends can talk to each other.
+The `companion` command starts and stops companion agents: a real `pi` process in its own terminal
+tab, wired to the message bus so the two ends can talk to each other. It is the reference
+implementation of a launcher contract — herdr is one way to satisfy it, and nothing on the wire
+depends on this command.
 
 ## Requirements
 

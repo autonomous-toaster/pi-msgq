@@ -70,14 +70,43 @@ When a spawn misbehaves, do it without an agent in the loop:
 companion answers its parent and nobody else, which is what stops a message from commanding a
 shell-capable agent.
 
+## What the repository promises
+
+Three roles, and they are worth keeping apart when changing anything:
+
+- `PROTOCOL.md` is the **promise**: what a client other than pi may depend on. Changing it needs a
+  `v` bump, so a change there is a decision, not an edit.
+- `extension/` is the **reference client**: it may break deliberately, and it never justifies a
+  change to the wire.
+- `companion/` and `extension/scripts/e2e.mjs` are the **showcase**: replaceable, and the reason to
+  believe the promise is enough. A launcher is one implementation of a documented contract.
+
+The rule that keeps it that way: if pi needs something, it lands in the extension, or in a
+convention composed from records that already exist. If a bash script cannot do it with `publish`
+and `read`, it is a protocol change and needs a reason that is not "the reference client wants it".
+
 ## Tests
 
 ```bash
-cargo test --manifest-path cli/Cargo.toml        # 38: 23 unit + 15 integration
-node --test extension/test/                      # 115 unit
+cargo test --manifest-path cli/Cargo.toml        # unit + integration, including the fixtures
+node --test extension/test/                      # unit, including the fixtures
 cargo fmt --manifest-path cli/Cargo.toml --check
 cargo clippy --manifest-path cli/Cargo.toml --all-targets -- -D warnings
 ```
+
+Both suites read `protocol/fixtures/` — canonical records plus `expectations.json`, which says what
+each side must do with them (the CLI checks the publisher's gate, the extension checks the reader's
+tolerance) — and both check their known-type list against the one published in `PROTOCOL.md`. Add a
+fixture and its expectation together, or `every_fixture_has_an_expectation` fails.
+
+The one client that is not pi is a shell script, and it is the canary for the wire:
+
+```bash
+MSGQ_BIN="$PWD/cli/target/release/msgq" ./scripts/gitlab-watch.sh --to session/nobody --once --dry-run
+```
+
+It exercises collection, its ledger and a publish path with nothing but the CLI. If a change breaks a
+client that is not the extension, this is where it shows first.
 
 The extension tests are `.ts` and run with no build step, so the test runner needs to strip types:
 Node 23.6+, or 22.6+ with `--experimental-strip-types`.
@@ -180,12 +209,13 @@ manifest lost the extension entry.
 cli/            Rust. The bus and its protocol.
   src/          address.rs    address grammar and canonicalization
                 config.rs     bus location resolution
-                record.rs     the message record contract
+                record.rs     the message record contract, checked against the fixtures
                 store.rs      a thin wrapper over honker's durable streams
-                presence.rs   lease parsing for the `sessions` listing
-                commands.rs   the verbs: publish, read, follow, await, ask, sessions
+                presence.rs   presence records, as the `sessions` listing reads them
+                commands.rs   the verbs: publish, read, follow, await, ask, sessions, prune
                 error.rs      exit-code mapping
   tests/cli.rs  integration tests, driving the real binary
+protocol/       the fixtures both implementations are checked against
 extension/      TypeScript. The pi side.
   index.ts      entry point: flags, lifecycle, delivery, presence, acknowledgements
   src/          consumer.ts     the bus, subscriptions, consumer cursors
@@ -194,7 +224,7 @@ extension/      TypeScript. The pi side.
                 record.ts       decoding a record
                 ack.ts          the acknowledgement lifecycle
                 config.ts       flags, environment, addresses, session identity
-                presence*.ts    the session's own lease
+                presence*.ts    the session's own presence record
                 tools.ts        pure planners for the agent's two tools
                 commands*.ts    the human's four commands, and run.ts to execute them
   test/         unit tests for everything pure

@@ -13,6 +13,11 @@ Start and stop companion agents: a real `pi` process in its own herdr tab, wired
 There is no separate task argument, no protocol, and no daemon. Spawning creates a process; the
 work is a message like any other.
 
+This command is one implementation of a contract, not a feature of the bus. It is the showcase: the
+thing that shows two independently-owned agents on one file, with a person able to type into either
+one. Nothing on the wire depends on it, and a tmux script, a different multiplexer, or a durable
+harness can satisfy the same contract — see [The launcher contract](#the-launcher-contract).
+
 ## Requirements
 
 - **herdr**, and you must be running inside it (`HERDR_ENV=1`). Companions are herdr tabs.
@@ -63,7 +68,7 @@ the bus by the name they share, so an entry is a tab that is both alive and list
                     "status": "working", "cwd": "/path/to/repo" } ] }
 ```
 
-A named herdr agent that holds no lease on the bus is not listed: it cannot be talked to. The bus
+A named herdr agent that is not on the roster is not listed: it cannot be talked to. The bus
 roster (`msgq sessions`) is the other half of that picture — it lists everyone reachable, whether
 or not they live in a herdr tab.
 
@@ -112,12 +117,39 @@ herdr agent start reviewer --kind pi --pane <root_pane> -- \
 The herdr server does not share your shell's environment, so these travel to the tab explicitly
 rather than being inherited.
 
-## Testing without herdr
+## The launcher contract
 
-`--dry-run` prints every command and executes nothing, including where herdr is unavailable:
+Starting a companion is a shape any launcher can produce. What it has to do:
+
+1. **Start a `pi` process** that loads the extension (`-e <extension>`, or a package that does) in a
+   working directory of the caller's choosing, in a place a human can watch and type into.
+2. **Name it once.** The name is the herdr agent, the pi session name, and the bus address
+   `session/<name>`. A taken name is de-duplicated, and the granted name is what gets reported.
+3. **Tell it who it reports to and whom it obeys**: `--msgq-report-to <parent>`, and
+   `--msgq-trust <parent>[,<accept>...]`.
+4. **Give it the bus and its tools**: `MSGQ_DB`, `MSGQ_BIN`, `MSGQ_COMPANION`,
+   `MSGQ_SPAWN_EXTRA`, `MSGQ_PARENT`, `MSGQ_DEPTH`, `COMPANION_MAX_DEPTH` — passed explicitly, since
+   a launcher's server does not share the caller's environment.
+5. **Ask for a turn-taking policy**: `--msgq-policy honor`, or the companion is delivered messages
+   and does nothing with them.
+6. **Wait until it is reachable**: poll `msgq sessions --json` for `session/<name>` before returning,
+   because a new consumer starts at the end of its stream and an early message would be skipped.
+7. **Be able to stop it**, and leave a failed start visible rather than reaped.
+
+Everything in this README is one way to satisfy that list. `--dry-run` prints the list as commands:
 
 ```bash
 companion spawn reviewer --parent session/planner --dry-run
+```
+
+```text
+herdr tab create --label reviewer --cwd /work/repo --no-focus --workspace w3K \
+  --env MSGQ_DEPTH=1 --env COMPANION_MAX_DEPTH=1 --env MSGQ_DB=/Users/me/.pi/agent/msgq/msgq.db \
+  --env MSGQ_BIN=/usr/local/bin/msgq --env MSGQ_COMPANION=/usr/local/bin/companion \
+  --env MSGQ_SPAWN_EXTRA=-e\ /work/pi-msgq/extension --env MSGQ_PARENT=session/planner
+herdr agent start reviewer --kind pi --pane \<root_pane\> -- --name reviewer --msgq-policy honor \
+  --msgq-report-to session/planner --msgq-trust session/planner -e /work/pi-msgq/extension
+# then wait until session/reviewer appears on the bus
 ```
 
 ## Notes
