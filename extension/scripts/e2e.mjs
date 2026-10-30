@@ -1355,6 +1355,63 @@ async function scenarioCompanionList() {
 	);
 }
 
+async function scenarioCompanionModel() {
+	// Nothing is spawned: `--dry-run` prints the command a companion would be started with, which is
+	// where a chosen model and provider have to appear. Credentials are not this command's business.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-model-")), "msgq.db");
+	const script = resolve(REPO, "companion/companion");
+	const env = { ...process.env, MSGQ_BIN: CLI, MSGQ_DB: own, HERDR_ENV: "" };
+
+	const forwarded = spawnSync(
+		script,
+		[
+			"spawn",
+			"reviewer",
+			"--parent",
+			"session/planner",
+			"--model",
+			"lab/qwen3-30b",
+			"--provider",
+			"lab",
+			"--thinking",
+			"xhigh",
+			"--dry-run",
+		],
+		{ env, encoding: "utf8" },
+	);
+	const started = forwarded.stdout.split("\n").find((line) => line.includes("agent start")) ?? "";
+	const carriesModel = started.includes("--model lab/qwen3-30b");
+	const carriesProvider = started.includes("--provider lab");
+	const carriesThinking = started.includes("--thinking xhigh");
+
+	// A provider only narrows model lookup, so it cannot stand alone: pi says the same thing, and
+	// failing here names the fix instead of leaving a tab that never becomes reachable.
+	const refused = spawnSync(
+		script,
+		["spawn", "reviewer", "--parent", "session/planner", "--provider", "lab", "--dry-run"],
+		{ env, encoding: "utf8" },
+	);
+	// A level pi does not know is refused before a tab exists, naming the choices.
+	const badLevel = spawnSync(
+		script,
+		["spawn", "reviewer", "--parent", "session/planner", "--thinking", "turbo", "--dry-run"],
+		{ env, encoding: "utf8" },
+	);
+
+	report(
+		"companion-model",
+		forwarded.status === 0 &&
+			carriesModel &&
+			carriesProvider &&
+			carriesThinking &&
+			refused.status !== 0 &&
+			refused.stderr.includes("needs --model") &&
+			badLevel.status !== 0 &&
+			badLevel.stderr.includes("off, minimal, low, medium, high, xhigh, max"),
+		`model=${carriesModel} provider=${carriesProvider} thinking=${carriesThinking} refusedProvider=${refused.status !== 0} refusedLevel=${badLevel.status !== 0}`,
+	);
+}
+
 async function scenarioCommandCompanions() {
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-cmdcomp-")), "msgq.db");
 	const herdr = fakeHerdr();
@@ -1890,6 +1947,7 @@ else if (scenario === "command-me") await scenarioCommandMe();
 else if (scenario === "command-identity") await scenarioCommandIdentity();
 else if (scenario === "command-no-dialog") await scenarioCommandNoDialog();
 else if (scenario === "companion-list") await scenarioCompanionList();
+else if (scenario === "companion-model") await scenarioCompanionModel();
 else if (scenario === "command-companions") await scenarioCommandCompanions();
 else if (scenario === "command-without-herdr") await scenarioCommandWithoutHerdr();
 else if (scenario === "reference-quoted") await scenarioReferenceQuoted();
@@ -1904,7 +1962,7 @@ else if (scenario === "completion-reported") await scenarioCompletionReported();
 else if (scenario === "dispatch-command") await scenarioDispatchCommand();
 else {
 	console.error(
-		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|delegate|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog|companion-list|command-companions|command-without-herdr>",
+		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|delegate|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog|companion-list|companion-model|command-companions|command-without-herdr>",
 	);
 	process.exit(2);
 }

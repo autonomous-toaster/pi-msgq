@@ -322,3 +322,89 @@ test("only sending takes a command", () => {
 	assert.equal(isError(plan), true);
 	assert.match((plan as { error: string }).error, /only 'send' takes a command/);
 });
+
+test("a spawn can choose the model the companion runs", () => {
+	const plan = cmd(
+		planCompanionAction(
+			{ action: "spawn", name: "reviewer", model: "lab/qwen3-30b" },
+			{ companionBin: "companion", self: "session/p" },
+		),
+	);
+	assert.deepEqual(plan.args, [
+		"spawn",
+		"reviewer",
+		"--parent",
+		"session/p",
+		"--json",
+		"--model",
+		"lab/qwen3-30b",
+	]);
+});
+
+test("a spawn can pin the provider the model is looked up in", () => {
+	const plan = cmd(
+		planCompanionAction(
+			{ action: "spawn", name: "reviewer", model: "qwen3-30b:high", provider: "lab" },
+			{ companionBin: "companion", self: "session/p" },
+		),
+	);
+	assert.deepEqual(plan.args, [
+		"spawn",
+		"reviewer",
+		"--parent",
+		"session/p",
+		"--json",
+		"--model",
+		"qwen3-30b:high",
+		"--provider",
+		"lab",
+	]);
+});
+
+test("a provider without a model is refused, and says why", () => {
+	const plan = planCompanionAction(
+		{ action: "spawn", name: "reviewer", provider: "lab" },
+		{ companionBin: "companion", self: "session/p" },
+	);
+	assert.ok("error" in plan, "a provider only narrows model lookup, it does not choose a model");
+	assert.match(String((plan as { error: string }).error), /pass 'model' too/);
+});
+
+test("a spawn can set how hard the companion thinks", () => {
+	const plan = cmd(
+		planCompanionAction(
+			{ action: "spawn", name: "reviewer", thinking: "high" },
+			{ companionBin: "companion", self: "session/p" },
+		),
+	);
+	assert.deepEqual(plan.args, [
+		"spawn",
+		"reviewer",
+		"--parent",
+		"session/p",
+		"--json",
+		"--thinking",
+		"high",
+	]);
+});
+
+test("a thinking level needs no model, because it applies to whatever runs", () => {
+	const plan = cmd(
+		planCompanionAction(
+			{ action: "spawn", name: "reviewer", thinking: "off" },
+			{ companionBin: "companion", self: "session/p" },
+		),
+	);
+	assert.ok(plan.args.includes("--thinking"), "no provider-style coupling here");
+});
+
+test("a thinking level pi does not know is refused, and the choices are named", () => {
+	const plan = planCompanionAction(
+		{ action: "spawn", name: "reviewer", thinking: "turbo" },
+		{ companionBin: "companion", self: "session/p" },
+	);
+	assert.ok("error" in plan);
+	const message = String((plan as { error: string }).error);
+	assert.match(message, /not a thinking level/);
+	assert.match(message, /off, minimal, low, medium, high, xhigh, max/);
+});

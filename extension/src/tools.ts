@@ -135,7 +135,24 @@ export interface CompanionParams {
 	cwd?: string;
 	/** Extra senders the companion will act on, comma-separated. */
 	accept?: string;
+	/** The model the companion runs, as pi accepts it: `id`, `provider/id`, or `id:thinking`. */
+	model?: string;
+	/** Restrict model lookup to one provider. Needs a model. */
+	provider?: string;
+	/** How hard the companion thinks: off, minimal, low, medium, high, xhigh, max. */
+	thinking?: string;
 }
+
+/** The thinking levels pi accepts, in its own order. */
+export const THINKING_LEVELS = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
 
 /** What the companions planner needs to know. */
 export interface CompanionContext {
@@ -160,6 +177,26 @@ export function planCompanionAction(
 		if (params.cwd) args.push("--cwd", params.cwd);
 		// The parent is the default trusted set; this widens it deliberately.
 		if (params.accept) args.push("--accept", params.accept);
+		// Which model the companion runs is the caller's call: a reviewer on a cheaper or a
+		// different model is the whole point of starting one.
+		if (params.provider && !params.model) {
+			return {
+				error:
+					"a provider only narrows which provider a model is looked up in: pass 'model' too",
+			};
+		}
+		if (params.model) args.push("--model", params.model);
+		if (params.provider) args.push("--provider", params.provider);
+		if (params.thinking) {
+			// pi refuses a level it does not know, and a refused companion is a tab that never
+			// becomes reachable, so the choices are named here instead.
+			if (!THINKING_LEVELS.includes(params.thinking)) {
+				return {
+					error: `'${params.thinking}' is not a thinking level: ${THINKING_LEVELS.join(", ")}`,
+				};
+			}
+			args.push("--thinking", params.thinking);
+		}
 		return { command: context.companionBin, args };
 	}
 

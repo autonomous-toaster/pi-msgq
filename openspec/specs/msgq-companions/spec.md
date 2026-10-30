@@ -101,6 +101,35 @@ beyond a cap unless the caller explicitly overrides it.
 - **WHEN** a companion at the cap tries to spawn another
 - **THEN** the command refuses unless the override is given
 
+### Requirement: Chosen model, provider and thinking level
+A spawn SHALL accept a model for the companion, in any form pi accepts one, MAY accept a provider
+that narrows where that model is looked up, and MAY accept a thinking level. Each SHALL be passed to
+the companion's pi. A provider SHALL be refused when no model is given, and a thinking level SHALL be
+refused when it is not one pi defines, both naming the fix rather than letting the companion fail
+after its tab is open. A thinking level SHALL NOT require a model, because it applies to whatever
+model runs. Passing credentials SHALL NOT be part of starting a companion: a companion can use a
+provider its pi configuration already knows.
+
+#### Scenario: The companion runs on the model asked for
+- **WHEN** a spawn names `--model provider/id`
+- **THEN** the companion's pi starts with that model
+
+#### Scenario: The provider narrows the lookup
+- **WHEN** a spawn names both `--model id` and `--provider name`
+- **THEN** both reach the companion's pi
+
+#### Scenario: A provider alone is refused
+- **WHEN** a spawn names `--provider` and no `--model`
+- **THEN** the spawn fails before opening a tab, saying it needs a model
+
+#### Scenario: The companion thinks as hard as asked
+- **WHEN** a spawn names `--thinking high`
+- **THEN** the companion's pi starts at that level, with or without a model
+
+#### Scenario: A level pi does not know
+- **WHEN** a spawn names a level outside off, minimal, low, medium, high, xhigh, max
+- **THEN** the spawn fails before opening a tab, listing the levels it accepts
+
 ### Requirement: Closing a companion
 `companion close <name>` SHALL close that companion's herdr tab, and SHALL report when no such
 companion exists.

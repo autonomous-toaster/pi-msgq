@@ -15,7 +15,9 @@
 #   --workspace ID       herdr workspace (default: the caller's)
 #   --parent ADDRESS     the address the companion reports to, and its default trusted sender
 #   --accept ADDRESSES   extra senders it will act on, comma-separated
-#   --model P/M          provider/model for the companion (default: pi's own default)
+#   --model P/M          model for the companion (default: pi's own default)
+#   --provider NAME      restrict --model lookup to one provider (needs --model)
+#   --thinking LEVEL     off, minimal, low, medium, high, xhigh, or max
 #   --trust | --no-trust grant or withhold project trust for the companion
 #   --topics LIST        extra bus addresses for the companion to follow
 #   --allow DEPTH        override the delegation depth cap
@@ -119,7 +121,7 @@ parse_field() { # json, jq expression
 }
 
 cmd_spawn() {
-	local requested="" cwd="" workspace="" parent="" model="" topics="" accept=""
+	local requested="" cwd="" workspace="" parent="" model="" provider="" thinking="" topics="" accept=""
 	local trust="" allow_depth=0 focus=0 json_out=0 dry_run=0 timeout=""
 
 	while [ $# -gt 0 ]; do
@@ -129,6 +131,8 @@ cmd_spawn() {
 		--parent) parent="${2:-}"; shift 2 ;;
 		--accept) accept="${2:-}"; shift 2 ;;
 		--model) model="${2:-}"; shift 2 ;;
+		--provider) provider="${2:-}"; shift 2 ;;
+		--thinking) thinking="${2:-}"; shift 2 ;;
 		--topics) topics="${2:-}"; shift 2 ;;
 		--trust) trust="yes"; shift ;;
 		--no-trust) trust="no"; shift ;;
@@ -143,6 +147,16 @@ cmd_spawn() {
 	done
 
 	[ -n "$requested" ] || die "usage: $PROG spawn <name> [options]"
+	[ -z "$provider" ] || [ -n "$model" ] ||
+		die "--provider restricts --model lookup, so it needs --model too"
+	# pi rejects a level it does not know; say so here, where the message can name the choices,
+	# rather than in a tab that then never becomes reachable.
+	if [ -n "$thinking" ]; then
+		case "$thinking" in
+		off | minimal | low | medium | high | xhigh | max) ;;
+		*) die "--thinking '$thinking' is not a level: off, minimal, low, medium, high, xhigh, max" ;;
+		esac
+	fi
 	[ -n "$timeout" ] && READY_TIMEOUT="$timeout"
 
 	# Depth is checked before anything else: a spawn loop is a fork bomb.
@@ -186,6 +200,8 @@ cmd_spawn() {
 	[ -n "$trusted" ] && pi_args+=(--msgq-trust "$trusted")
 	[ -n "$topics" ] && pi_args+=(--msgq-topics "$topics")
 	[ -n "$model" ] && pi_args+=(--model "$model")
+	[ -n "$provider" ] && pi_args+=(--provider "$provider")
+	[ -n "$thinking" ] && pi_args+=(--thinking "$thinking")
 	case "$trust" in
 	yes) pi_args+=(--approve) ;;
 	no) pi_args+=(--no-approve) ;;

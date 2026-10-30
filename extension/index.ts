@@ -527,8 +527,8 @@ export default function (pi: ExtensionAPI) {
 			"tab, reachable at session/<name>. 'spawn' starts one and reports the name it granted, " +
 			"which may be suffixed: use that name and address, not the one you asked for. The task is " +
 			"then simply a message sent with the peers tool. A companion acts only on this session, " +
-			"and on any senders listed in 'accept'. It is a full agent with its own context and cost, " +
-			"and nothing reaps it: close what you start.",
+			"and on any senders listed in 'accept'. It is a full agent with its own context, cost and " +
+			"model, and nothing reaps it: close what you start.",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("spawn"), Type.Literal("close")], {
 				description: "what to do",
@@ -545,10 +545,35 @@ export default function (pi: ExtensionAPI) {
 						"extra senders it will act on, comma-separated; it always acts on this session",
 				}),
 			),
+			model: Type.Optional(
+				Type.String({
+					description:
+						"model the companion runs, as pi accepts it: 'id', 'provider/id', or 'id:thinking'",
+				}),
+			),
+			provider: Type.Optional(
+				Type.String({
+					description: "restrict model lookup to one provider; needs 'model' too",
+				}),
+			),
+			thinking: Type.Optional(
+				Type.String({
+					description:
+						"how hard the companion thinks: off, minimal, low, medium, high, xhigh, or max",
+				}),
+			),
 		}),
 		async execute(
 			_toolCallId: string,
-			params: { action: "spawn" | "close"; name?: string; cwd?: string; accept?: string },
+			params: {
+				action: "spawn" | "close";
+				name?: string;
+				cwd?: string;
+				accept?: string;
+				model?: string;
+				provider?: string;
+				thinking?: string;
+			},
 			signal: AbortSignal | undefined,
 		) {
 			const plan = planCompanionAction(params, { companionBin, self });

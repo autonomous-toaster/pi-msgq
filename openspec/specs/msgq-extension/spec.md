@@ -436,6 +436,11 @@ require the peer to have been started by this session.
 ### Requirement: Companion tool
 The extension SHALL expose a tool that starts and closes companions by delegating to the companion
 command. Starting SHALL report the granted name and the address the companion can be reached at.
+Starting SHALL accept the model the companion runs, MAY accept a provider to narrow model lookup,
+and MAY accept a thinking level, and SHALL pass each one given to the companion command. A provider
+SHALL NOT be accepted without a model, because a provider chooses where a model is looked up rather
+than which model to run. A thinking level SHALL be accepted on its own, and one outside the levels
+pi defines SHALL be refused with the choices named.
 
 #### Scenario: Starting a companion
 - **WHEN** the model starts a companion
@@ -448,6 +453,22 @@ command. Starting SHALL report the granted name and the address the companion ca
 #### Scenario: Failure is reported
 - **WHEN** the companion command fails
 - **THEN** the tool reports the failure instead of returning a name
+
+#### Scenario: The model is the caller's choice
+- **WHEN** the model starts a companion naming a model, or a model and a provider
+- **THEN** both reach the companion command, and the companion runs on what was asked for
+
+#### Scenario: A provider alone is refused
+- **WHEN** the model names a provider and no model
+- **THEN** the tool refuses, saying a provider narrows model lookup and needs a model
+
+#### Scenario: A level, with or without a model
+- **WHEN** the model names a thinking level, with or without a model
+- **THEN** it reaches the companion command, because a level applies to whatever model runs
+
+#### Scenario: A level pi does not know
+- **WHEN** the model names a level outside the ones pi defines
+- **THEN** the tool refuses and names the levels it accepts
 
 ### Requirement: Reporting address
 The extension SHALL accept a reporting address from configuration and from the environment, and

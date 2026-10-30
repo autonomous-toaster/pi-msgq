@@ -40,7 +40,9 @@ companion help                        this text
 | `--workspace ID` | herdr workspace (default: yours) |
 | `--parent ADDRESS` | who the companion reports to, and its default trusted sender |
 | `--accept ADDRESSES` | extra senders it will act on, comma-separated |
-| `--model P/M` | provider/model for the companion (default: pi's own default) |
+| `--model P/M` | model for the companion: `id`, `provider/id`, or `id:thinking` (default: pi's own) |
+| `--provider NAME` | restrict `--model` lookup to one provider; needs `--model` |
+| `--thinking LEVEL` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `--trust` / `--no-trust` | grant or withhold project trust for that directory |
 | `--topics LIST` | extra bus addresses for it to follow |
 | `--allow-depth` | override the delegation depth cap |
@@ -98,6 +100,16 @@ herdr agent start reviewer --kind pi --pane <root_pane> -- \
   acted on. Worth being precise about what that is: `from` is unverified, so this set was never
   authentication. It scopes what a shell-capable agent will *routinely* obey, and the real boundary
   is who can write the bus file. Widen it narrowly.
+- **The model is a choice, not a default.** `--model lab/qwen3-30b` (or `provider/id`, or
+  `id:thinking`) is passed to the companion's pi, so a reviewer can run on a cheaper or a different
+  model than the session that spawns it. `--provider` only narrows where a model id is looked up, so
+  it needs `--model`; the command refuses it alone rather than letting pi fail inside a tab.
+  Credentials are not passed: a provider the companion can use is one pi already knows about, from
+  `models.json` or a stored key.
+- **How hard it thinks is a choice too.** `--thinking high` reaches the companion's pi, and needs no
+  model of its own: a level applies to whatever model runs and is clamped to what that model
+  supports. `--model id:high` still works and is overridden by `--thinking`; a level pi does not
+  know is refused here, where the message can list them.
 - **Depth and the cap both travel**, as `MSGQ_DEPTH` and `COMPANION_MAX_DEPTH`, so a delegate can
   tell whether it may delegate rather than discovering it by being refused.
 - Spawning **blocks until the companion registers on the bus**. A new consumer starts at the end of
@@ -122,7 +134,9 @@ rather than being inherited.
 Starting a companion is a shape any launcher can produce. What it has to do:
 
 1. **Start a `pi` process** that loads the extension (`-e <extension>`, or a package that does) in a
-   working directory of the caller's choosing, in a place a human can watch and type into.
+   working directory of the caller's choosing, in a place a human can watch and type into, on the
+   model the caller asked for (`--model`, `--provider`) and at the thinking level they asked for
+   (`--thinking`) when either was named.
 2. **Name it once.** The name is the herdr agent, the pi session name, and the bus address
    `session/<name>`. A taken name is de-duplicated, and the granted name is what gets reported.
 3. **Tell it who it reports to and whom it obeys**: `--msgq-report-to <parent>`, and

@@ -202,7 +202,7 @@ Two tools put the bus in the agent's hands.
 | Tool | Actions | Needs |
 |---|---|---|
 | `peers` | `list` who is reachable · `send` a message · `ask` a question and wait for the answer · `reply` to the message you last received | the bus only |
-| `companions` | `spawn` a companion (a real pi in its own terminal tab, reachable at `session/<name>`) · `close` it | a launcher: `companion`, herdr, jq |
+| `companions` | `spawn` a companion (a real pi in its own terminal tab, reachable at `session/<name>`, on the `model`, `provider` and `thinking` level you name) · `close` it | a launcher: `companion`, herdr, jq |
 
 `peers` is the bus client and works anywhere the bus does. `companions` only asks a launcher to
 start a process, and the launcher is [one implementation of a contract](../companion/README.md#the-launcher-contract)
