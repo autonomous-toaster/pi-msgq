@@ -182,9 +182,10 @@ msgq ask session/planner "what does this repository do?"
 The maki agent gets a `msgq` tool to send, reply and list peers; `/peers me` reports the address
 and bus state. `--with-offset` on `msgq read`/`follow` is what lets it name a record for a reply.
 
-Two maki instances can share `name`: each also listens on its own `session/<session-id>`, and each
-follows with a consumer of `maki#<session-id>`, so a shared alias fans out to all of them instead
-of colliding on the follow lock. Address the id for one session, the alias for the group.
+Two maki instances can share `name`: each sends as its own `session/<session-id>`, listens there
+as well, and follows with a consumer of `maki#<session-id>`, so a shared alias fans out to all of
+them instead of colliding on the follow lock. Address the id for one session, the alias for the
+group; answers always come back from the id.
 
 ## What it will not do
 

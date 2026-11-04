@@ -900,6 +900,7 @@ end
 local function identity_lines()
 	local rows = {
 		{ "session id", S.session_id or "(none)" },
+		{ "sends as", S.address or "(none)" },
 		{ "bus", db_path() or "~/.pi/agent/msgq/msgq.db" },
 		{ "consumer", S.consumer or "(none)" },
 		{ "follows", #S.follows > 0 and table.concat(S.follows, ", ") or "(none)" },
@@ -1270,17 +1271,18 @@ function M.start()
 	log("info", "starting for session " .. tostring(session))
 
 	S.session_id = session
-	-- The session id is the stable, unique address. A configured name is an
-	-- alias followed in addition, so several maki instances can share one
-	-- memorable address without fighting over the follow lock.
+	-- The session id is both the sender identity and the unique address. A
+	-- configured name is only an extra address to listen on: sending as the
+	-- alias would make every instance look like every other one (and make its
+	-- own messages look self-sent), which silently drops traffic between them.
 	local id_address = "session/" .. session
 	S.addresses = { id_address }
 	S.address = id_address
 	local name = CONFIG.name
 	if type(name) == "string" and name ~= "" then
-		S.address = name:find("/", 1, true) and name or ("session/" .. name)
-		if S.address ~= id_address then
-			S.addresses[#S.addresses + 1] = S.address
+		local alias = name:find("/", 1, true) and name or ("session/" .. name)
+		if alias ~= id_address then
+			S.addresses[#S.addresses + 1] = alias
 		end
 	end
 	-- Unique per session: two instances may follow the same alias, and native

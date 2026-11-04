@@ -32,9 +32,10 @@ msgq publish session/planner "run the tests and fix the failures" --ack --await
 msgq ask session/planner "what does this repository do?"
 ```
 
-Without `name`, the address is `session/<session-id>`; `/peers me` shows it. A `name` is an
-**alias followed in addition**: the session always listens on `session/<session-id>`, so several
-maki instances can share a memorable name (fan-out) and still be addressed individually.
+The session always **sends as** `session/<session-id>` and listens there; `/peers me` shows it.
+A `name` is only an **extra address to listen on**: several maki instances can share a memorable
+name (fan-out) and still be addressed, and answered, individually. Sending as the alias would make
+every instance look like every other one and silently drop their traffic as self-sent.
 
 ## Configuration
 
@@ -132,8 +133,9 @@ Presence is advisory and never gates delivery.
 `/peers me` answers from what the session already holds, so it still works when the bus does not:
 
 ```
-session/planner
+session/CgiccyNbdVnFfcih8JHyG
   session id  CgiccyNbdVnFfcih8JHyG
+  sends as    session/CgiccyNbdVnFfcih8JHyG
   bus         /Users/me/.pi/agent/msgq/msgq.db
   consumer    maki#CgiccyNbdVnFfcih8JHyG
   follows     session/CgiccyNbdVnFfcih8JHyG, session/planner
