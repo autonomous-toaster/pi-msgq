@@ -19,7 +19,7 @@ local PRESENCE_ADDRESS = "group/presence"
 local DEFAULT_TTL = 30
 local DEFAULT_EVERY_MS = 10000
 local RESTART_MS = 2000
-local MAX_RESTART_MS = 30000
+local MAX_RESTART_MS = 5000
 local RUN_TIMEOUT_MS = 15000
 
 local CONFIG = {
@@ -622,6 +622,12 @@ local function follow_on_stdout(_job, line)
 	handle_record(envelope.record, envelope.offset)
 end
 
+local function follow_on_stderr(_job, line)
+	if line and line ~= "" then
+		S.follow_error = line
+	end
+end
+
 local function follow_on_exit(job, code)
 	if job ~= S.follow_job then
 		return
@@ -631,6 +637,10 @@ local function follow_on_exit(job, code)
 		return
 	end
 	S.last_error = "msgq follow exited with " .. tostring(code)
+	if S.follow_error then
+		S.last_error = S.last_error .. ": " .. S.follow_error
+		S.follow_error = nil
+	end
 	log("warn", S.last_error)
 	schedule_restart()
 end
@@ -660,7 +670,11 @@ start_follow = function()
 	local job = maki.fn.jobfind(name)
 	if job then
 		S.follow_job = job
-		maki.fn.jobattach(job, { on_stdout = follow_on_stdout, on_exit = follow_on_exit })
+		maki.fn.jobattach(job, {
+			on_stdout = follow_on_stdout,
+			on_stderr = follow_on_stderr,
+			on_exit = follow_on_exit,
+		})
 		log("info", "resumed following " .. S.address)
 		return
 	end
@@ -678,6 +692,7 @@ start_follow = function()
 		name = name,
 		scope = { session = S.session_id },
 		on_stdout = follow_on_stdout,
+		on_stderr = follow_on_stderr,
 		on_exit = follow_on_exit,
 		max_line_bytes = 8 * 1024 * 1024,
 	})
@@ -844,10 +859,10 @@ local function on_session_end(ev)
 			S.presence_task:cancel()
 		end)
 	end
-	if S.follow_job then
-		pcall(maki.fn.jobstop, S.follow_job)
-		S.follow_job = nil
-	end
+	-- Leave the follow job to the host: it reaps session-owned jobs after this
+	-- event, and killing it here (SIGKILL) would keep its advisory lock for its
+	-- whole TTL, delaying the next instance's first delivery by up to a minute.
+	S.follow_job = nil
 end
 
 local function register_autocmds()
