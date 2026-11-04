@@ -26,6 +26,7 @@ work as a message, and gets the answer back.
 | [`cli/`](cli/README.md) | `msgq`, the bus: publish, read, follow, await, ask, sessions, prune |
 | [`extension/`](extension/README.md) | the pi extension: consumes the bus, gives your agent two tools and you four commands |
 | [`companion/`](companion/README.md) | `companion`: the reference launcher — starts and stops companions in herdr tabs |
+| [`maki/`](maki/README.md) | the maki plugin: steers a maki session from the shell, with `/peers`, `/peer`, `/reply` |
 | [`PROTOCOL.md`](PROTOCOL.md) | what the wire promises, and the fixtures that keep two implementations agreeing |
 
 Three roles, and it helps to keep them apart: the **wire** is what other clients may depend on
@@ -162,6 +163,29 @@ start a companion called reviewer, ask it to review the parser, and tell me what
 Under the hood that is `companions({action:"spawn",name:"reviewer"})`, then
 `peers({action:"ask",to:"session/reviewer",...})`, then one sentence back to you.
 
+## The same bus, from maki
+
+A [maki](https://github.com/earendil-works/maki) session can join the same bus with the plugin in
+[`maki/`](maki/README.md). It listens on its own `session/<session-id>` and delivers into the
+session, and `name` adds a memorable alias; it also gives you the same human commands:
+
+```lua
+-- ~/.config/maki/init.lua
+require("msgq").setup({ name = "planner" })
+```
+
+```bash
+msgq publish session/planner "run the tests and fix failures" --ack --await
+msgq ask session/planner "what does this repository do?"
+```
+
+The maki agent gets a `msgq` tool to send, reply and list peers; `/peers me` reports the address
+and bus state. `--with-offset` on `msgq read`/`follow` is what lets it name a record for a reply.
+
+Two maki instances can share `name`: each also listens on its own `session/<session-id>`, and each
+follows with a consumer of `maki#<session-id>`, so a shared alias fans out to all of them instead
+of colliding on the follow lock. Address the id for one session, the alias for the group.
+
 ## What it will not do
 
 - **No daemon, no broker, no network.** The bus is one SQLite file, so the reach of the system is the
@@ -182,6 +206,7 @@ Under the hood that is `companions({action:"spawn",name:"reviewer"})`, then
 | a Rust toolchain with edition 2024 (1.85+) | building the CLI |
 | `jq` | the launcher, which reads the roster |
 | `herdr` 0.8+, inside herdr | the reference launcher only |
+| maki 0.7+ | the [`maki/`](maki/README.md) plugin only |
 
 herdr is the showcase's prerequisite, not the bus's. Publishing, reading, following, the roster, and
 both of the agent's tools — `peers`, and every command but `/companions` — work without it.

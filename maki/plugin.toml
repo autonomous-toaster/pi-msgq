@@ -1,0 +1,13 @@
+# Permissions for ~/.config/maki/lua/msgq.lua.
+#
+# A plugin.toml you write yourself defaults to granted, but listing every
+# capability makes the grants reviewable. Set one to false to revoke it.
+[permissions]
+run = true            # jobstart / jobattach: the msgq CLI
+agent = true          # session.prompt: a message can start a turn
+session_write = true  # prompt / notify: delivered content
+session_read = true   # ui.input: is there a UI to open a picker in
+input = true          # input_edit / input_submit for command records
+fs_read = true        # state_dir, draft read-back
+fs_write = true       # compose draft in $EDITOR
+env = true            # MSGQ_BIN / MSGQ_DB fallbacks
