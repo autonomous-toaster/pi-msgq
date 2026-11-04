@@ -81,6 +81,80 @@ fn publish_and_stateless_read() {
 }
 
 #[test]
+fn json_with_offset_wraps_the_record() {
+    let db = temp_db();
+    assert_eq!(run(&db, &["publish", "group/a", "one"]).code, 0);
+
+    let out = run(
+        &db,
+        &["read", "group/a", "--from-start", "--json", "--with-offset"],
+    );
+    assert_eq!(out.code, 0);
+    assert_eq!(out.stdout.lines().count(), 1);
+    let value: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(value["topic"], "group/a");
+    assert!(value["offset"].as_i64().unwrap() >= 1);
+    assert!(value["created_at"].as_i64().unwrap() > 0);
+    assert_eq!(value["record"]["message"], "one");
+    assert_eq!(value["record"]["v"], 1);
+
+    // Without the flag the raw record is byte-for-byte what it always was.
+    let plain = run(&db, &["read", "group/a", "--from-start", "--json"]);
+    let record: serde_json::Value = serde_json::from_str(plain.stdout.trim()).unwrap();
+    assert_eq!(record["message"], "one");
+    assert!(record.get("offset").is_none());
+}
+
+#[test]
+fn with_offset_requires_json() {
+    let db = temp_db();
+    let out = run(&db, &["read", "group/a", "--with-offset"]);
+    assert_eq!(out.code, 2);
+}
+
+#[test]
+fn follow_with_offset_reports_the_record_position() {
+    let db = temp_db();
+    run(&db, &["publish", "group/a", "old"]);
+
+    let child = Command::new(bin())
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "follow",
+            "group/a",
+            "--consumer",
+            "c1",
+            "--json",
+            "--with-offset",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(1200));
+    let published = run(&db, &["publish", "group/a", "new"]);
+    let offset: i64 = published.stdout.trim().parse().unwrap();
+    thread::sleep(Duration::from_millis(1200));
+
+    Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let line = text.lines().next().expect("one record");
+    let value: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(value["topic"], "group/a");
+    assert_eq!(value["offset"], offset);
+    assert_eq!(value["record"]["message"], "new");
+}
+
+#[test]
 fn topics_and_cursors() {
     let db = temp_db();
     run(&db, &["publish", "group/a", "one"]);

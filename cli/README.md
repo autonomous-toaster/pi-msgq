@@ -210,7 +210,7 @@ other.
 ### `read`
 
 ```bash
-msgq read <address>... [--from <N> | --from-start] [--limit <N>] [--json]
+msgq read <address>... [--from <N> | --from-start] [--limit <N>] [--json [--with-offset]]
 ```
 
 - Default start position is the **current end** of each stream — reads do not replay history.
@@ -221,7 +221,7 @@ msgq read <address>... [--from <N> | --from-start] [--limit <N>] [--json]
 ### `follow`
 
 ```bash
-msgq follow <address>... --consumer <NAME> [--from <N> | --from-start] [--json]
+msgq follow <address>... --consumer <NAME> [--from <N> | --from-start] [--json [--with-offset]]
 ```
 
 - Resumes from the consumer's saved offset.
@@ -242,6 +242,16 @@ address delivers to every follower.
 `--json` is an **input** format for `publish` and an **output** format for `read`, `follow`,
 `topics`, and `consumers`. As output it emits the raw stored record, one JSON object per line,
 so it pipes straight into `jq`.
+
+Add `--with-offset` to `read` or `follow` to wrap each line with where the record sits:
+
+```json
+{"topic":"session/planner","offset":42,"created_at":1760000000,"record":{"v":1,"type":"prompt"}}
+```
+
+That is what a client needs to build a record id (`<address>#<offset>`) for `reply_to`, without
+reading the database itself. It is a CLI output convenience, not part of the wire; without the
+flag the output is unchanged.
 
 ## Exit codes
 

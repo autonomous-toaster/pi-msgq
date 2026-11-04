@@ -452,6 +452,7 @@ pub fn read(
     from: FromSpec,
     limit: i64,
     json: bool,
+    with_offset: bool,
 ) -> Result<(), Error> {
     let targets = address::canonicalize_all(addresses)?;
     let (store, _) = Store::open(db_path)?;
@@ -470,7 +471,7 @@ pub fn read(
     events.truncate(limit as usize);
 
     for event in &events {
-        render(event, json);
+        render(event, json, with_offset);
     }
     Ok(())
 }
@@ -482,6 +483,7 @@ pub fn follow(
     consumer: &str,
     from: FromSpec,
     json: bool,
+    with_offset: bool,
 ) -> Result<(), Error> {
     let targets = address::canonicalize_all(addresses)?;
     let (store, _) = Store::open(db_path)?;
@@ -544,7 +546,7 @@ pub fn follow(
         for event in batch {
             store.cursor_set(consumer, &event.topic, event.offset)?;
             offsets.insert(event.topic.clone(), event.offset);
-            render(&event, json);
+            render(&event, json, with_offset);
         }
     }
 
@@ -1033,9 +1035,24 @@ fn nanos() -> u128 {
 }
 
 /// Render one event as a raw JSON line or a human-readable line.
-fn render(event: &StreamEvent, json_out: bool) {
+fn render(event: &StreamEvent, json_out: bool, with_offset: bool) {
     if json_out {
-        println!("{}", String::from_utf8_lossy(&event.payload));
+        let payload = String::from_utf8_lossy(&event.payload);
+        if with_offset {
+            let record = serde_json::from_slice::<Value>(&event.payload).unwrap_or(Value::Null);
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "topic": event.topic,
+                    "offset": event.offset,
+                    "created_at": event.created_at,
+                    "record": record,
+                }))
+                .unwrap_or_else(|_| payload.into_owned())
+            );
+        } else {
+            println!("{payload}");
+        }
         return;
     }
 

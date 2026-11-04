@@ -107,6 +107,9 @@ enum Command {
         /// Emit raw records as JSON lines.
         #[arg(long)]
         json: bool,
+        /// Wrap each JSON line as {topic, offset, created_at, record}.
+        #[arg(long, requires = "json")]
+        with_offset: bool,
     },
     /// Follow addresses, advancing a durable consumer cursor.
     Follow {
@@ -124,6 +127,9 @@ enum Command {
         /// Emit raw records as JSON lines.
         #[arg(long)]
         json: bool,
+        /// Wrap each JSON line as {topic, offset, created_at, record}.
+        #[arg(long, requires = "json")]
+        with_offset: bool,
     },
     /// List addresses that have messages.
     Topics {
@@ -273,19 +279,29 @@ fn run(cli: Cli) -> Result<(), Error> {
             from_start,
             limit,
             json,
-        } => commands::read(&db, &addresses, from_spec(from, from_start)?, limit, json),
+            with_offset,
+        } => commands::read(
+            &db,
+            &addresses,
+            from_spec(from, from_start)?,
+            limit,
+            json,
+            with_offset,
+        ),
         Command::Follow {
             addresses,
             consumer,
             from,
             from_start,
             json,
+            with_offset,
         } => commands::follow(
             &db,
             &addresses,
             &consumer,
             from_spec(from, from_start)?,
             json,
+            with_offset,
         ),
         Command::Topics { json } => commands::topics(&db, json),
         Command::Sessions { json } => commands::sessions(&db, json),
