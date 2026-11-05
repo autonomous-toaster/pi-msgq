@@ -642,8 +642,9 @@ skill being present or valid.
 A live session SHALL derive a locator card and publish it with its presence when presence is enabled
 and locator context is not disabled. The card SHALL contain only `project`, `branch`, `worktree`,
 and `path`, with the meanings defined by the presence convention. The session SHALL refresh the
-derived card when the working directory changes and periodically while it runs, and SHALL publish a
-new presence record only when the card actually changes. A failure to derive or publish the card
+derived card when the working directory changes, at the start of each turn so that a directory
+change the host never reported is still picked up before the turn ends, and periodically while it
+runs, and SHALL publish a new presence record only when the card actually changes. A failure to derive or publish the card
 SHALL NOT stop message consumption or prevent presence without a card.
 
 The session SHALL accept configuration for whether context is derived and for the path mode. The
@@ -670,10 +671,32 @@ presence continues.
 - **WHEN** the session's working directory changes
 - **THEN** the derived card is refreshed and a new presence record is published when it differs
 
+#### Scenario: A turn starts somewhere new
+
+- **WHEN** a turn starts in a directory whose locator differs from the published one
+- **THEN** the card is re-derived before the turn's messages are handled and presence is republished
+
 #### Scenario: Oversized card
 
 - **WHEN** a card would serialize to more than 512 bytes
 - **THEN** the card is omitted and presence remains registered
+
+### Requirement: Locator card visibility
+
+The agent-facing peer listing SHALL show the same locator column a human sees, so that a peer is
+identified by project and branch and not by a session id alone. When the CLI refuses the locator
+column as an unknown flag, the listing SHALL fall back to the plain roster rather than fail; a bus
+that cannot be read SHALL NOT be retried with another command line.
+
+#### Scenario: The model lists peers
+
+- **WHEN** the model calls the peers tool with the `list` action
+- **THEN** each row carries the address, state, remaining lifetime, and locator
+
+#### Scenario: An older CLI
+
+- **WHEN** the CLI reports that it does not know the locator flag
+- **THEN** the plain roster is shown instead of an error
 
 ### Requirement: Locator card action
 
@@ -697,7 +720,7 @@ summaries, and SHALL NOT publish a bus message.
 #### Scenario: Clear an override
 
 - **WHEN** the model calls the card action with a null field
-- **THEN** that override is removed and the derived value is used
+- **THEN** that override is removed, the derived value is used, and presence is republished
 
 #### Scenario: Arbitrary metadata is refused
 

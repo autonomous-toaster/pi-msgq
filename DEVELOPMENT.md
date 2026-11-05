@@ -122,8 +122,15 @@ done
 | delivery policy | `default-note`, `note-idle`, `note-busy`, `honor-prompt`, `coalesce`, `steer-mid-run` |
 | addressing | `self-guard`, `extra-topic`, `skip-version`, `bad-bus`, `scoped-write` |
 | presence | `presence`, `presence-off`, `rename`, `squat`, `crash-expiry`, `blocked` |
+| locator card | `peer-locator` (a real pi session publishes one and the row carries one locator column), `maki-card` (the maki plugin, loaded against a stubbed host, derives, overrides and publishes its own) |
 | acknowledgements | `ack-display`, `ack-honor`, `ack-batch`, `ack-quiet` |
 | the commands | `command-surface`, `command-no-peers`, `command-pick-and-send`, `command-peer-direct`, `command-peer-compose`, `command-peer-pick`, `command-reply`, `command-absent-recipient`, `command-me`, `command-identity`, `command-no-dialog` |
+
+`maki-card` is the one scenario that is not a pi session: `extension/scripts/maki-card.lua` loads
+`maki/lua/msgq.lua` against a stubbed `maki` table (jobs, autocmds, sessions, JSON) and asserts what
+the plugin publishes and what its tool returns. It needs `lua` on `PATH` and takes `MSGQ_SOURCE`.
+Break the plugin — drop the first-turn refresh, or let an empty override be ignored — and it fails,
+which is the point: the bus once ran for weeks with no card on any session and nothing said so.
 
 One thing is worth knowing when you write more:
 

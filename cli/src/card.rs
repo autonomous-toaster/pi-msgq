@@ -63,6 +63,29 @@ pub fn derive_card(cwd: &Path, paths: PathMode) -> Result<Value, Error> {
     Ok(Value::Object(card))
 }
 
+/// A card as one roster column: `project branch path`, in that order.
+///
+/// The identity and the display name are already in the address, and the worktree usually repeats
+/// the repository name inside `project`, so the column keeps only what tells peers apart. A `path`
+/// of `.` means the repository root and is left out; a card with nothing to say is `-`.
+pub fn summary(card: &Value) -> String {
+    let field = |key: &str| card.get(key).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    let mut parts: Vec<&str> = Vec::new();
+    for key in ["project", "branch"] {
+        if let Some(value) = field(key) {
+            parts.push(value);
+        }
+    }
+    if let Some(path) = field("path").filter(|path| *path != ".") {
+        parts.push(path);
+    }
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join("  ")
+    }
+}
+
 /// Normalize a git remote URL to `host/owner/repo`.
 ///
 /// Both `https://host/owner/repo.git` and `git@host:owner/repo.git` become `host/owner/repo`. A
@@ -351,5 +374,53 @@ mod tests {
         let card = derive_card(&linked_path, PathMode::Relative).unwrap();
         assert_eq!(value(&card, "worktree"), Some("review"));
         assert_eq!(value(&card, "branch"), Some("review"));
+    }
+
+    #[test]
+    fn summarizes_a_card_as_one_locator_column() {
+        let dir = init_repo("summary");
+        git_in(&dir, &["remote", "add", "origin", "git@github.com:org/repo.git"]);
+        let card = derive_card(&dir, PathMode::Relative).unwrap();
+
+        assert_eq!(summary(&card), "github.com/org/repo  main");
+    }
+
+    #[test]
+    fn a_summary_names_a_subdirectory_and_skips_the_worktree() {
+        let dir = init_repo("summary-sub");
+        git_in(&dir, &["remote", "add", "origin", "git@github.com:org/repo.git"]);
+        let sub = dir.join("src").join("api");
+        fs::create_dir_all(&sub).unwrap();
+        let card = derive_card(&sub, PathMode::Relative).unwrap();
+
+        assert_eq!(summary(&card), "github.com/org/repo  main  src/api");
+        assert!(
+            !summary(&card).contains(card["worktree"].as_str().unwrap()),
+            "the worktree is not a column of its own"
+        );
+    }
+
+    #[test]
+    fn a_summary_without_a_card_is_a_placeholder() {
+        for card in [
+            serde_json::json!({}),
+            serde_json::json!({"path": "."}),
+            serde_json::json!({"head": "ignored", "project": "  "}),
+            serde_json::json!("not an object"),
+        ] {
+            assert_eq!(summary(&card), "-", "{card}");
+        }
+    }
+
+    #[test]
+    fn a_full_path_is_shown_and_a_dot_path_is_not() {
+        assert_eq!(
+            summary(&serde_json::json!({"project": "org/repo", "path": "/home/dev/repo"})),
+            "org/repo  /home/dev/repo"
+        );
+        assert_eq!(
+            summary(&serde_json::json!({"project": "org/repo", "path": "."})),
+            "org/repo"
+        );
     }
 }

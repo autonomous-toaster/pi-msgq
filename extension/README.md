@@ -126,8 +126,8 @@ msgq sessions --wide
 ```
 
 ```text
-session/api-worker  session  busy  api-worker  27  github.com/org/repo  main  repo  src
-session/01a12cc5    session  idle             30  -  -  -  -
+session/api-worker  session  busy  api-worker  27  github.com/org/repo  main  src
+session/01a12cc5    session  idle             30  -
 ```
 
 The state follows the session: `idle` at rest, `busy` while a run is in progress, and
@@ -135,7 +135,14 @@ The state follows the session: `idle` at rest, `busy` while a run is in progress
 restart. The extension also publishes a small **locator card** — `project`, `branch`, `worktree`,
 `path` — so a peer can be found by where it is working rather than by session id. It is derived
 from the current directory and git by `msgq card`; it is not a profile and carries no current task
-or work summary. The default `msgq sessions` output is unchanged; `--wide` shows the locator.
+or work summary. The last column above is that card as one line, `project branch path`: the worktree
+usually repeats the repository name and a path of `.` is the root, so neither is printed, and the
+default `msgq sessions` output is unchanged. `--wide` adds the column, `--json` carries the four
+fields as an object, and `peers({action:"list"})` shows the column to the model too.
+
+The card is re-derived when the working directory changes, at the start of each turn, and every
+sixth presence renewal, and presence is republished only when it actually differs — so a session
+started outside a repository and pointed at one is listed correctly by the end of its first turn.
 
 Presence is a record, not an engine primitive, and that is deliberate: any process that can publish
 can appear on the roster with nothing but the CLI, which is why the listing is not a pi feature. It
@@ -212,7 +219,7 @@ terminal, a launcher of your own, another agent — and the bus is how the two s
 running.
 
 ```
-peers({action:"list"})                               ->  who is reachable, and who you are
+peers({action:"list"})                               ->  who is reachable (with their locator), and who you are
 peers({action:"ask", to:"session/reviewer", message:"Review this diff"})
 peers({action:"reply", message:"done"})              ->  answers whoever last asked
 peers({action:"card"})                               ->  this session's locator
@@ -220,7 +227,9 @@ peers({action:"card", card:{branch:"review"}})       ->  override one locator fi
 ```
 
 Only `project`, `branch`, `worktree`, and `path` are accepted. A `null` value clears an override and
-returns that field to the derived value.
+returns that field to the derived value. With `--msgq-context off` nothing is derived, but an
+override is still merged and published, so a session that opted out of derivation can still
+describe where it works.
 
 Two things make that safe to use:
 

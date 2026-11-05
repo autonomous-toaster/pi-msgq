@@ -165,7 +165,7 @@ msgq [--db <PATH>] <COMMAND>
 | `follow <ADDRESS>... --consumer <NAME>` | durable subscription; advances the consumer's cursors |
 | `topics` | list addresses with message count and highest offset |
 | `sessions` | list live participants, from the presence records they publish; `--wide` shows their locator card |
-| `card [--cwd PATH] [--paths relative\|full\|none]` | print the locator derived from a working directory |
+| `card [--cwd PATH] [--paths relative\|full\|none] [--address ADDR]` | print the locator derived from a working directory |
 | `await <OFFSET>` | wait for acknowledgements of a published message |
 | `ask <ADDRESS> [MESSAGE]` | ask a peer a question and wait for the answer |
 | `consumers [--topic <T>]` | list consumer cursors |
@@ -289,12 +289,19 @@ session/api-worker  session  busy  api-worker  27
 session/01a12cc5    session  idle             30
 
 $ msgq sessions --wide
-session/api-worker  session  busy  api-worker  27  github.com/org/repo  main  repo  src
+session/api-worker  session  busy  api-worker  27  github.com/org/repo  main  src
 ```
 
-Columns are address, kind, state, and remaining lifetime in seconds. `--wide` appends the locator
-fields `project`, `branch`, `worktree`, and `path`; the default output is unchanged. `--json` emits
-one object per participant and includes a `card` object when the newest presence record has one.
+Columns are address, kind, state, and remaining lifetime in seconds. `--wide` appends one locator
+column, `project branch path`; the default output is unchanged. The identity is already in the
+address and the worktree usually repeats the repository name inside `project`, so neither is
+repeated; a `path` of `.` means the repository root and is left out, and a participant with no card
+shows `-`. `--json` emits one object per participant and includes a `card` object with the four
+stored fields when the newest presence record has one.
+
+What the locator adds over the address line is `project` and `branch` — which repository a peer is
+working in, and on which branch — which is what tells two sessions apart when several are named
+alike.
 
 A presence record can carry a small **locator card** so an agent can find a peer by project rather
 than by session id:
@@ -319,6 +326,17 @@ Use `msgq card` to derive the same card for a script or another client:
 msgq card --cwd "$PWD" --paths relative
 msgq card --cwd "$PWD" --paths full      # path is the absolute current directory
 msgq card --cwd "$PWD" --paths none      # omit path
+
+msgq card --cwd "$PWD" --address session/planner
+```
+
+The last form prints the address, the card, and the locator line a roster row would show, which is
+the pair a client publishes:
+
+```json
+{"address":"session/planner",
+ "card":{"project":"github.com/org/repo","branch":"main","worktree":"repo","path":"."},
+ "locator":"github.com/org/repo  main"}
 ```
 
 Presence is a record, so it is not a pi feature: any process that can publish can appear, with

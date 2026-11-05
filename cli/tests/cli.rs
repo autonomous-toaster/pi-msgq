@@ -744,8 +744,13 @@ fn sessions_reports_cards_in_json_and_wide_text() {
     );
 
     let json = run(&db, &["sessions", "--json"]);
-    let entry: serde_json::Value =
-        serde_json::from_str(json.stdout.lines().next().unwrap()).unwrap();
+    let entry: serde_json::Value = serde_json::from_str(
+        json.stdout
+            .lines()
+            .find(|line| line.contains("session/planner"))
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(entry["card"]["project"], "github.com/org/repo");
     assert_eq!(entry["card"]["branch"], "main");
     assert_eq!(entry["card"]["path"], "src");
@@ -757,13 +762,73 @@ fn sessions_reports_cards_in_json_and_wide_text() {
         plain.stdout
     );
     let wide = run(&db, &["sessions", "--wide"]);
-    assert!(
-        wide.stdout.contains("github.com/org/repo"),
-        "{}",
-        wide.stdout
+    let line = wide.stdout.lines().next().unwrap();
+    let columns: Vec<&str> = line.split('\t').collect();
+    assert_eq!(columns.len(), 6, "five columns and one locator: {line}");
+    assert_eq!(
+        columns[5], "github.com/org/repo  main  src",
+        "the locator is one column of project, branch and path: {line}"
     );
-    assert!(wide.stdout.contains("main"), "{}", wide.stdout);
-    assert!(wide.stdout.contains("src"), "{}", wide.stdout);
+
+    let at_root = serde_json::json!({
+        "project": "github.com/org/repo",
+        "branch": "main",
+        "worktree": "repo",
+        "path": ".",
+    });
+    publish_presence(
+        &db,
+        "session/reviewer",
+        serde_json::json!({"kind": "presence", "state": "busy", "participant": "01a2",
+                           "alias": "reviewer", "card": at_root}),
+    );
+    let wide = run(&db, &["sessions", "--wide"]);
+    let row = wide
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("session/reviewer"))
+        .unwrap();
+    assert_eq!(
+        row.split('\t').next_back(),
+        Some("github.com/org/repo  main"),
+        "a path of '.' is the repository root and adds nothing: {row}"
+    );
+}
+
+#[test]
+fn sessions_marks_a_participant_without_a_card_in_the_locator_column() {
+    let db = temp_db();
+    publish_presence(
+        &db,
+        "cli/ci@host",
+        serde_json::json!({"kind": "presence", "state": "idle"}),
+    );
+    let wide = run(&db, &["sessions", "--wide"]);
+    let line = wide.stdout.lines().next().unwrap();
+    assert_eq!(line.split('\t').next_back(), Some("-"), "{line}");
+}
+
+#[test]
+fn card_reports_the_address_beside_the_locator() {
+    let db = temp_db();
+    let dir = db.parent().unwrap();
+    let out = run(
+        &db,
+        &[
+            "card",
+            "--cwd",
+            dir.to_str().unwrap(),
+            "--paths",
+            "none",
+            "--address",
+            "session/planner",
+        ],
+    );
+    let value: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(value["address"], "session/planner");
+    assert!(value["card"].is_object(), "{value}");
+    assert!(value["card"].get("path").is_none(), "path mode none: {value}");
+    assert!(value["locator"].is_string(), "{value}");
 }
 
 #[test]

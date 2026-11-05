@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use serde_json::json;
 
+use msgq::address;
 use msgq::card::{self, PathMode};
 use msgq::commands::{self, AskArgs, ConsumersAction, CursorAction, FromSpec, PublishArgs};
 use msgq::error::Error;
@@ -141,7 +143,7 @@ enum Command {
     Sessions {
         #[arg(long)]
         json: bool,
-        /// Show the locator card fields.
+        /// Show the locator column: project, branch, and path.
         #[arg(long)]
         wide: bool,
     },
@@ -153,6 +155,9 @@ enum Command {
         /// Path detail: relative (default), full, or none.
         #[arg(long, value_name = "MODE")]
         paths: Option<String>,
+        /// Also report the addresses a participant publishing this card would answer at.
+        #[arg(long, value_name = "ADDR")]
+        address: Option<String>,
     },
     /// List or remove consumer cursors.
     Consumers {
@@ -318,13 +323,33 @@ fn run(cli: Cli) -> Result<(), Error> {
         ),
         Command::Topics { json } => commands::topics(&db, json),
         Command::Sessions { json, wide } => commands::sessions(&db, json, wide),
-        Command::Card { cwd, paths } => {
+        Command::Card {
+            cwd,
+            paths,
+            address,
+        } => {
+            let address = match address {
+                Some(raw) => Some(address::canonicalize(&raw)?),
+                None => None,
+            };
             let cwd = match cwd {
                 Some(path) => path,
                 None => std::env::current_dir()?,
             };
             let card = card::derive_card(&cwd, PathMode::parse(paths.as_deref())?)?;
-            println!("{}", serde_json::to_string(&card)?);
+            match address {
+                // An address is a separate fact from the locator, so it is reported beside it
+                // rather than merged into it: the published `event.card` keeps its four fields.
+                Some(address) => println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "address": address,
+                        "card": card,
+                        "locator": card::summary(&card),
+                    }))?
+                ),
+                None => println!("{}", serde_json::to_string(&card)?),
+            }
             Ok(())
         }
         Command::Prune { older_than, apply } => {

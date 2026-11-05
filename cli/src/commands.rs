@@ -11,6 +11,7 @@ use honker::StreamEvent;
 use serde_json::{Value, json};
 
 use crate::address;
+use crate::card;
 use crate::error::Error;
 use crate::presence::{self, Roster};
 use crate::record;
@@ -652,6 +653,9 @@ fn live_participants(store: &Store) -> Result<BTreeSet<String>, Error> {
 }
 
 /// List live participants from the presence address.
+///
+/// Text columns are address, kind, state, alias and remaining lifetime; `--wide` adds one locator
+/// column built by [`card::summary`]. `--json` carries the card as an object, unchanged.
 pub fn sessions(db_path: &Path, json_out: bool, wide: bool) -> Result<(), Error> {
     let (store, _) = Store::open(db_path)?;
     let now = unix_now();
@@ -715,16 +719,13 @@ pub fn sessions(db_path: &Path, json_out: bool, wide: bool) -> Result<(), Error>
                 (entry.expires_at - now).max(0)
             );
             if wide {
-                for key in ["project", "branch", "worktree", "path"] {
-                    let field = entry
-                        .card
-                        .as_ref()
-                        .and_then(|card| card.get(key))
-                        .and_then(Value::as_str)
-                        .unwrap_or("-");
-                    line.push('\t');
-                    line.push_str(field);
-                }
+                let locator = entry
+                    .card
+                    .as_ref()
+                    .map(card::summary)
+                    .unwrap_or_else(|| "-".to_string());
+                line.push('\t');
+                line.push_str(&locator);
             }
             println!("{line}");
         }

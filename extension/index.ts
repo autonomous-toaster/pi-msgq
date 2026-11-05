@@ -81,7 +81,9 @@ import { decodeRecord, type MsgqRecord, recordBody } from "./src/record.ts";
 import {
 	DEFAULT_ASK_TIMEOUT_S,
 	isError,
+	PLAIN_LIST,
 	planPeerAction,
+	shouldRetryPlainList,
 } from "./src/tools.ts";
 import { renderMsgq } from "./src/render.ts";
 import type { MsgqDetails, MsgqItem } from "./src/render-text.ts";
@@ -643,11 +645,12 @@ export default function (pi: ExtensionAPI) {
 			const timeoutMs = seconds > 0 ? seconds * 1000 + 30_000 : undefined;
 			let report = await runPlanned(pi, plan, { signal, timeoutMs, binEnv: "MSGQ_BIN" });
 			// Older CLIs do not know --wide. The locator is an enhancement, so fall back to the
-			// plain roster rather than failing the list action.
-			if (params.action === "list" && !report.ok && plan.args.includes("--wide")) {
+			// plain roster rather than failing the list action — but only when the CLI rejected
+			// the flag, not when it could not read the bus.
+			if (params.action === "list" && shouldRetryPlainList(plan, report)) {
 				report = await runPlanned(
 					pi,
-					{ command: plan.command, args: ["sessions"] },
+					{ command: plan.command, args: [...PLAIN_LIST] },
 					{ signal, timeoutMs, binEnv: "MSGQ_BIN" },
 				);
 			}

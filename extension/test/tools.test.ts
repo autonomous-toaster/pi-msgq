@@ -5,7 +5,9 @@ import {
 	type Command,
 	DEFAULT_ASK_TIMEOUT_S,
 	isError,
+	PLAIN_LIST,
 	planPeerAction,
+	shouldRetryPlainList,
 } from "../src/tools.ts";
 
 const peers = {
@@ -175,4 +177,18 @@ test("acting without a bus address is refused", () => {
 	}
 	// Listing uses no identity, so it still works.
 	assert.equal(isError(planPeerAction({ action: "list" }, anonymous)), false);
+});
+
+test("the plain fallback is the roster without the locator column", () => {
+	assert.deepEqual(PLAIN_LIST, ["sessions"]);
+});
+
+test("only a CLI that rejected --wide is retried without it", () => {
+	const wide = cmd(planPeerAction({ action: "list" }, peers));
+	assert.equal(
+		shouldRetryPlainList(wide, { ok: false, text: "error: unexpected argument '--wide' found" }),
+		true,
+	);
+	assert.equal(shouldRetryPlainList(wide, { ok: false, text: "could not open the bus" }), false);
+	assert.equal(shouldRetryPlainList(wide, { ok: true, text: "" }), false);
 });

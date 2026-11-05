@@ -694,19 +694,43 @@ async function scenarioPeerLocator() {
 	shutdown(session.child);
 
 	const card = entry?.card;
+	// The live row, as a human and the model both read it: address, kind, state, alias, lease,
+	// and one locator column. A row that grew more columns is a regression, not a feature.
+	const row = wide.split("\n").find((line) => line.startsWith(address)) ?? "";
+	const columns = row.split("\t");
+	const locator = columns[5] ?? "";
 	const ok =
 		card?.project === "github.com/org/repo" &&
 		card?.branch === "main" &&
 		card?.worktree === "repo" &&
 		card?.path === "src" &&
 		!plain.includes("github.com/org/repo") &&
-		wide.includes("github.com/org/repo") &&
-		wide.includes("main") &&
-		wide.includes("src");
+		columns.length === 6 &&
+		locator === "github.com/org/repo  main  src";
 	report(
 		"peer-locator",
 		ok,
-		`card=${JSON.stringify(card)} defaultHasCard=${plain.includes("github.com/org/repo")} wideHasCard=${wide.includes("github.com/org/repo")}`,
+		`card=${JSON.stringify(card)} columns=${columns.length} locator=${JSON.stringify(locator)} plainHasCard=${plain.includes("github.com/org/repo")}`,
+	);
+}
+
+/**
+ * The same assertion for maki, whose plugin is a separate client. It runs against the real
+ * source with a stubbed `maki` host (Lua, driven from scripts/maki-card.lua), so it exercises
+ * the plugin's own publication path rather than a re-implementation of it.
+ */
+async function scenarioMakiCard() {
+	const script = resolve(HERE, "maki-card.lua");
+	const source = resolve(REPO, "maki/lua/msgq.lua");
+	const run = spawnSync("lua", [script], {
+		encoding: "utf8",
+		env: { ...process.env, MSGQ_SOURCE: source },
+	});
+	const output = `${run.stdout ?? ""}${run.stderr ?? ""}`.trim();
+	report(
+		"maki-card",
+		run.status === 0,
+		run.status === 0 ? output.split("\n").pop() : `exit=${run.status} ${output.slice(-400)}`,
 	);
 }
 
@@ -1566,6 +1590,7 @@ else if (scenario === "steer-mid-run") await scenarioSteerMidRun();
 else if (scenario === "extra-topic") await scenarioExtraTopic();
 else if (scenario === "presence") await scenarioPresence();
 else if (scenario === "peer-locator") await scenarioPeerLocator();
+else if (scenario === "maki-card") await scenarioMakiCard();
 else if (scenario === "ack-display") await scenarioAckDisplay();
 else if (scenario === "ack-honor") await scenarioAckHonor();
 else if (scenario === "ack-batch") await scenarioAckBatch();
@@ -1598,7 +1623,7 @@ else if (scenario === "completion-reported") await scenarioCompletionReported();
 else if (scenario === "dispatch-command") await scenarioDispatchCommand();
 else {
 	console.error(
-		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|peer-locator|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog>",
+		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|peer-locator|maki-card|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog>",
 	);
 	process.exit(2);
 }

@@ -253,7 +253,15 @@ output SHALL remain unchanged.
 
 #### Scenario: Wide output
 - **WHEN** `--wide` is given
-- **THEN** the text output appends the project, branch, worktree, and path from the card, using a placeholder for a missing field
+- **THEN** the text output appends exactly one locator column holding the card's project, branch, and path, in that order
+
+#### Scenario: The locator column omits repetition
+- **WHEN** the card's `worktree` repeats the repository name already inside `project`, or its `path` is `.`
+- **THEN** neither is repeated in the locator column, which shows only what tells peers apart
+
+#### Scenario: No card
+- **WHEN** a live participant has no card, or an empty one
+- **THEN** the locator column is `-` and the row keeps its five other columns
 
 #### Scenario: Default text output is unchanged
 - **WHEN** `--wide` is not given
@@ -421,6 +429,12 @@ there; `none` omits `path`. Outside git, `branch` and `worktree` SHALL be omitte
 removed when an origin exists, otherwise the repository root directory name, or the current directory
 name outside git.
 
+`msgq card --address ADDR` SHALL additionally report, as one JSON object, the canonical `address`,
+the `card`, and the `locator` — the single column `msgq sessions --wide` shows. It SHALL NOT merge the
+address into the card, because the published `event.card` has four fields and no address. An address
+using an unknown scheme SHALL be a usage error. Without `--address`, the output SHALL remain the
+plain card object.
+
 #### Scenario: A git repository
 
 - **WHEN** `msgq card` runs in a git repository with an origin
@@ -445,6 +459,10 @@ name outside git.
 
 - **WHEN** `--paths` is `relative`, `full`, or `none`
 - **THEN** `path` is respectively relative to the root, the absolute current directory, or absent
+
+#### Scenario: Address beside the locator
+- **WHEN** `msgq card --address session/planner` runs
+- **THEN** it reports the address, the card, and the locator line, and the card is still published unchanged
 
 #### Scenario: Detached HEAD
 

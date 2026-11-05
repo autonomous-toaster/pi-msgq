@@ -18,6 +18,21 @@ export function isError(plan: Command | PlanError): plan is PlanError {
 	return "error" in plan;
 }
 
+/** The narrower list `list` falls back to when the CLI predates the locator column. */
+export const PLAIN_LIST: string[] = ["sessions"];
+
+/**
+ * Whether a failed report calls for the fallback: only a command line the CLI refused as
+ * malformed does. A bus that cannot be read is the bus's problem, and a second attempt
+ * would only repeat it.
+ */
+export function shouldRetryPlainList(
+	command: Command,
+	report: { ok: boolean; text: string },
+): boolean {
+	return !report.ok && command.args.includes("--wide") && /unexpected argument|--wide/i.test(report.text);
+}
+
 /** Arguments accepted by the peers tool. */
 export interface PeerParams {
 	action: "list" | "send" | "ask" | "reply";
@@ -53,6 +68,9 @@ const NO_IDENTITY = "this session has no bus address yet: the message bus did no
 export function planPeerAction(params: PeerParams, context: PeerContext): Command | PlanError {
 	const action = params.action as string;
 	if (action === "list") {
+		// The model reads the same row a human does, locator column included: without it a
+		// peer is a session id and nothing else. Falling back to PLAIN_LIST covers a CLI
+		// that predates the column.
 		return { command: context.msgqBin, args: ["sessions", "--wide"] }; // needs no identity
 	}
 

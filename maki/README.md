@@ -124,8 +124,8 @@ msgq({action:"card", card={branch="review"}})  override one locator field
 ```
 
 Omit `card` to read the current locator. A non-empty field overrides the derived value; an empty
-string clears that override and returns to the derived value. Only `project`, `branch`, `worktree`,
-and `path` are accepted.
+string removes that field altogether, derived value included, so a project guessed from a directory
+outside git can be cleared. Only `project`, `branch`, `worktree`, and `path` are accepted.
 
 `reply` answers the message received most recently, carrying its `reply_to` and arriving at the
 sender's address.
@@ -140,9 +140,17 @@ Presence is advisory and never gates delivery.
 
 The record carries a small **locator card** — `project`, `branch`, `worktree`, `path` — derived by
 `msgq card` from the current directory and git. It lets a peer be found by project rather than by
-session id. It is not a profile and carries no current task or work summary. `context = "off"`
-disables it; `card_paths` controls whether `path` is relative, absolute, or omitted. The card is
-public metadata, so it can reveal project, branch, worktree, and path names.
+session id. It is not a profile and carries no current task or work summary. The card is re-derived
+when the session starts, at the start of each turn (so a directory opened mid-session is picked up
+at once), on `SessionCwdChanged`, and every sixth presence renewal; presence is republished only
+when it differs. `context = "off"` disables derivation but keeps overrides; `card_paths` controls
+whether `path` is relative, absolute, or omitted. The card is public metadata, so it can reveal
+project, branch, worktree, and path names.
+
+`/peers` and `msgq({action="list"})` show the card as one column, `project branch path` — the same
+column `msgq sessions --wide` prints. A session publishing no card shows `-`. `maki/install.sh`
+checks that the installed plugin actually has the card code and that the `msgq` on `PATH` supports
+`card`, because a stale install publishes presence silently without one.
 
 `/peers me` answers from what the session already holds, so it still works when the bus does not:
 

@@ -778,11 +778,14 @@ local function same_card(a, b)
 end
 
 -- Merge the derived locator with explicit, per-field overrides. An empty
--- override is ignored, leaving the derived value in place.
+-- override removes the field, so a derived value nobody wants (a project
+-- outside git) can be cleared; an empty one is never stored as an override.
 local function merge_card(derived, overrides)
 	local card = {}
 	for key, value in pairs(derived or {}) do
-		card[key] = value
+		if (overrides or {})[key] ~= "" then
+			card[key] = value
+		end
 	end
 	for key, value in pairs(overrides or {}) do
 		if value ~= "" then
@@ -886,6 +889,12 @@ end
 local function on_turn_start(ev)
 	if not S.started or ev.data.session_id ~= S.session_id then
 		return
+	end
+	-- A session can start outside a repository and be pointed at one inside the
+	-- first turn. The renewal timer would notice minutes later, so the locator is
+	-- re-derived here, the way the pi extension does at the start of a turn.
+	if refresh_card(ev.data.cwd) then
+		publish_presence(S.presence_state)
 	end
 	for offset, pending in pairs(S.pending) do
 		if pending.phases.started and not pending.started then
@@ -1255,7 +1264,7 @@ a bare name is a group.]],
 			},
 			card = {
 				type = "object",
-				description = "Locator overrides for the card action. An empty string clears an override.",
+				description = "Locator overrides for the card action. An empty string removes that field, derived value included.",
 				properties = {
 					project = { type = "string" },
 					branch = { type = "string" },
@@ -1276,7 +1285,7 @@ a bare name is a group.]],
 		local action = input.action
 
 		if action == "card" then
-			if type(input.card) ~= "table" then
+			if input.card == nil then
 				if S.card then
 					return { llm_output = maki.json.encode(S.card) }
 				end
@@ -1299,15 +1308,18 @@ a bare name is a group.]],
 				end
 				local trimmed = trim(value)
 				if trimmed == "" then
-					S.card_overrides[key] = nil
+					-- An empty string is a removal, not a no-op: it must also clear a
+					-- derived field, so it is kept as an empty override.
+					S.card_overrides[key] = ""
 				else
 					S.card_overrides[key] = trimmed
 				end
 			end
-			local changed = refresh_card()
-			if changed then
-				publish_presence(S.presence_state)
-			end
+			-- Overrides are merged even with context derivation off, so a session that
+			-- opted out of derivation can still describe itself.
+			refresh_card()
+			S.card = merge_card(S.derived_card, S.card_overrides)
+			publish_presence(S.presence_state)
 			if S.card then
 				return { llm_output = "card updated\n" .. maki.json.encode(S.card) }
 			end

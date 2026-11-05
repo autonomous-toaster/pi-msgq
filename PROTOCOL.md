@@ -101,6 +101,11 @@ Presence is a normal record published to the presence address:
   context when there is one, and `path` is the current directory relative to the repository root by
   default. A publisher may omit `path` or use an absolute path instead. Readers ignore card keys they
   do not know, and a card never invalidates a presence record.
+- The card is derived, not self-described: a client reports what it can see of its directory and git,
+  never a role or a summary of its work. Most of it repeats what the address already says — the
+  identity is in `from`, and `worktree` is usually the repository name inside `project` — so what
+  normally differs between two peers is `project` and `branch`. Readers that print the locator are
+  expected to collapse it to that.
 - A clean shutdown publishes `state: "gone"`, which retracts presence immediately.
 - Presence is advisory. It is not authentication, and it does not promise that a live session will
   answer. A client that publishes nothing at all still works; it simply is not listed. The card is
