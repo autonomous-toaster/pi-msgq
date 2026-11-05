@@ -27,8 +27,6 @@ import {
 	consumerId,
 	parsePolicy,
 	parsePresence,
-	parseOptionalAddress,
-	parseDepth,
 	parseTopics,
 	parseTrustList,
 	parseTtlSeconds,
@@ -67,7 +65,6 @@ import { decodeRecord, type MsgqRecord, recordBody } from "./src/record.ts";
 import {
 	DEFAULT_ASK_TIMEOUT_S,
 	isError,
-	planCompanionAction,
 	planPeerAction,
 } from "./src/tools.ts";
 import { renderMsgq } from "./src/render.ts";
@@ -92,10 +89,6 @@ export default function (pi: ExtensionAPI) {
 		description: "Register session presence: 'on' (default) or 'off'",
 		type: "string",
 	});
-	pi.registerFlag("msgq-report-to", {
-		description: "Default recipient for messages this session sends",
-		type: "string",
-	});
 	pi.registerFlag("msgq-trust", {
 		description: "Comma-separated senders allowed to start a turn under 'honor'",
 		type: "string",
@@ -117,8 +110,6 @@ export default function (pi: ExtensionAPI) {
 	let skipped = 0;
 	/** Senders allowed to start a turn under the honour policy. Empty means no allowlist. */
 	let trusted: string[] = [];
-	/** Default recipient when a tool call does not name one. */
-	let reportTo: string | undefined;
 	/** Whether presence is configured on, as opposed to actually held. */
 	let presenceConfigured = false;
 	/** Whether the session currently holds its presence lease. */
@@ -435,10 +426,8 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// The agent-facing surface: two tools that delegate, so the wire lives in the CLI and
-	// the herdr glue in the companion command, each in one place.
+	// The agent-facing surface: one tool that delegates, so the wire lives in the CLI.
 	const msgqBin = process.env.MSGQ_BIN?.trim() || "msgq";
-	const companionBin = process.env.MSGQ_COMPANION?.trim() || "companion";
 
 	function toolText(content: string, details?: unknown) {
 		return { content: [{ type: "text" as const, text: content }], details };
@@ -458,8 +447,6 @@ export default function (pi: ExtensionAPI) {
 			policy,
 			presence: presenceConfigured ? (presenceHeld ? "registered" : "lost") : "off",
 			trusted,
-			reportTo,
-			depth: parseDepth(process.env),
 		};
 	}
 
@@ -471,8 +458,8 @@ export default function (pi: ExtensionAPI) {
 			"'send' a message to one, 'ask' a question and wait for the answer, or 'reply' to the " +
 			"message you most recently received. To have a peer *run* something rather than be told " +
 			"about it, send a command: the body is the command line, and its own arguments are where " +
-			"you ask for the answer. Use it to delegate to a companion you started, or to talk to any " +
-			"other session on the bus.",
+			"you ask for the answer. Use it to hand work to another session on the bus and to read " +
+			"what comes back.",
 		parameters: Type.Object({
 			action: Type.Union(
 				[Type.Literal("list"), Type.Literal("send"), Type.Literal("ask"), Type.Literal("reply")],
@@ -500,7 +487,6 @@ export default function (pi: ExtensionAPI) {
 			const plan = planPeerAction(params, {
 				msgqBin,
 				self,
-				reportTo,
 				lastInbound,
 				// The model chose not to wait, so ask to be told when the peer's run finishes.
 				expectCompletion: true,
@@ -519,77 +505,12 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.registerTool(peersTool);
 
-	const companionsTool = {
-		name: "companions",
-		label: "companions",
-		description:
-			"Start and stop companion agents. A companion is a real pi process in its own terminal " +
-			"tab, reachable at session/<name>. 'spawn' starts one and reports the name it granted, " +
-			"which may be suffixed: use that name and address, not the one you asked for. The task is " +
-			"then simply a message sent with the peers tool. A companion acts only on this session, " +
-			"and on any senders listed in 'accept'. It is a full agent with its own context, cost and " +
-			"model, and nothing reaps it: close what you start.",
-		parameters: Type.Object({
-			action: Type.Union([Type.Literal("spawn"), Type.Literal("close")], {
-				description: "what to do",
-			}),
-			name: Type.Optional(
-				Type.String({ description: "a short role name, for example reviewer" }),
-			),
-			cwd: Type.Optional(
-				Type.String({ description: "where the companion runs; defaults to this directory" }),
-			),
-			accept: Type.Optional(
-				Type.String({
-					description:
-						"extra senders it will act on, comma-separated; it always acts on this session",
-				}),
-			),
-			model: Type.Optional(
-				Type.String({
-					description:
-						"model the companion runs, as pi accepts it: 'id', 'provider/id', or 'id:thinking'",
-				}),
-			),
-			provider: Type.Optional(
-				Type.String({
-					description: "restrict model lookup to one provider; needs 'model' too",
-				}),
-			),
-			thinking: Type.Optional(
-				Type.String({
-					description:
-						"how hard the companion thinks: off, minimal, low, medium, high, xhigh, or max",
-				}),
-			),
-		}),
-		async execute(
-			_toolCallId: string,
-			params: {
-				action: "spawn" | "close";
-				name?: string;
-				cwd?: string;
-				accept?: string;
-				model?: string;
-				provider?: string;
-				thinking?: string;
-			},
-			signal: AbortSignal | undefined,
-		) {
-			const plan = planCompanionAction(params, { companionBin, self });
-			if (isError(plan)) return toolText(plan.error);
-			const result = await runPlanned(pi, plan, { signal, binEnv: "MSGQ_COMPANION" });
-			return toolText(result.text);
-		},
-	};
-	pi.registerTool(companionsTool);
 
 	// The human's surface: the same planners, run from the prompt instead of by a model.
 	// Registered here, as the extension loads, so the commands exist from the start.
 	const commandDeps: CommandDeps = {
 		identity: identityFacts,
 		msgqBin: () => msgqBin,
-		companionBin: () => companionBin,
 		lastInbound: () => lastInbound,
 		answered: noteAnswered,
 	};
@@ -607,7 +528,6 @@ export default function (pi: ExtensionAPI) {
 			const topicsFlag = pi.getFlag("msgq-topics");
 			const policyFlag = pi.getFlag("msgq-policy");
 			const presenceFlag = pi.getFlag("msgq-presence");
-			const reportFlag = pi.getFlag("msgq-report-to");
 			const trustFlag = pi.getFlag("msgq-trust");
 			extra = parseTopics(
 				(typeof topicsFlag === "string" ? topicsFlag : undefined) ??
@@ -622,10 +542,6 @@ export default function (pi: ExtensionAPI) {
 					process.env.MSGQ_PRESENCE,
 			);
 			presenceTtl = parseTtlSeconds(process.env.MSGQ_PRESENCE_TTL, PRESENCE_TTL_S);
-			reportTo = parseOptionalAddress(
-				(typeof reportFlag === "string" ? reportFlag : undefined) ??
-					process.env.MSGQ_PARENT,
-			);
 			trusted = parseTrustList(
 				(typeof trustFlag === "string" ? trustFlag : undefined) ??
 					process.env.MSGQ_TRUST,

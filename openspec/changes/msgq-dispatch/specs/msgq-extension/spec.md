@@ -50,7 +50,7 @@ go through the bus and SHALL NOT require the peer to have been started by this s
 - **WHEN** the model replies without naming a recipient
 - **THEN** the reply is addressed to the sender of the message it most recently received
 
-#### Scenario: Any peer, not only companions
+#### Scenario: A peer this session did not start
 - **WHEN** the model sends to an address it did not start itself
 - **THEN** the message is sent like any other
 

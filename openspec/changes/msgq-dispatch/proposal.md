@@ -57,8 +57,8 @@ belongs to the capability that owns delivery.
 
 ## Impact
 
-- No new dependency, no new process, and no change to `companion`: an agent needs nothing more than
-  the bus to be handed a command.
+- No new dependency and no new process: an agent needs nothing more than the bus to be handed a
+  command.
 - A peer too old to know the type degrades safely — an unknown type is display-only — where a flag
   on a `prompt` would reproduce today's failure exactly.
 - The delivery path gains a second mode, and one rule that follows from it: a command is never

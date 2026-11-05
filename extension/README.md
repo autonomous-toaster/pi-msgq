@@ -197,48 +197,33 @@ session started resolves exactly like one asked a moment ago.
 
 ## Working with other agents
 
-Two tools put the bus in the agent's hands.
+One tool puts the bus in the agent's hands.
 
 | Tool | Actions | Needs |
 |---|---|---|
 | `peers` | `list` who is reachable · `send` a message · `ask` a question and wait for the answer · `reply` to the message you last received | the bus only |
-| `companions` | `spawn` a companion (a real pi in its own terminal tab, reachable at `session/<name>`, on the `model`, `provider` and `thinking` level you name) · `close` it | a launcher: `companion`, herdr, jq |
 
-`peers` is the bus client and works anywhere the bus does. `companions` only asks a launcher to
-start a process, and the launcher is [one implementation of a contract](../companion/README.md#the-launcher-contract)
-— so an installation with no launcher still has the first tool, both skills, and every command but
-`/companions`.
-
-Spawning creates a process and nothing else: the task is simply the first message.
+A peer is any other participant on the bus: another pi session, a maki session, a script, a CI job.
+Nothing here starts one. Starting a process is the job of whatever you use to run sessions — a
+terminal, a launcher of your own, another agent — and the bus is how the two sides talk once it is
+running.
 
 ```
-companions({action:"spawn", name:"reviewer"})        ->  session/reviewer
+peers({action:"list"})                               ->  who is reachable, and who you are
 peers({action:"ask", to:"session/reviewer", message:"Review this diff"})
 peers({action:"reply", message:"done"})              ->  answers whoever last asked
 ```
 
-Three options make this work safely:
+Two things make that safe to use:
 
-- **`--msgq-report-to <address>`** (or **`MSGQ_PARENT`**) is the default recipient when a call does
-  not name one, and is how a spawned companion knows where to report.
 - **`--msgq-trust <addresses>`** is a comma-separated allowlist. Under `honor`, a record from
-  anyone outside it is delivered display-only and **cannot start a turn**. A companion is spawned
-  trusting only its parent, which is what stops a shell-capable agent from being commanded by any
-  process that can write the bus.
+  anyone outside it is delivered display-only and **cannot start a turn**. A session started with a
+  narrow list is what stops a shell-capable agent from being commanded by any process that can
+  write the bus. `from` is unverified, so the allowlist was never authentication; it scopes who a
+  session will *routinely* obey, and the real boundary is who can write the bus file.
 - A message that **asks a question** is delivered with an instruction telling the model to answer
   with the `peers` tool. Without it a peer answers into its own transcript and the asker waits in
   vain.
-
-A spawn can widen that allowlist with **`accept`**, a comma-separated set of extra senders. The
-parent stays the default, so widening is deliberate:
-
-```
-companions({action:"spawn", name:"reviewer", accept:"cli/ci-bot@host"})
-```
-
-Worth being precise about what that is: `from` is unverified, so the allowlist was never
-authentication. It scopes which senders a shell-capable agent will *routinely* obey, and the real
-boundary is who can write the bus file. Widen it narrowly.
 
 ### An exchange always ends
 
@@ -274,19 +259,14 @@ session/planner
   policy      honor
   presence    registered
   trust       session/parent
-  reports to  session/parent
-  depth       1 of 2
 ```
 
-That answers the questions a delegating agent otherwise guesses at: which address on the roster is
-its own, whether its policy will let a message act at all, who it is allowed to obey, where its
-messages go by default, and whether it may delegate further. A fact that is not configured is
-stated as absent rather than left out, so a session that was never delegated to says so. All of it
-comes from what the session already knows, so it works when the bus does not.
+That answers the questions an agent otherwise guesses at: which address on the roster is its own,
+whether its policy will let a message act at all, and who it is allowed to obey. All of it comes
+from what the session already knows, so it works when the bus does not.
 
-The tools shell out to the `msgq` CLI and the `companion` command, so the wire and the herdr glue
-each live in one place. `MSGQ_BIN` and `MSGQ_COMPANION` point at them when they are not installed on
-`PATH` — which is also how the `spawn` command passes them into a companion.
+The tool shells out to the `msgq` CLI, so the wire lives in one place. `MSGQ_BIN` points at it when
+it is not installed on `PATH`.
 
 ### The skills it ships
 
@@ -305,8 +285,8 @@ and what to do with an answer that arrives from another agent.
 
 Both are advertised by name and description only; their instructions are read when a task calls for
 them, and not otherwise. They live in `extension/skills/` and are declared by the `pi` manifest in
-`extension/package.json`, so loading the extension is what makes them available — and a companion
-spawned with this extension inherits them too. Either can also be loaded on its own:
+`extension/package.json`, so loading the extension is what makes them available. Either can also be
+loaded on its own:
 
 ```bash
 pi --skill ./extension/skills/msgq-notify
@@ -315,15 +295,14 @@ pi --skill ./extension/skills/msgq-delegate
 
 ## Commands for you
 
-The tools above belong to the agent. These four are yours: run them from the prompt, and no model
-turn is spent.
+The tool above belongs to the agent. These three commands are yours: run them from the prompt, and
+no model turn is spent.
 
 | Command | What it does |
 |---|---|
 | `/peers` | who is reachable; choosing one composes a message and sends it |
 | `/peer <address> [message]` | send to one peer |
 | `/reply [message]` | answer the message you most recently received |
-| `/companions` | the companions running in terminal tabs, with their status and directory |
 
 Addresses work the same way everywhere:
 
@@ -364,8 +343,8 @@ reply: /peer cli/alice@mac ...
 ```
 
 That line is part of the rendering and never part of the content the model reads. What you send is
-an ordinary record from `session/<self>` — the same identity your agent uses, so a companion that
-trusts this session answers you both.
+an ordinary record from `session/<self>` — the same identity your agent uses, so a peer that trusts
+this session answers you both.
 
 ## Configuration
 

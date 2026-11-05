@@ -5,14 +5,12 @@ import {
 	type Command,
 	DEFAULT_ASK_TIMEOUT_S,
 	isError,
-	planCompanionAction,
 	planPeerAction,
 } from "../src/tools.ts";
 
 const peers = {
 	msgqBin: "msgq",
 	self: "session/planner",
-	reportTo: "session/planner",
 	lastInbound: { from: "session/reviewer", offset: 42 },
 	expectCompletion: true,
 };
@@ -90,34 +88,8 @@ test("asking and replying are unchanged", () => {
 	);
 });
 
-test("send falls back to the reporting address", () => {
-	const plan = cmd(
-		planPeerAction({ action: "send", message: "hi" }, { ...peers, reportTo: "session/parent" }),
-	);
-	assert.deepEqual(plan.args, [
-		"publish",
-		"session/parent",
-		"hi",
-		"--type",
-		"prompt",
-		"--from",
-		"session/planner",
-		"--ack",
-		"completed",
-	]);
-});
-
-test("a fallback that lands on this session does not ask to be told either", () => {
-	assert.equal(
-		cmd(planPeerAction({ action: "send", message: "hi" }, peers)).args.includes("--ack"),
-		false,
-	);
-});
-
 test("send without a recipient or a message is refused", () => {
-	assert.ok(
-		isError(planPeerAction({ action: "send", message: "hi" }, { ...peers, reportTo: undefined })),
-	);
+	assert.ok(isError(planPeerAction({ action: "send", message: "hi" }, peers)));
 	assert.ok(isError(planPeerAction({ action: "send", to: "session/x" }, peers)));
 });
 
@@ -131,7 +103,7 @@ test("ask carries a wait window, defaulting generously", () => {
 			.args,
 		["ask", "session/x", "?", "--timeout", "30", "--from", "session/planner"],
 	);
-	assert.ok(isError(planPeerAction({ action: "ask", message: "?" }, { ...peers, reportTo: undefined })));
+	assert.ok(isError(planPeerAction({ action: "ask", message: "?" }, peers)));
 });
 
 test("reply targets the sender of the last received message", () => {
@@ -193,7 +165,6 @@ test("unknown peer actions are refused", () => {
 });
 
 test("acting without a bus address is refused", () => {
-	// A companion spawned with no parent would have no trusted-sender allowlist at all.
 	const anonymous = { ...peers, self: "" };
 	for (const params of [
 		{ action: "send", to: "session/x", message: "hi" },
@@ -202,209 +173,6 @@ test("acting without a bus address is refused", () => {
 	] as const) {
 		assert.ok(isError(planPeerAction(params, anonymous)), JSON.stringify(params));
 	}
-	assert.ok(
-		isError(planCompanionAction({ action: "spawn", name: "x" }, { companionBin: "companion", self: "" })),
-	);
-	// Listing and closing use no identity, so they still work.
+	// Listing uses no identity, so it still works.
 	assert.equal(isError(planPeerAction({ action: "list" }, anonymous)), false);
-	assert.equal(
-		isError(planCompanionAction({ action: "close", name: "x" }, { companionBin: "companion", self: "" })),
-		false,
-	);
-});
-
-test("spawn points the companion at this session", () => {
-	assert.deepEqual(
-		cmd(
-			planCompanionAction(
-				{ action: "spawn", name: "reviewer" },
-				{ companionBin: "companion", self: "session/planner" },
-			),
-		),
-		{
-			command: "companion",
-			args: ["spawn", "reviewer", "--parent", "session/planner", "--json"],
-		},
-	);
-	assert.deepEqual(
-		cmd(
-			planCompanionAction(
-				{ action: "spawn", name: "reviewer", cwd: "/tmp/repo" },
-				{ companionBin: "companion", self: "session/planner" },
-			),
-		).args,
-		["spawn", "reviewer", "--parent", "session/planner", "--json", "--cwd", "/tmp/repo"],
-	);
-	assert.ok(
-		isError(
-			planCompanionAction(
-				{ action: "spawn" },
-				{ companionBin: "companion", self: "session/planner" },
-			),
-		),
-	);
-});
-
-test("close names the companion", () => {
-	assert.deepEqual(
-		cmd(planCompanionAction({ action: "close", name: "reviewer" }, { companionBin: "companion", self: "x" }))
-			.args,
-		["close", "reviewer"],
-	);
-	assert.ok(
-		isError(planCompanionAction({ action: "close" }, { companionBin: "companion", self: "x" })),
-	);
-});
-
-test("a spawn trusts the parent alone by default", () => {
-	assert.deepEqual(
-		cmd(planCompanionAction({ action: "spawn", name: "reviewer" }, { companionBin: "companion", self: "session/p" })).args,
-		["spawn", "reviewer", "--parent", "session/p", "--json"],
-	);
-});
-
-test("a spawn widens the trusted set when asked", () => {
-	const plan = cmd(
-		planCompanionAction(
-			{ action: "spawn", name: "reviewer", accept: "cli/second@test,group/family" },
-			{ companionBin: "companion", self: "session/p" },
-		),
-	);
-	assert.deepEqual(plan.args, [
-		"spawn",
-		"reviewer",
-		"--parent",
-		"session/p",
-		"--json",
-		"--accept",
-		"cli/second@test,group/family",
-	]);
-});
-
-test("a spawn carries the working directory and the trusted set together", () => {
-	const plan = cmd(
-		planCompanionAction(
-			{ action: "spawn", name: "reviewer", cwd: "/src/api", accept: "cli/ci@host" },
-			{ companionBin: "companion", self: "session/p" },
-		),
-	);
-	assert.deepEqual(plan.args.slice(-4), ["--cwd", "/src/api", "--accept", "cli/ci@host"]);
-});
-
-test("send can carry a command instead of a message", () => {
-	const plan = cmd(
-		planPeerAction({ action: "send", to: "session/x", message: "/harsh-review the parser", command: true }, peers),
-	);
-	assert.deepEqual(plan.args, [
-		"publish",
-		"session/x",
-		"/harsh-review the parser",
-		"--type",
-		"command",
-		"--from",
-		"session/planner",
-		"--ack",
-		"completed",
-	]);
-});
-
-test("asking a command is refused, and the refusal names the fix", () => {
-	const plan = planPeerAction({ action: "ask", to: "session/x", message: "/harsh-review", command: true }, peers);
-	assert.equal(isError(plan), true);
-	assert.match(
-		(plan as { error: string }).error,
-		/put the request for an answer in its own arguments/,
-	);
-});
-
-test("only sending takes a command", () => {
-	const plan = planPeerAction({ action: "reply", message: "ok", command: true }, peers);
-	assert.equal(isError(plan), true);
-	assert.match((plan as { error: string }).error, /only 'send' takes a command/);
-});
-
-test("a spawn can choose the model the companion runs", () => {
-	const plan = cmd(
-		planCompanionAction(
-			{ action: "spawn", name: "reviewer", model: "lab/qwen3-30b" },
-			{ companionBin: "companion", self: "session/p" },
-		),
-	);
-	assert.deepEqual(plan.args, [
-		"spawn",
-		"reviewer",
-		"--parent",
-		"session/p",
-		"--json",
-		"--model",
-		"lab/qwen3-30b",
-	]);
-});
-
-test("a spawn can pin the provider the model is looked up in", () => {
-	const plan = cmd(
-		planCompanionAction(
-			{ action: "spawn", name: "reviewer", model: "qwen3-30b:high", provider: "lab" },
-			{ companionBin: "companion", self: "session/p" },
-		),
-	);
-	assert.deepEqual(plan.args, [
-		"spawn",
-		"reviewer",
-		"--parent",
-		"session/p",
-		"--json",
-		"--model",
-		"qwen3-30b:high",
-		"--provider",
-		"lab",
-	]);
-});
-
-test("a provider without a model is refused, and says why", () => {
-	const plan = planCompanionAction(
-		{ action: "spawn", name: "reviewer", provider: "lab" },
-		{ companionBin: "companion", self: "session/p" },
-	);
-	assert.ok("error" in plan, "a provider only narrows model lookup, it does not choose a model");
-	assert.match(String((plan as { error: string }).error), /pass 'model' too/);
-});
-
-test("a spawn can set how hard the companion thinks", () => {
-	const plan = cmd(
-		planCompanionAction(
-			{ action: "spawn", name: "reviewer", thinking: "high" },
-			{ companionBin: "companion", self: "session/p" },
-		),
-	);
-	assert.deepEqual(plan.args, [
-		"spawn",
-		"reviewer",
-		"--parent",
-		"session/p",
-		"--json",
-		"--thinking",
-		"high",
-	]);
-});
-
-test("a thinking level needs no model, because it applies to whatever runs", () => {
-	const plan = cmd(
-		planCompanionAction(
-			{ action: "spawn", name: "reviewer", thinking: "off" },
-			{ companionBin: "companion", self: "session/p" },
-		),
-	);
-	assert.ok(plan.args.includes("--thinking"), "no provider-style coupling here");
-});
-
-test("a thinking level pi does not know is refused, and the choices are named", () => {
-	const plan = planCompanionAction(
-		{ action: "spawn", name: "reviewer", thinking: "turbo" },
-		{ companionBin: "companion", self: "session/p" },
-	);
-	assert.ok("error" in plan);
-	const message = String((plan as { error: string }).error);
-	assert.match(message, /not a thinking level/);
-	assert.match(message, /off, minimal, low, medium, high, xhigh, max/);
 });

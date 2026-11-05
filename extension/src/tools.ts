@@ -34,8 +34,6 @@ export interface PeerContext {
 	msgqBin: string;
 	/** This session's own address. */
 	self: string;
-	/** Default recipient when a call does not name one. */
-	reportTo?: string;
 	/** The most recently received message, for replies. */
 	lastInbound?: { from: string; offset: number };
 	/** Whether an outbound message should ask to be told when the peer's run completes. */
@@ -47,8 +45,7 @@ export const DEFAULT_ASK_TIMEOUT_S = 600;
 
 /**
  * Refuse to build a command without an identity. Sending as nobody produces a record
- * with an empty sender, and spawning with no parent produces a companion with no
- * trusted-sender allowlist, which is worse.
+ * with an empty sender, which no peer can answer.
  */
 const NO_IDENTITY = "this session has no bus address yet: the message bus did not start";
 
@@ -73,9 +70,9 @@ export function planPeerAction(params: PeerParams, context: PeerContext): Comman
 	if (!context.self) return { error: NO_IDENTITY };
 
 	if (action === "send") {
-		const to = params.to ?? context.reportTo;
-		if (!to) return { error: "no recipient: pass 'to', or configure a reporting address" };
+		if (!params.to) return { error: "no recipient: pass 'to'" };
 		if (!params.message) return { error: "no message to send" };
+		const to = params.to;
 		// Send as this session, not as the CLI's default sender: the peer's trusted
 		// sender list, and its notion of who to answer, both depend on it.
 		const args = [
@@ -95,9 +92,9 @@ export function planPeerAction(params: PeerParams, context: PeerContext): Comman
 	}
 
 	if (action === "ask") {
-		const to = params.to ?? context.reportTo;
-		if (!to) return { error: "no recipient: pass 'to', or configure a reporting address" };
+		if (!params.to) return { error: "no recipient: pass 'to'" };
 		if (!params.message) return { error: "no question to ask" };
+		const to = params.to;
 		const timeout = params.timeoutSeconds ?? DEFAULT_ASK_TIMEOUT_S;
 		return {
 			command: context.msgqBin,
@@ -123,86 +120,6 @@ export function planPeerAction(params: PeerParams, context: PeerContext): Comman
 				context.self,
 			],
 		};
-	}
-
-	return { error: "unknown action: " + action };
-}
-
-/** Arguments accepted by the companions tool. */
-export interface CompanionParams {
-	action: "spawn" | "close";
-	name?: string;
-	cwd?: string;
-	/** Extra senders the companion will act on, comma-separated. */
-	accept?: string;
-	/** The model the companion runs, as pi accepts it: `id`, `provider/id`, or `id:thinking`. */
-	model?: string;
-	/** Restrict model lookup to one provider. Needs a model. */
-	provider?: string;
-	/** How hard the companion thinks: off, minimal, low, medium, high, xhigh, max. */
-	thinking?: string;
-}
-
-/** The thinking levels pi accepts, in its own order. */
-export const THINKING_LEVELS = [
-	"off",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-	"max",
-] as const;
-
-/** What the companions planner needs to know. */
-export interface CompanionContext {
-	/** The companion command to invoke. */
-	companionBin: string;
-	/** This session's own address, which the companion reports to. */
-	self: string;
-}
-
-/** Plan a companions action. */
-export function planCompanionAction(
-	params: CompanionParams,
-	context: CompanionContext,
-): Command | PlanError {
-	const action = params.action as string;
-
-	if (action === "spawn") {
-		if (!params.name) return { error: "a companion needs a name" };
-		// A companion with no parent would be spawned with no trusted-sender allowlist.
-		if (!context.self) return { error: NO_IDENTITY };
-		const args = ["spawn", params.name, "--parent", context.self, "--json"];
-		if (params.cwd) args.push("--cwd", params.cwd);
-		// The parent is the default trusted set; this widens it deliberately.
-		if (params.accept) args.push("--accept", params.accept);
-		// Which model the companion runs is the caller's call: a reviewer on a cheaper or a
-		// different model is the whole point of starting one.
-		if (params.provider && !params.model) {
-			return {
-				error:
-					"a provider only narrows which provider a model is looked up in: pass 'model' too",
-			};
-		}
-		if (params.model) args.push("--model", params.model);
-		if (params.provider) args.push("--provider", params.provider);
-		if (params.thinking) {
-			// pi refuses a level it does not know, and a refused companion is a tab that never
-			// becomes reachable, so the choices are named here instead.
-			if (!THINKING_LEVELS.includes(params.thinking)) {
-				return {
-					error: `'${params.thinking}' is not a thinking level: ${THINKING_LEVELS.join(", ")}`,
-				};
-			}
-			args.push("--thinking", params.thinking);
-		}
-		return { command: context.companionBin, args };
-	}
-
-	if (action === "close") {
-		if (!params.name) return { error: "which companion? pass 'name'" };
-		return { command: context.companionBin, args: ["close", params.name] };
 	}
 
 	return { error: "unknown action: " + action };

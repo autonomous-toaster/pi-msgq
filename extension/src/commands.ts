@@ -1,4 +1,4 @@
-// The human's command surface: /peers, /peer, /reply, /companions.
+// The human's command surface: /peers, /peer, /reply.
 //
 // Thin by design. Each command resolves what it was asked for, plans the same
 // command the model's tools plan, and runs it — so the extension still writes
@@ -7,11 +7,9 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import {
-	formatCompanions,
 	formatIdentity,
 	formatRoster,
 	type IdentityFacts,
-	parseCompanionList,
 	parseSessions,
 	type RosterEntry,
 	resolveCommandAddress,
@@ -26,9 +24,8 @@ import { isError, planPeerAction } from "./tools.ts";
 export interface CommandDeps {
 	/** What this session is, and what it listens to. */
 	identity(): IdentityFacts;
-	/** The msgq binary, and the companion command. */
+	/** The msgq binary. */
 	msgqBin(): string;
-	companionBin(): string;
 	/** The message this session received most recently, for replies. */
 	lastInbound(): { from: string; offset: number } | undefined;
 	/** A reply went out for the message at this offset, so nothing is owed for it. */
@@ -139,15 +136,13 @@ async function runSend(
 }
 
 /**
- * The planner context for a send. `reportTo` is deliberately absent: that fallback
- * is for a companion that must report without being told, not for a human, who
- * should be asked which peer they meant.
+ * The planner context for a send. A human always names the peer they mean, so
+ * there is no default recipient here.
  */
 function peerContext(deps: CommandDeps) {
 	return {
 		msgqBin: deps.msgqBin(),
 		self: deps.identity().self,
-		reportTo: undefined,
 		lastInbound: undefined,
 	};
 }
@@ -180,7 +175,7 @@ async function sendReply(
 	const self = deps.identity().self;
 	const plan = planPeerAction(
 		{ action: "reply", message },
-		{ msgqBin: deps.msgqBin(), self, reportTo: undefined, lastInbound: inbound },
+		{ msgqBin: deps.msgqBin(), self, lastInbound: inbound },
 	);
 	if (isError(plan)) {
 		say(ctx, plan.error, "warning");
@@ -193,7 +188,7 @@ async function sendReply(
 	}
 }
 
-/** Register the four commands. Called once, as the extension is loaded. */
+/** Register the three commands. Called once, as the extension is loaded. */
 export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
 	pi.registerCommand("peers", {
 		description:
@@ -269,21 +264,6 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
 				return;
 			}
 			await sendReply(pi, ctx, deps, message);
-		},
-	});
-
-	pi.registerCommand("companions", {
-		description:
-			"The companions running in terminal tabs: their status and working directory, " +
-			"which the bus roster does not carry.",
-		handler: async (_args, ctx) => {
-			const plan = { command: deps.companionBin(), args: ["list", "--json"] };
-			const result = await runPlanned(pi, plan, { binEnv: "MSGQ_COMPANION" });
-			if (!result.ok) {
-				say(ctx, `could not list companions: ${result.text}`, "warning");
-				return;
-			}
-			say(ctx, formatCompanions(parseCompanionList(result.text)));
 		},
 	});
 }

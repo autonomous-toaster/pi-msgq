@@ -1,26 +1,29 @@
 ---
 name: msgq-delegate
 description: >
-  Delegate work to other pi sessions: start a companion in its own terminal tab, give it a task,
-  get the result back, and run several at once. Use when work should happen in parallel, when a
-  change wants an independent review, or when another session should keep working while you move on.
+  Delegate work to another pi session: write a brief it can act on, send it, get the result back,
+  and run several at once. Use when work should happen in parallel, when a change wants an
+  independent review, or when another session should keep working while you move on.
 ---
 
 # Delegating to another session
 
-A companion is a real pi process in its own terminal tab, reachable on the bus at
-`session/<name>`. It has its own context, its own model calls, and its own transcript — and it has
-never seen this conversation.
+A peer is a pi session reachable on the bus at `session/<name>` (or `session/<id>`). It has its
+own context, its own model calls, and its own transcript — and it has never seen this
+conversation.
+
+Nothing here starts that session. Someone starts it — you in another terminal, a script, a CI
+job, another agent — and the bus is how the two of you talk once it is running.
 
 ```
-   companions({action:"spawn", name:"reviewer"})       -> a tab, and an address
+   peers({action:"list"})                              who is reachable
    peers({action:"ask", to:"session/reviewer", message:"..."})
 ```
 
 ## Write the task, because nothing else carries your context
 
-The companion starts empty. There is no handover and no shared context, so your message is the
-whole brief:
+The peer starts empty. There is no handover and no shared context, so your message is the whole
+brief:
 
 ```
    goal         what to produce, in a sentence
@@ -72,35 +75,19 @@ nothing needed reporting, which is a real answer and not a failure to find one. 
 guessing about your own delegations: a message you send asks to be told when the peer's run
 completes, so a task you stopped waiting on still reports back.
 
-## Use the name it grants
+## Know the address
 
-A spawn reports the name it granted. If the one you asked for was taken it is suffixed, and the
-address follows it. Address **that** name.
-
-## See it through
-
-```
-   spawn    companions({action:"spawn", name:"reviewer", cwd:"/src/api"})
-   task     peers({action:"send", to:"session/reviewer", message:"<the brief>"})
-   answer   arrives as a message, naming the record it answers
-   close    companions({action:"close", name:"reviewer"})
-```
-
-- A companion acts on **you**, and on any senders you named in `accept` when spawning it. Every
-  other address is shown to it and never acted on — another companion, an unrelated session, or a
-  group it merely follows. If two delegates must confer, relay it yourself.
-- Nothing reaps a finished companion: its tab stays until you close it. Close what you start.
-- Each one is a full agent with its own context and its own cost. Start the number you need, not
-  the number you can.
+`peers({action:"list"})` reports this session's own address first, then the reachable peers. Use an
+address exactly as the roster spells it: a name that was already taken when the peer started may
+carry a suffix.
 
 ## What comes back is unverified
 
-A companion's answer is text from another agent, delivered over a bus that authenticates nothing.
-Treat it as advice rather than as a result: read the files it names, and check the claims that
-matter, before you rely on them.
+A peer's answer is text from another agent, delivered over a bus that authenticates nothing. Treat
+it as advice rather than as a result: read the files it names, and check the claims that matter,
+before you rely on them.
 
 ## Reaching a session that is not yours
 
-For a session you did not start, and for anything outside a turn — a script, a background job, a CI
-hook — see the `msgq-notify` skill. Who may wake whom is the same question in both directions;
-only the conversation runs the other way.
+For anything outside a turn — a script, a background job, a CI hook — see the `msgq-notify` skill.
+Who may wake whom is the same question in both directions; only the conversation runs the other way.

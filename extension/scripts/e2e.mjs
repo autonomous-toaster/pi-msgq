@@ -5,14 +5,14 @@
 //
 //   node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-busy|bad-bus|skip-version|...>
 //
-// Scenarios whose name starts with `command-` drive the extension's slash commands,
-// `companion-list` drives the companion command with a fake herdr, and the rest cover
-// delivery, presence and acknowledgements. Run it with no argument for the full list.
+// Scenarios whose name starts with `command-` drive the extension's slash commands;
+// the rest cover delivery, presence and acknowledgements. Run it with no argument for
+// the full list.
 //
 // Environment overrides: MSGQ_BIN (path to the msgq binary), PI_BIN (pi command),
 // MSGQ_DB (bus location).
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -878,58 +878,6 @@ async function scenarioAckQuiet() {
 }
 
 
-async function scenarioDelegate() {
-	// An agent session, not a shell, drives the whole delegation.
-	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-delegate-")), "msgq.db");
-	const companion = resolve(REPO, "companion/companion");
-	const env = {
-		MSGQ_DB: own,
-		MSGQ_BIN: CLI,
-		MSGQ_COMPANION: companion,
-		MSGQ_SPAWN_EXTRA: `-e ${resolve(REPO, "extension")}`,
-	};
-	const { child, send, waitForEvent } = startPi(["--name", "planner", "--msgq-policy", "honor"], env, {
-		noTools: false,
-	});
-	await send({ id: "s", type: "get_state" });
-
-	child.stdin.write(
-		`${JSON.stringify({
-			id: "p",
-			type: "prompt",
-			message:
-				"Use the companions tool to spawn a companion named helper. Then use the peers tool with action 'ask' to ask it: What is 2+2? Reply with just the number. Finally, report what it answered.",
-		})}\n`,
-	);
-
-	await waitForEvent("agent_settled", 600_000);
-	await wait(1500);
-
-	const { data } = await send({ id: "e", type: "get_entries" });
-	const asked = data.entries.some(
-		(entry) =>
-			entry.type === "message" &&
-			entry.message?.role === "assistant" &&
-			JSON.stringify(entry.message.content).includes('"ask"'),
-	);
-	const answered = data.entries.some(
-		(entry) =>
-			entry.type === "message" &&
-			entry.message?.role === "toolResult" &&
-			entry.message?.toolName === "peers" &&
-			JSON.stringify(entry.message.content).includes("4"),
-	);
-	console.log("asked:", asked, "answered:", answered);
-
-	shutdown(child);
-	try {
-		execFileSync(companion, ["close", "helper"], { env: { ...process.env, ...env } });
-	} catch {
-		/* already gone */
-	}
-	report("delegate", asked && answered, `asked=${asked} answered=${answered}`);
-}
-
 async function scenarioCommandSurface() {
 	const { child, send } = startPi();
 	const { data } = await send({ id: "c", type: "get_commands" });
@@ -952,7 +900,7 @@ async function scenarioCommandSurface() {
 	shutdown(child);
 
 	const ok =
-		JSON.stringify(commands) === JSON.stringify(["companions", "peer", "peers", "reply"]) &&
+		JSON.stringify(commands) === JSON.stringify(["peer", "peers", "reply"]) &&
 		JSON.stringify(skills) === JSON.stringify(["skill:msgq-delegate", "skill:msgq-notify"]) &&
 		described;
 	report(
@@ -1267,215 +1215,6 @@ async function scenarioCommandNoDialog() {
 	);
 }
 
-/**
- * A fake herdr, so a test never depends on a live window manager. It answers
- * `agent list` with $FAKE_HERDR_AGENTS and nothing else.
- */
-function fakeHerdr() {
-	const dir = mkdtempSync(resolve(tmpdir(), "msgq-fakeherdr-"));
-	const bin = resolve(dir, "herdr");
-	writeFileSync(
-		bin,
-		'#!/usr/bin/env bash\n[ "$1 $2" = "agent list" ] && cat "$FAKE_HERDR_AGENTS" && exit 0\nexit 1\n',
-	);
-	chmodSync(bin, 0o755);
-	return { dir, bin };
-}
-
-/** Two named agents, one of them on the bus and one not, plus an unnamed one. */
-function fakeAgents() {
-	const file = resolve(mkdtempSync(resolve(tmpdir(), "msgq-agents-")), "agents.json");
-	writeFileSync(
-		file,
-		JSON.stringify({
-			result: {
-				agents: [
-					{ name: "reviewer", agent_status: "working", cwd: "/src/api", tab_id: "w1:t1", pane_id: "w1:p1" },
-					{ name: "lonely", agent_status: "idle", cwd: "/src/web", tab_id: "w1:t2", pane_id: "w1:p2" },
-					{ agent_status: "idle", cwd: "/src/noname", tab_id: "w1:t3", pane_id: "w1:p3" },
-				],
-			},
-		}),
-	);
-	return file;
-}
-
-async function scenarioCompanionList() {
-	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-complist-")), "msgq.db");
-	const herdr = fakeHerdr();
-	const agents = fakeAgents();
-	// Only `reviewer` is on the bus; `lonely` is a tab that is not listening, and the
-	// third has no name at all.
-	const leased = announcePeer(own, "reviewer", "peer-list", 120);
-
-	const env = {
-		...process.env,
-		MSGQ_DB: own,
-		MSGQ_BIN: CLI,
-		HERDR_ENV: "1",
-		FAKE_HERDR_AGENTS: agents,
-		PATH: `${herdr.dir}:${process.env.PATH}`,
-	};
-	const script = resolve(REPO, "companion/companion");
-	const asJson = spawnSync(script, ["list", "--json"], { env, encoding: "utf8" });
-	const asText = spawnSync(script, ["list"], { env, encoding: "utf8" });
-
-	// Outside herdr, and with no herdr on PATH, it says so instead of dying obscurely.
-	const outside = spawnSync(script, ["list"], { env: { ...env, HERDR_ENV: "" }, encoding: "utf8" });
-	const missing = spawnSync(script, ["list"], {
-		env: { ...env, PATH: "/usr/bin:/bin" },
-		encoding: "utf8",
-	});
-
-	let parsed = {};
-	try {
-		parsed = JSON.parse(asJson.stdout.trim());
-	} catch {}
-	const entries = parsed.companions ?? [];
-
-	const ok =
-		leased &&
-		asJson.status === 0 &&
-		entries.length === 1 &&
-		entries[0].name === "reviewer" &&
-		entries[0].address === "session/reviewer" &&
-		entries[0].status === "working" &&
-		entries[0].cwd === "/src/api" &&
-		asText.stdout.includes("reviewer") &&
-		!asText.stdout.includes("lonely") &&
-		outside.status !== 0 &&
-		outside.stderr.includes("herdr") &&
-		missing.status !== 0 &&
-		missing.stderr.includes("herdr") &&
-		missing.stderr.includes("PATH");
-	report(
-		"companion-list",
-		ok,
-		`entries=${JSON.stringify(entries)} outside=${JSON.stringify(outside.stderr.trim())} missing=${JSON.stringify(missing.stderr.trim())}`,
-	);
-}
-
-async function scenarioCompanionModel() {
-	// Nothing is spawned: `--dry-run` prints the command a companion would be started with, which is
-	// where a chosen model and provider have to appear. Credentials are not this command's business.
-	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-model-")), "msgq.db");
-	const script = resolve(REPO, "companion/companion");
-	const env = { ...process.env, MSGQ_BIN: CLI, MSGQ_DB: own, HERDR_ENV: "" };
-
-	const forwarded = spawnSync(
-		script,
-		[
-			"spawn",
-			"reviewer",
-			"--parent",
-			"session/planner",
-			"--model",
-			"lab/qwen3-30b",
-			"--provider",
-			"lab",
-			"--thinking",
-			"xhigh",
-			"--dry-run",
-		],
-		{ env, encoding: "utf8" },
-	);
-	const started = forwarded.stdout.split("\n").find((line) => line.includes("agent start")) ?? "";
-	const carriesModel = started.includes("--model lab/qwen3-30b");
-	const carriesProvider = started.includes("--provider lab");
-	const carriesThinking = started.includes("--thinking xhigh");
-
-	// A provider only narrows model lookup, so it cannot stand alone: pi says the same thing, and
-	// failing here names the fix instead of leaving a tab that never becomes reachable.
-	const refused = spawnSync(
-		script,
-		["spawn", "reviewer", "--parent", "session/planner", "--provider", "lab", "--dry-run"],
-		{ env, encoding: "utf8" },
-	);
-	// A level pi does not know is refused before a tab exists, naming the choices.
-	const badLevel = spawnSync(
-		script,
-		["spawn", "reviewer", "--parent", "session/planner", "--thinking", "turbo", "--dry-run"],
-		{ env, encoding: "utf8" },
-	);
-
-	report(
-		"companion-model",
-		forwarded.status === 0 &&
-			carriesModel &&
-			carriesProvider &&
-			carriesThinking &&
-			refused.status !== 0 &&
-			refused.stderr.includes("needs --model") &&
-			badLevel.status !== 0 &&
-			badLevel.stderr.includes("off, minimal, low, medium, high, xhigh, max"),
-		`model=${carriesModel} provider=${carriesProvider} thinking=${carriesThinking} refusedProvider=${refused.status !== 0} refusedLevel=${badLevel.status !== 0}`,
-	);
-}
-
-async function scenarioCommandCompanions() {
-	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-cmdcomp-")), "msgq.db");
-	const herdr = fakeHerdr();
-	const agents = fakeAgents();
-	announcePeer(own, "reviewer", "peer-comp", 120);
-
-	const session = startPi([], {
-		MSGQ_DB: own,
-		MSGQ_COMPANION: resolve(REPO, "companion/companion"),
-		HERDR_ENV: "1",
-		FAKE_HERDR_AGENTS: agents,
-		PATH: `${herdr.dir}:${process.env.PATH}`,
-	});
-	await session.send({ id: "s", type: "get_state" });
-
-	const before = session.ui.length;
-	const disposition = await runCommand(session, "/companions");
-	const said = notices(session, before).join("\n");
-	shutdown(session.child);
-
-	const ok =
-		disposition.disposition === "handled" &&
-		said.includes("reviewer") &&
-		said.includes("working") &&
-		said.includes("/src/api") &&
-		!said.includes("lonely");
-	report("command-companions", ok, `said=${JSON.stringify(said)}`);
-}
-
-async function scenarioCommandWithoutHerdr() {
-	// herdr missing: only /companions notices. The bus commands are unaffected.
-	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-noherdr-")), "msgq.db");
-	const session = startPi([], {
-		MSGQ_DB: own,
-		MSGQ_COMPANION: resolve(REPO, "companion/companion"),
-		HERDR_ENV: "",
-	});
-	await session.send({ id: "s", type: "get_state" });
-
-	const before = session.ui.length;
-	await runCommand(session, "/companions");
-	const complained = notices(session, before).join("\n");
-
-	const beforePeer = session.ui.length;
-	await runCommand(session, "/peer session/someone hello");
-	const saidPeer = notices(session, beforePeer).join("\n");
-	const records = readStream("session/someone", own);
-
-	const alive = await session.send({ id: "a", type: "get_state" });
-	shutdown(session.child);
-
-	const ok =
-		complained.includes("herdr") &&
-		saidPeer.includes("sent to session/someone") &&
-		records.length === 1 &&
-		records[0].message === "hello" &&
-		alive.success === true;
-	report(
-		"command-without-herdr",
-		ok,
-		`complained=${JSON.stringify(complained)} peer=${JSON.stringify(saidPeer)} records=${records.length}`,
-	);
-}
-
 async function scenarioReferenceQuoted() {
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-ref-")), "msgq.db");
 	const session = startPi([], { MSGQ_DB: own });
@@ -1613,153 +1352,6 @@ async function peersToolText(session) {
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
 		.join("\n");
-}
-
-async function scenarioDelegateIdentity() {
-	// The tool path needs a model: nothing in RPC calls a tool directly.
-	const asked =
-		'Call the peers tool with action "list". Then reply with the first line of what it returned, verbatim.';
-
-	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-ident-")), "msgq.db");
-	const named = startPi(["--name", "planner"], { MSGQ_DB: own }, { noTools: false });
-	named.child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: asked })}\n`);
-	await named.waitForEvent("agent_settled", 180_000);
-	await wait(1500);
-	const namedText = await peersToolText(named);
-	shutdown(named.child);
-
-	// The same tool where the bus cannot be read at all: the session still knows who it is.
-	const dir = mkdtempSync(resolve(tmpdir(), "msgq-identbad-"));
-	const blocker = resolve(dir, "not-a-dir");
-	writeFileSync(blocker, "x");
-	const lonely = startPi(["--name", "lonely"], { MSGQ_DB: resolve(blocker, "msgq.db") }, {
-		noTools: false,
-	});
-	lonely.child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: asked })}\n`);
-	await lonely.waitForEvent("agent_settled", 180_000);
-	await wait(1500);
-	const lonelyText = await peersToolText(lonely);
-	shutdown(lonely.child);
-
-	const ok =
-		namedText.includes("session/planner") &&
-		namedText.includes("  bus ") &&
-		namedText.includes("  depth ") &&
-		// The roster is the tab-separated `msgq sessions` output, and it comes after.
-		namedText.includes("\t") &&
-		namedText.indexOf("  bus ") < namedText.indexOf("\t") &&
-		lonelyText.includes("session/lonely") &&
-		lonelyText.includes("  depth ");
-	report(
-		"delegate-identity",
-		ok,
-		`named=${JSON.stringify(namedText.slice(0, 180))} lonely=${JSON.stringify(lonelyText.slice(0, 140))}`,
-	);
-}
-
-async function scenarioDelegateDepth() {
-	// A live spawn, and the delegate asked what it is allowed to do. It is the one thing
-	// the dry run cannot show: whether the cap actually reaches the child.
-	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-depth-")), "msgq.db");
-	const companion = resolve(REPO, "companion/companion");
-	const env = {
-		...process.env,
-		MSGQ_DB: own,
-		MSGQ_BIN: CLI,
-		MSGQ_COMPANION: companion,
-		MSGQ_SPAWN_EXTRA: `-e ${resolve(REPO, "extension")}`,
-	};
-	execFileSync(companion, ["spawn", "helper", "--parent", "session/probe", "--json"], {
-		env,
-		encoding: "utf8",
-	});
-
-	let answer = "";
-	try {
-		answer = execFileSync(
-			CLI,
-			[
-				"--db", own, "ask", "session/helper",
-				"Run the peers tool with action 'list', then answer with just the depth line from its output.",
-				"--from", "session/probe", "--timeout", "240",
-			],
-			{ encoding: "utf8" },
-		);
-	} catch (error) {
-		answer = String(error.stdout ?? "");
-	}
-	try {
-		execFileSync(companion, ["close", "helper"], { env, encoding: "utf8" });
-	} catch {
-		/* already gone */
-	}
-
-	// Depth 1, and the cap it was told about, rather than discovering it by being refused.
-	const ok = /1 of 1/.test(answer);
-	report("delegate-depth", ok, `answer=${JSON.stringify(answer.trim().slice(0, 200))}`);
-}
-
-async function scenarioDelegateTrust() {
-	// A spawned companion's trusted set, read from its own acknowledgements rather than by
-	// waiting on a model: `delivery=turn` means it acted, `delivery=display` means it did not.
-	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-dtrust-")), "msgq.db");
-	const companion = resolve(REPO, "companion/companion");
-	const env = {
-		...process.env,
-		MSGQ_DB: own,
-		MSGQ_BIN: CLI,
-		MSGQ_COMPANION: companion,
-		MSGQ_SPAWN_EXTRA: `-e ${resolve(REPO, "extension")}`,
-	};
-	// Trusting its parent and one other sender; following a topic it is not told to trust.
-	execFileSync(
-		companion,
-		[
-			"spawn", "helper", "--parent", "session/probe",
-			"--accept", "cli/second@test", "--topics", "group/watch", "--json",
-		],
-		{ env, encoding: "utf8" },
-	);
-
-	const delivery = (address, from, message) => {
-		// `received` is terminal for a display delivery and not for a turn, so `completed` is
-		// asked for too: the trusted case then waits for the turn instead of for a timeout.
-		const record = JSON.stringify({
-			v: 1, type: "prompt", from, to: address, message, meta: { ack: "received,completed" },
-		});
-		try {
-			return execFileSync(
-				CLI,
-				["--db", own, "publish", address, "--json", record, "--await", "--timeout", "120"],
-				{ encoding: "utf8" },
-			);
-		} catch (error) {
-			return String(error.stdout ?? "");
-		}
-	};
-
-	// A bounded instruction: the trusted case really does start a turn in the companion, and a
-	// vague body would leave a real agent free to improvise in this working tree.
-	const trusted = delivery("session/helper", "cli/second@test", "Reply with exactly: ok. Nothing else.");
-	const untrusted = delivery("session/helper", "cli/third@test", "from a sender it does not");
-	// The topic it follows but was never told to trust.
-	const watched = delivery("group/watch", "cli/third@test", "watched, not obeyed");
-
-	try {
-		execFileSync(companion, ["close", "helper"], { env, encoding: "utf8" });
-	} catch {
-		/* already gone */
-	}
-
-	const ok =
-		trusted.includes("delivery=turn") &&
-		untrusted.includes("delivery=display") &&
-		watched.includes("delivery=display");
-	report(
-		"delegate-trust",
-		ok,
-		`trusted=${JSON.stringify(trusted.trim())} untrusted=${JSON.stringify(untrusted.trim())} watched=${JSON.stringify(watched.trim())}`,
-	);
 }
 
 async function scenarioCompletionOwed() {
@@ -1922,7 +1514,6 @@ else if (scenario === "self-guard") await scenarioSelfGuard();
 else if (scenario === "steer-mid-run") await scenarioSteerMidRun();
 else if (scenario === "extra-topic") await scenarioExtraTopic();
 else if (scenario === "presence") await scenarioPresence();
-else if (scenario === "delegate") await scenarioDelegate();
 else if (scenario === "ack-display") await scenarioAckDisplay();
 else if (scenario === "ack-honor") await scenarioAckHonor();
 else if (scenario === "ack-batch") await scenarioAckBatch();
@@ -1946,23 +1537,16 @@ else if (scenario === "command-absent-recipient") await scenarioCommandAbsentRec
 else if (scenario === "command-me") await scenarioCommandMe();
 else if (scenario === "command-identity") await scenarioCommandIdentity();
 else if (scenario === "command-no-dialog") await scenarioCommandNoDialog();
-else if (scenario === "companion-list") await scenarioCompanionList();
-else if (scenario === "companion-model") await scenarioCompanionModel();
-else if (scenario === "command-companions") await scenarioCommandCompanions();
-else if (scenario === "command-without-herdr") await scenarioCommandWithoutHerdr();
 else if (scenario === "reference-quoted") await scenarioReferenceQuoted();
 else if (scenario === "reference-ack") await scenarioReferenceAck();
 else if (scenario === "reference-dangling") await scenarioReferenceDangling();
 else if (scenario === "notify-wakes") await scenarioNotifyWakes();
-else if (scenario === "delegate-identity") await scenarioDelegateIdentity();
-else if (scenario === "delegate-depth") await scenarioDelegateDepth();
-else if (scenario === "delegate-trust") await scenarioDelegateTrust();
 else if (scenario === "completion-owed") await scenarioCompletionOwed();
 else if (scenario === "completion-reported") await scenarioCompletionReported();
 else if (scenario === "dispatch-command") await scenarioDispatchCommand();
 else {
 	console.error(
-		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|delegate|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog|companion-list|companion-model|command-companions|command-without-herdr>",
+		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog>",
 	);
 	process.exit(2);
 }

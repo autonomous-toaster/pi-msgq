@@ -429,62 +429,13 @@ require the peer to have been started by this session.
 - **WHEN** the model replies without naming a recipient
 - **THEN** the reply is addressed to the sender of the message it most recently received
 
-#### Scenario: Any peer, not only companions
+#### Scenario: A peer this session did not start
 - **WHEN** the model sends to an address it did not start itself
 - **THEN** the message is sent like any other
 
-### Requirement: Companion tool
-The extension SHALL expose a tool that starts and closes companions by delegating to the companion
-command. Starting SHALL report the granted name and the address the companion can be reached at.
-Starting SHALL accept the model the companion runs, MAY accept a provider to narrow model lookup,
-and MAY accept a thinking level, and SHALL pass each one given to the companion command. A provider
-SHALL NOT be accepted without a model, because a provider chooses where a model is looked up rather
-than which model to run. A thinking level SHALL be accepted on its own, and one outside the levels
-pi defines SHALL be refused with the choices named.
-
-#### Scenario: Starting a companion
-- **WHEN** the model starts a companion
-- **THEN** the tool reports its granted name and its bus address
-
-#### Scenario: Closing a companion
-- **WHEN** the model closes a companion
-- **THEN** its tab is closed
-
-#### Scenario: Failure is reported
-- **WHEN** the companion command fails
-- **THEN** the tool reports the failure instead of returning a name
-
-#### Scenario: The model is the caller's choice
-- **WHEN** the model starts a companion naming a model, or a model and a provider
-- **THEN** both reach the companion command, and the companion runs on what was asked for
-
-#### Scenario: A provider alone is refused
-- **WHEN** the model names a provider and no model
-- **THEN** the tool refuses, saying a provider narrows model lookup and needs a model
-
-#### Scenario: A level, with or without a model
-- **WHEN** the model names a thinking level, with or without a model
-- **THEN** it reaches the companion command, because a level applies to whatever model runs
-
-#### Scenario: A level pi does not know
-- **WHEN** the model names a level outside the ones pi defines
-- **THEN** the tool refuses and names the levels it accepts
-
-### Requirement: Reporting address
-The extension SHALL accept a reporting address from configuration and from the environment, and
-SHALL use it as the default recipient when a tool call does not name one.
-
-#### Scenario: Default recipient
-- **WHEN** a reporting address is configured and the model sends without naming a recipient
-- **THEN** the message goes to the reporting address
-
-#### Scenario: Environment is honoured
-- **WHEN** the environment carries a parent address and no configuration overrides it
-- **THEN** it is used as the reporting address
-
 ### Requirement: Human command surface
 The extension SHALL register commands a human runs from the prompt without the model: `/peers`,
-`/peer`, `/reply`, and `/companions`. Each SHALL appear in the session's command list with a
+`/peer`, and `/reply`. Each SHALL appear in the session's command list with a
 description of what it does. A command SHALL act with the session's own identity on the same bus
 the model's tools use, and the records it publishes SHALL be ordinary records: the same address
 rules, the same types, and the same reply reference as any other publish. A command SHALL return
@@ -493,7 +444,7 @@ already delivers one.
 
 #### Scenario: Commands are discoverable
 - **WHEN** a human lists the session's commands
-- **THEN** `/peers`, `/peer`, `/reply`, and `/companions` are listed with a description
+- **THEN** `/peers`, `/peer`, and `/reply` are listed with a description
 
 #### Scenario: A command publishes an ordinary record
 - **WHEN** a human sends a message with a command
@@ -623,23 +574,6 @@ anything.
 #### Scenario: Nothing to answer
 - **WHEN** a human runs `/reply` and no message has been received
 - **THEN** the command says there is nothing to reply to and nothing is sent
-
-### Requirement: Companions command
-`/companions` SHALL report the companions this session can see, each with its name, bus address,
-herdr status, and working directory. Where herdr is unavailable the command SHALL report that
-rather than failing, and the other commands SHALL remain usable.
-
-#### Scenario: The companions
-- **WHEN** a human runs `/companions`
-- **THEN** each running companion is shown with its name, address, herdr status, and working directory
-
-#### Scenario: Richer than the roster
-- **WHEN** a companion is listed
-- **THEN** its herdr status and working directory are shown, which the bus roster does not carry
-
-#### Scenario: Outside herdr
-- **WHEN** herdr is unavailable
-- **THEN** the command reports that, and `/peers`, `/peer`, and `/reply` still work
 
 ### Requirement: Command resilience
 A failure in a command SHALL NOT crash the session and SHALL NOT leave the bus in a changed state.

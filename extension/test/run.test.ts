@@ -29,9 +29,9 @@ test("a failure with stderr prefers stderr over stdout", () => {
 });
 
 test("a silent failure names the variable to set", () => {
-	const text = summarizeRun({ command: "companion", code: 127, binEnv: "MSGQ_COMPANION" });
+	const text = summarizeRun({ command: "msgq", code: 127, binEnv: "MSGQ_BIN" });
 	assert.match(text, /was not found/);
-	assert.match(text, /MSGQ_COMPANION/);
+	assert.match(text, /MSGQ_BIN/);
 	assert.match(text, /exited with 127/);
 });
 

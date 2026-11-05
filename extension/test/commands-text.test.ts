@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-	formatCompanions,
 	formatIdentity,
 	formatRoster,
 	NO_IDENTITY,
-	parseCompanionList,
 	parseSessions,
 	resolveCommandAddress,
 	rosterLabel,
@@ -175,56 +173,13 @@ test("the identity report names every fact the session holds", () => {
 		text,
 		[
 			"session/planner",
-			"  bus         /home/me/.pi/agent/msgq/msgq.db",
-			"  follows     session/planner, group/ci",
-			"  policy      honor",
-			"  presence    registered",
-			"  trust       session/parent",
-			"  reports to  (none)",
-			"  depth       (none: nobody spawned this session)",
+			"  bus       /home/me/.pi/agent/msgq/msgq.db",
+			"  follows   session/planner, group/ci",
+			"  policy    honor",
+			"  presence  registered",
+			"  trust     session/parent",
 		].join("\n"),
 	);
-});
-
-test("a delegated session is told where it reports and how deep it is", () => {
-	const text = formatIdentity({
-		self: "session/reviewer-2",
-		bus: "db",
-		addresses: ["session/reviewer-2"],
-		policy: "honor",
-		presence: "registered",
-		trusted: ["session/planner"],
-		reportTo: "session/planner",
-		depth: { depth: 1, cap: 2 },
-	});
-	assert.match(text, /reports to  session\/planner/);
-	assert.match(text, /depth       1 of 2/);
-});
-
-test("a depth with no cap given is still stated", () => {
-	const text = formatIdentity({
-		self: "session/x",
-		bus: "db",
-		addresses: [],
-		policy: "display",
-		presence: "off",
-		trusted: [],
-		depth: { depth: 3 },
-	});
-	assert.match(text, /depth       3$/m);
-});
-
-test("an absent depth is stated as absent, not as zero", () => {
-	const text = formatIdentity({
-		self: "session/x",
-		bus: "db",
-		addresses: [],
-		policy: "display",
-		presence: "off",
-		trusted: [],
-	});
-	assert.match(text, /depth       \(none: nobody spawned this session\)/);
-	assert.doesNotMatch(text, /depth       0/);
 });
 
 test("the identity report distinguishes off from lost", () => {
@@ -251,35 +206,4 @@ test("the identity report admits a session with no bus address", () => {
 	assert.match(text, /\(none: the message bus did not start\)/);
 	assert.match(text, /follows\s+\(none\)/);
 	assert.match(text, /trust\s+\(none set: every sender\)/);
-});
-
-test("companion entries parse from one json object", () => {
-	const text = JSON.stringify({
-		companions: [
-			{ name: "reviewer", address: "session/reviewer", status: "working", cwd: "/src/api" },
-			{ name: "helper-2" },
-		],
-	});
-	assert.deepEqual(parseCompanionList(text), [
-		{ name: "reviewer", address: "session/reviewer", status: "working", cwd: "/src/api" },
-		{ name: "helper-2", address: "session/helper-2", status: undefined, cwd: undefined },
-	]);
-});
-
-test("an unparseable companion list is empty, not fatal", () => {
-	assert.deepEqual(parseCompanionList("nonsense"), []);
-	assert.deepEqual(parseCompanionList(""), []);
-	assert.deepEqual(parseCompanionList(JSON.stringify({ companions: "nope" })), []);
-	assert.deepEqual(parseCompanionList(JSON.stringify({ companions: [null, 3, {}] })), []);
-});
-
-test("companions are rendered with their status and directory", () => {
-	assert.equal(formatCompanions([]), "no companions are running");
-	assert.equal(
-		formatCompanions([
-			{ name: "reviewer", address: "session/reviewer", status: "working", cwd: "/src/api" },
-			{ name: "bot", address: "session/bot" },
-		]),
-		["  reviewer  working   /src/api", "  bot       -         -"].join("\n"),
-	);
 });

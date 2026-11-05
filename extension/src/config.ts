@@ -63,37 +63,6 @@ export function recordId(address: string, offset: number): string {
 	return `${address}${ID_SEPARATOR}${offset}`;
 }
 
-/** The delegation depth a session was started at, and the cap it was told about. */
-export interface DelegationDepth {
-	depth: number;
-	/** Absent when the cap was not passed along with the depth. */
-	cap?: number;
-}
-
-/** A non-negative whole number, or undefined. */
-function parseCount(raw: string | undefined): number | undefined {
-	const value = raw?.trim();
-	if (!value) return undefined;
-	const parsed = Number(value);
-	if (!Number.isInteger(parsed) || parsed < 0) return undefined;
-	return parsed;
-}
-
-/**
- * Read the delegation depth out of the environment.
- *
- * `companion spawn` sets `MSGQ_DEPTH` for the agent it starts and passes the cap alongside it,
- * so a delegate can tell whether it may delegate before it tries. A session nobody spawned has
- * neither, and its depth is absent rather than zero.
- */
-export function parseDepth(
-	env: Record<string, string | undefined>,
-): DelegationDepth | undefined {
-	const depth = parseCount(env.MSGQ_DEPTH);
-	if (depth === undefined) return undefined;
-	return { depth, cap: parseCount(env.COMPANION_MAX_DEPTH) };
-}
-
 /** Parse a comma-separated address list, canonicalizing and de-duplicating. */
 export function parseTopics(raw: string | undefined | null): string[] {
 	if (!raw) return [];
@@ -127,12 +96,6 @@ export function parseTrustList(raw: string | undefined | null): string[] {
 		if (trimmed && !out.includes(trimmed)) out.push(trimmed);
 	}
 	return out;
-}
-
-/** Parse an optional address, trimmed, or undefined when absent. */
-export function parseOptionalAddress(raw: string | undefined | null): string | undefined {
-	const trimmed = raw?.trim();
-	return trimmed ? trimmed : undefined;
 }
 
 /**

@@ -45,8 +45,8 @@ address never starts a turn — a deliberate guard, so that a session cannot wak
 publishes with `--from session/<that-session>` looks like it worked and is ignored.
 
 **Know what the session trusts.** Under `honor`, a session with a trust list acts only on senders in
-it. `--from` defaults to `cli/<user>@<host>`, which is fine for a session with no list; a companion
-started with `--msgq-trust` will show the message and never act on it. If a companion ignores you,
+it. `--from` defaults to `cli/<user>@<host>`, which is fine for a session with no list; a session
+started with `--msgq-trust` will show the message and never act on it. If a session ignores you,
 this is why.
 
 ## Work that outlives the turn

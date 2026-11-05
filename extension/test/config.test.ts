@@ -7,9 +7,7 @@ import {
 	consumerId,
 	parsePolicy,
 	parsePresence,
-	parseDepth,
 	parseTopics,
-	parseOptionalAddress,
 	parseTtlSeconds,
 	parseTrustList,
 	resolveDbPath,
@@ -60,12 +58,6 @@ test("a trust list is comma separated, trimmed, and de-duplicated", () => {
 	]);
 });
 
-test("an optional address is trimmed or undefined", () => {
-	assert.equal(parseOptionalAddress(undefined), undefined);
-	assert.equal(parseOptionalAddress("   "), undefined);
-	assert.equal(parseOptionalAddress("  session/planner "), "session/planner");
-});
-
 test("presence is on by default and accepts explicit values", () => {
 	assert.equal(parsePresence(undefined), true);
 	assert.equal(parsePresence("on"), true);
@@ -101,32 +93,4 @@ test("subscriptionAddresses always includes self and de-duplicates extras", () =
 		subscriptionAddresses({ alias: "w", sessionId: "abc" }, ["group/a", "session/w"]),
 		["session/w", "group/a"],
 	);
-});
-
-test("a delegation depth is read from the environment", () => {
-	assert.deepEqual(parseDepth({ MSGQ_DEPTH: "1", COMPANION_MAX_DEPTH: "2" }), {
-		depth: 1,
-		cap: 2,
-	});
-});
-
-test("a depth without a cap is still a depth", () => {
-	assert.deepEqual(parseDepth({ MSGQ_DEPTH: "1" }), { depth: 1, cap: undefined });
-});
-
-test("a session nobody spawned has no depth", () => {
-	assert.equal(parseDepth({}), undefined);
-	assert.equal(parseDepth({ COMPANION_MAX_DEPTH: "2" }), undefined);
-});
-
-test("an unreadable depth is absent rather than zero", () => {
-	assert.equal(parseDepth({ MSGQ_DEPTH: "" }), undefined);
-	assert.equal(parseDepth({ MSGQ_DEPTH: "not a number" }), undefined);
-	assert.equal(parseDepth({ MSGQ_DEPTH: "-1" }), undefined);
-	assert.equal(parseDepth({ MSGQ_DEPTH: "1.5" }), undefined);
-	// A cap that cannot be read does not make the depth unreadable.
-	assert.deepEqual(parseDepth({ MSGQ_DEPTH: "2", COMPANION_MAX_DEPTH: "nope" }), {
-		depth: 2,
-		cap: undefined,
-	});
 });

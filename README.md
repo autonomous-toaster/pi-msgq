@@ -1,13 +1,13 @@
 # pi-msgq
 
-A durable message bus for pi, and the **companion agents** you build on top of it.
+A durable message bus for pi and maki sessions, and the agents you build on top of it.
 
 Any process can publish a message to an address — a shell script, a cron job, your own fingers, or
 another pi. A session subscribes to its own address and receives it. One SQLite file, no daemon, no
 broker, no network.
 
-Two pi sessions can also *start* each other: a session spawns a companion in a terminal tab, hands it
-work as a message, and gets the answer back.
+Sessions find each other on the bus. Start them however you like — another terminal, a script, a
+launcher of your own — give each a name, and address it.
 
 ```
    you, a script, or another agent
@@ -18,21 +18,19 @@ work as a message, and gets the answer back.
         ^
         |  the extension subscribes and delivers into the session
         |
-   pi session  --(spawn)-->  a herdr tab running its own pi   (a "companion")
+   pi session          pi session          maki session
 ```
 
 | Folder | What it is |
 |---|---|
 | [`cli/`](cli/README.md) | `msgq`, the bus: publish, read, follow, await, ask, sessions, prune |
-| [`extension/`](extension/README.md) | the pi extension: consumes the bus, gives your agent two tools and you four commands |
-| [`companion/`](companion/README.md) | `companion`: the reference launcher — starts and stops companions in herdr tabs |
+| [`extension/`](extension/README.md) | the pi extension: consumes the bus, gives your agent one tool and you three commands |
 | [`maki/`](maki/README.md) | the maki plugin: steers a maki session from the shell, with `/peers`, `/peer`, `/reply` |
 | [`PROTOCOL.md`](PROTOCOL.md) | what the wire promises, and the fixtures that keep two implementations agreeing |
 
-Three roles, and it helps to keep them apart: the **wire** is what other clients may depend on
-(`PROTOCOL.md`), the **extension** is the reference client, and the **launcher** and the end-to-end
-suite are the showcase. Nothing on the wire depends on the showcase, and any launcher that follows
-[the contract](companion/README.md#the-launcher-contract) can replace it.
+Two roles, and it helps to keep them apart: the **wire** is what other clients may depend on
+(`PROTOCOL.md`), and the **extension** is the reference client. The end-to-end suite is the
+showcase: nothing on the wire depends on it.
 
 Building from a checkout, or running the tests? See [DEVELOPMENT.md](DEVELOPMENT.md).
 
@@ -40,7 +38,6 @@ Building from a checkout, or running the tests? See [DEVELOPMENT.md](DEVELOPMENT
 
 ```bash
 cargo install --path cli                              # the bus, as `msgq`
-ln -s "$PWD/companion/companion" ~/.local/bin/companion
 ```
 
 The extension is **loaded**, not installed:
@@ -55,23 +52,28 @@ Start a session worth talking to:
 pi -e ./extension --msgq-policy honor --name planner
 ```
 
-## A panel of reviewers, in one session
+## Several sessions, one question
 
-The shape this was built for: one session that hands the same question to several peers with
-different instructions, and compares what comes back.
+The shape this was built for: one session hands the same question to several peers with different
+instructions, and compares what comes back.
 
-```text
-start two companions called harsh and rust. ask harsh to /harsh-review the parser diff,
-ask rust to /rust-review it, and tell me which found more.
+Start each reviewer yourself, wherever you like, with its own name and its own model:
+
+```bash
+pi -e ./extension --msgq-policy honor --name harsh --model provider/cheap-model
+pi -e ./extension --msgq-policy honor --name rust  --model provider/strong-model
 ```
 
-That is two spawns and two asks, and the comparison is yours to read — the bus carries messages, not
-verdicts. Each reviewer is a real `pi` in its own tab, with its own context, its own model (spawn
-with `--model`) and its own transcript.
+Then ask from a third session, or from a shell:
 
-The launcher is what makes that one sentence. It is **optional**: `msgq` and both of the agent's
-tools work without it, and [the contract it satisfies](companion/README.md#the-launcher-contract) is
-written down so another launcher can take its place.
+```bash
+msgq ask session/harsh '/harsh-review the parser diff' --from session/me
+msgq ask session/rust  '/rust-review the parser diff'  --from session/me
+```
+
+Each reviewer is a real `pi` with its own context, its own cost and its own transcript. The
+comparison is yours to read — the bus carries messages, not verdicts. Starting the processes is the
+job of whatever runs your terminals; the bus only carries what they say to each other.
 
 `--msgq-policy honor` is the flag that matters. The default, `display`, shows incoming messages but
 never starts a turn: a session in that mode can be read, and cannot be asked to do anything.
@@ -131,7 +133,7 @@ The phases are `received` (responsibility taken, with the delivery mode), `start
 `completed` (with an outcome). A display-only delivery stops at `received`: the record was shown,
 not acted on.
 
-## Four commands for you
+## Three commands for you
 
 The extension is not only for the agent. From the prompt, no model turn is spent:
 
@@ -140,28 +142,28 @@ The extension is not only for the agent. From the prompt, no model turn is spent
 /peer reviewer "take a look"    send to session/reviewer
 /reply on it                    answer the message you last received
 /peers me                       who you are on the bus: your address, policy, trust
-/companions                     what is running in terminal tabs, and where
 ```
 
 A bare name is a session, `me` is this session, and nothing waits for a reply — an answer arrives as
 an ordinary message, and the transcript shows how to answer each one. See the
 [extension README](extension/README.md#commands-for-you) for the details.
 
-## Two tools for your agent
+## One tool for your agent
 
 | Tool | Actions |
 |---|---|
 | `peers` | `list` who is reachable · `send` a message · `ask` a question and wait · `reply` to the message you last received |
-| `companions` | `spawn` a companion (a real pi in its own tab, reachable at `session/<name>`) · `close` it |
 
-Spawning creates a process and nothing else — the task is simply the first message:
+A peer is any other participant: another pi session, a maki session, a script, a CI job. The tool
+does not start one — that is the job of whatever runs your sessions. It finds them, talks to them,
+and waits for the answer:
 
 ```text
-start a companion called reviewer, ask it to review the parser, and tell me what it said
+ask session/reviewer to review the parser, and tell me what it said
 ```
 
-Under the hood that is `companions({action:"spawn",name:"reviewer"})`, then
-`peers({action:"ask",to:"session/reviewer",...})`, then one sentence back to you.
+Under the hood that is `peers({action:"ask",to:"session/reviewer",...})`, then one sentence back to
+you.
 
 ## The same bus, from maki
 
@@ -191,13 +193,11 @@ group; answers always come back from the id.
 
 - **No daemon, no broker, no network.** The bus is one SQLite file, so the reach of the system is the
   reach of the file. Nothing crosses machines.
-- **No in-process subagents.** A companion is a real `pi` process in its own tab: it has its own
-  context, its own cost, and its own transcript you can go and read.
+- **No process management.** The bus carries messages; it does not start, stop or supervise the
+  sessions at either end. A peer is a process somebody else started.
 - **No handover or context transfer.** You say what you want; you do not send your conversation.
 - **No attachments, and no result payloads.** An acknowledgement says what happened, not what was
   produced. The answer is an ordinary message.
-- **No orphan reaping.** A companion that never finishes keeps its tab, on purpose, so you can look
-  at what went wrong.
 
 ## Requirements
 
@@ -205,12 +205,8 @@ group; answers always come back from the id.
 |---|---|
 | `pi` (Node 22.19+) | everything |
 | a Rust toolchain with edition 2024 (1.85+) | building the CLI |
-| `jq` | the launcher, which reads the roster |
-| `herdr` 0.8+, inside herdr | the reference launcher only |
+| `jq`, `glab` | [`scripts/gitlab-watch.sh`](scripts/gitlab-watch.sh) only |
 | maki 0.7+ | the [`maki/`](maki/README.md) plugin only |
-
-herdr is the showcase's prerequisite, not the bus's. Publishing, reading, following, the roster, and
-both of the agent's tools — `peers`, and every command but `/companions` — work without it.
 
 ## Troubleshooting
 
@@ -218,7 +214,6 @@ both of the agent's tools — `peers`, and every command but `/companions` — w
 |---|---|
 | Nothing arrives in a session | the wrong address. `msgq consumers` shows what it follows |
 | A message appears but the agent ignores it | the default `display` policy. Start with `--msgq-policy honor` |
-| A companion does nothing when messaged | it was spawned without `--parent`, so it trusts nobody |
-| A companion never becomes reachable | the session has presence off; `spawn` gates on presence |
+| A peer does nothing when messaged | its trust list excludes you, or its policy is `display` |
 | `msgq disabled` in the session | the bus could not be opened — check `MSGQ_DB` |
-| `companion exited with 1 and said nothing` | it is not on `PATH`. See [DEVELOPMENT.md](DEVELOPMENT.md) |
+| `msgq exited with 1 and said nothing` | it is not on `PATH`. See [DEVELOPMENT.md](DEVELOPMENT.md) |
