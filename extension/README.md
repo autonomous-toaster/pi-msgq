@@ -122,17 +122,20 @@ While a session runs it advertises itself with a short **record** on the presenc
 online:
 
 ```bash
-msgq sessions
+msgq sessions --wide
 ```
 
 ```text
-session/api-worker  session  busy  api-worker  27
-session/01a12cc5    session  idle             30
+session/api-worker  session  busy  api-worker  27  github.com/org/repo  main  repo  src
+session/01a12cc5    session  idle             30  -  -  -  -
 ```
 
 The state follows the session: `idle` at rest, `busy` while a run is in progress, and
 `blocked` while it waits on a prompt. A mid-session `/name` change is reflected without a
-restart.
+restart. The extension also publishes a small **locator card** — `project`, `branch`, `worktree`,
+`path` — so a peer can be found by where it is working rather than by session id. It is derived
+from the current directory and git by `msgq card`; it is not a profile and carries no current task
+or work summary. The default `msgq sessions` output is unchanged; `--wide` shows the locator.
 
 Presence is a record, not an engine primitive, and that is deliberate: any process that can publish
 can appear on the roster with nothing but the CLI, which is why the listing is not a pi feature. It
@@ -201,7 +204,7 @@ One tool puts the bus in the agent's hands.
 
 | Tool | Actions | Needs |
 |---|---|---|
-| `peers` | `list` who is reachable · `send` a message · `ask` a question and wait for the answer · `reply` to the message you last received | the bus only |
+| `peers` | `list` who is reachable · `send` a message · `ask` a question and wait for the answer · `reply` to the message you last received · `card` read or change this session's locator | the bus only |
 
 A peer is any other participant on the bus: another pi session, a maki session, a script, a CI job.
 Nothing here starts one. Starting a process is the job of whatever you use to run sessions — a
@@ -212,7 +215,12 @@ running.
 peers({action:"list"})                               ->  who is reachable, and who you are
 peers({action:"ask", to:"session/reviewer", message:"Review this diff"})
 peers({action:"reply", message:"done"})              ->  answers whoever last asked
+peers({action:"card"})                               ->  this session's locator
+peers({action:"card", card:{branch:"review"}})       ->  override one locator field
 ```
+
+Only `project`, `branch`, `worktree`, and `path` are accepted. A `null` value clears an override and
+returns that field to the derived value.
 
 Two things make that safe to use:
 
@@ -259,6 +267,10 @@ session/planner
   policy      honor
   presence    registered
   trust       session/parent
+  project     github.com/org/repo
+  branch      main
+  worktree    repo
+  path        src
 ```
 
 That answers the questions an agent otherwise guesses at: which address on the roster is its own,
@@ -353,6 +365,8 @@ this session answers you both.
 | Delivery policy | `--msgq-policy` | `MSGQ_POLICY` | `display` |
 | Extra addresses | `--msgq-topics` | `MSGQ_TOPICS` | none (only `session/<self>`) |
 | Presence | `--msgq-presence` | `MSGQ_PRESENCE` | `on` |
+| Locator context | `--msgq-context` | `MSGQ_CONTEXT` | `auto` |
+| Locator path | `--msgq-card-paths` | `MSGQ_CARD_PATHS` | `relative` |
 | Lease lifetime | — | `MSGQ_PRESENCE_TTL` | `30` seconds |
 | Bus location | — | `MSGQ_DB` | `~/.pi/agent/msgq/msgq.db` |
 

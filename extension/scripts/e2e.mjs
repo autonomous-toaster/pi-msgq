@@ -12,7 +12,7 @@
 // Environment overrides: MSGQ_BIN (path to the msgq binary), PI_BIN (pi command),
 // MSGQ_DB (bus location).
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -48,10 +48,10 @@ function publishRaw(dbPath, address, payload) {
 	return offset;
 }
 
-function startPi(extraArgs = [], envOverrides = {}, { noTools = true } = {}) {
+function startPi(extraArgs = [], envOverrides = {}, { noTools = true, cwd = REPO } = {}) {
 	const toolArgs = noTools ? ["-nt"] : [];
 	const child = spawn(PI, ["--mode", "rpc", "-e", EXTENSION, ...toolArgs, ...extraArgs], {
-		cwd: REPO,
+		cwd,
 		env: { ...process.env, MSGQ_DB: DB, ...envOverrides },
 		stdio: ["pipe", "pipe", "ignore"],
 	});
@@ -656,6 +656,57 @@ async function scenarioSquat() {
 		"squat",
 		ok,
 		`delivered=${delivered} entriesAtAddress=${atAddress.length} warned=${warned}`,
+	);
+}
+
+async function scenarioPeerLocator() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-locator-")), "msgq.db");
+	const root = resolve(mkdtempSync(resolve(tmpdir(), "msgq-locator-repo-")), "repo");
+	const sub = resolve(root, "src");
+	mkdirSync(sub, { recursive: true });
+	writeFileSync(resolve(sub, "file.txt"), "one\n");
+
+	execFileSync("git", ["init", "-b", "main", root]);
+	execFileSync("git", ["-C", root, "config", "user.email", "test@example.invalid"]);
+	execFileSync("git", ["-C", root, "config", "user.name", "Test"]);
+	execFileSync("git", ["-C", root, "remote", "add", "origin", "https://github.com/org/repo.git"]);
+
+	const session = startPi([], { MSGQ_DB: own, MSGQ_BIN: CLI }, { cwd: sub });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+
+	const listed = () =>
+		execFileSync(CLI, ["--db", own, "sessions", "--json"], { encoding: "utf8" })
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line));
+
+	let entry;
+	for (let i = 0; i < 50; i++) {
+		entry = listed().find((item) => item.address === address);
+		if (entry?.card) break;
+		await wait(100);
+	}
+
+	const plain = execFileSync(CLI, ["--db", own, "sessions"], { encoding: "utf8" });
+	const wide = execFileSync(CLI, ["--db", own, "sessions", "--wide"], { encoding: "utf8" });
+	shutdown(session.child);
+
+	const card = entry?.card;
+	const ok =
+		card?.project === "github.com/org/repo" &&
+		card?.branch === "main" &&
+		card?.worktree === "repo" &&
+		card?.path === "src" &&
+		!plain.includes("github.com/org/repo") &&
+		wide.includes("github.com/org/repo") &&
+		wide.includes("main") &&
+		wide.includes("src");
+	report(
+		"peer-locator",
+		ok,
+		`card=${JSON.stringify(card)} defaultHasCard=${plain.includes("github.com/org/repo")} wideHasCard=${wide.includes("github.com/org/repo")}`,
 	);
 }
 
@@ -1514,6 +1565,7 @@ else if (scenario === "self-guard") await scenarioSelfGuard();
 else if (scenario === "steer-mid-run") await scenarioSteerMidRun();
 else if (scenario === "extra-topic") await scenarioExtraTopic();
 else if (scenario === "presence") await scenarioPresence();
+else if (scenario === "peer-locator") await scenarioPeerLocator();
 else if (scenario === "ack-display") await scenarioAckDisplay();
 else if (scenario === "ack-honor") await scenarioAckHonor();
 else if (scenario === "ack-batch") await scenarioAckBatch();
@@ -1546,7 +1598,7 @@ else if (scenario === "completion-reported") await scenarioCompletionReported();
 else if (scenario === "dispatch-command") await scenarioDispatchCommand();
 else {
 	console.error(
-		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog>",
+		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|peer-locator|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog>",
 	);
 	process.exit(2);
 }

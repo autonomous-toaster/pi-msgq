@@ -26,6 +26,7 @@ pub struct Roster {
     pub state: String,
     pub alias: Option<String>,
     pub expires_at: i64,
+    pub card: Option<Value>,
 }
 
 /// One parsed presence record.
@@ -39,6 +40,8 @@ pub struct PresenceRecord {
     pub state: String,
     /// Declared lifetime of this record, in seconds.
     pub ttl: i64,
+    /// Optional locator card. Only an object is accepted; anything else is absent.
+    pub card: Option<Value>,
 }
 
 /// Parse a stored payload as a presence record. Anything unrecognized is not presence.
@@ -81,6 +84,7 @@ pub fn parse_presence(record: &Value) -> Option<PresenceRecord> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let card = event.get("card").filter(|value| value.is_object()).cloned();
 
     Some(PresenceRecord {
         address: address.to_string(),
@@ -88,6 +92,7 @@ pub fn parse_presence(record: &Value) -> Option<PresenceRecord> {
         alias,
         state: state.to_string(),
         ttl,
+        card,
     })
 }
 
@@ -123,6 +128,28 @@ mod tests {
         assert_eq!(record.alias.as_deref(), Some("api-worker"));
         assert_eq!(record.state, "busy");
         assert_eq!(record.ttl, 30);
+        assert_eq!(record.card, None);
+    }
+
+    #[test]
+    fn parses_an_optional_card_and_ignores_a_non_object() {
+        let mut payload = json!({
+            "v": 1, "type": "event", "from": "session/api-worker", "to": PRESENCE_ADDRESS,
+            "event": {"kind": "presence", "state": "idle",
+                      "card": {"project": "org/repo", "branch": "main"}}
+        });
+        let record = parse_presence(&payload).unwrap();
+        assert_eq!(
+            record
+                .card
+                .as_ref()
+                .and_then(|card| card.get("project"))
+                .and_then(Value::as_str),
+            Some("org/repo")
+        );
+
+        payload["event"]["card"] = json!("not an object");
+        assert_eq!(parse_presence(&payload).unwrap().card, None);
     }
 
     #[test]

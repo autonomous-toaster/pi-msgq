@@ -32,6 +32,8 @@ local CONFIG = {
 	topics = nil, -- extra addresses to follow
 	ttl = DEFAULT_TTL,
 	presence_every_ms = DEFAULT_EVERY_MS,
+	context = "auto", -- "auto" | "off"
+	card_paths = "relative", -- "relative" | "full" | "none"
 }
 
 local S = {
@@ -46,6 +48,9 @@ local S = {
 	follow_job = nil,
 	presence_task = nil,
 	presence_state = "idle",
+	derived_card = nil,
+	card = nil,
+	card_overrides = {},
 	restart_ms = RESTART_MS,
 	last_error = nil,
 	last_inbound = nil, -- { from, offset, id, message }
@@ -202,12 +207,32 @@ local function others(entries)
 	return out
 end
 
+local function card_summary(entry)
+	local card = entry.card
+	if type(card) ~= "table" then
+		return ""
+	end
+	local parts = {}
+	for _, key in ipairs({ "project", "branch", "path" }) do
+		local value = card[key]
+		if type(value) == "string" and value ~= "" and not (key == "path" and value == ".") then
+			parts[#parts + 1] = value
+		end
+	end
+	return table.concat(parts, "  ")
+end
+
 local function roster_tail(entry)
 	local state = entry.state or "-"
+	local tail = state
 	if entry.expires_in ~= nil then
-		return state .. "  " .. tostring(entry.expires_in) .. "s"
+		tail = tail .. "  " .. tostring(entry.expires_in) .. "s"
 	end
-	return state
+	local summary = card_summary(entry)
+	if summary ~= "" then
+		tail = tail .. "  " .. summary
+	end
+	return tail
 end
 
 local function format_roster(entries)
@@ -741,6 +766,65 @@ local function presence_address()
 	return S.address
 end
 
+local function same_card(a, b)
+	local function encoded(value)
+		if not value then
+			return nil
+		end
+		local ok, text = pcall(maki.json.encode, value)
+		return ok and text or nil
+	end
+	return encoded(a) == encoded(b)
+end
+
+-- Merge the derived locator with explicit, per-field overrides. An empty
+-- override is ignored, leaving the derived value in place.
+local function merge_card(derived, overrides)
+	local card = {}
+	for key, value in pairs(derived or {}) do
+		card[key] = value
+	end
+	for key, value in pairs(overrides or {}) do
+		if value ~= "" then
+			card[key] = value
+		end
+	end
+	if next(card) == nil then
+		return nil
+	end
+	return card
+end
+
+-- Refresh the locator from a directory. Returns whether the card changed; a
+-- failure leaves the session publishing presence without one.
+local function refresh_card(cwd)
+	if CONFIG.context == "off" then
+		local changed = S.card ~= nil
+		S.derived_card = nil
+		S.card = nil
+		return changed
+	end
+	if type(cwd) ~= "string" or cwd == "" then
+		local ok, resolved = pcall(maki.uv.cwd)
+		if not ok or type(resolved) ~= "string" or resolved == "" then
+			return false
+		end
+		cwd = resolved
+	end
+	local out = run({ "card", "--cwd", cwd, "--paths", CONFIG.card_paths }, 5000)
+	local decoded
+	if out then
+		local decoded_ok, value = pcall(maki.json.decode, out)
+		if decoded_ok and type(value) == "table" then
+			decoded = value
+		end
+	end
+	local previous = S.card
+	S.derived_card = decoded
+	S.card = merge_card(decoded, S.card_overrides)
+	return not same_card(previous, S.card)
+end
+
 local function publish_presence(state)
 	if not CONFIG.presence or not S.address then
 		return
@@ -756,6 +840,7 @@ local function publish_presence(state)
 			ttl = CONFIG.ttl,
 			participant = S.session_id,
 			alias = alias_text(),
+			card = S.card,
 		},
 	}
 	local ok, encoded = pcall(maki.json.encode, record)
@@ -777,11 +862,17 @@ local function start_presence()
 	if not CONFIG.presence then
 		return
 	end
+	refresh_card()
 	publish_presence(S.presence_state)
 	S.presence_task = maki.async.spawn(function()
+		local renewals = 0
 		while S.started and not S.stopping do
 			maki.async.sleep(CONFIG.presence_every_ms)
 			if S.started and not S.stopping then
+				renewals = renewals + 1
+				if renewals % 6 == 0 then
+					refresh_card()
+				end
 				publish_presence(S.presence_state)
 			end
 		end
@@ -843,6 +934,15 @@ local function on_status(ev)
 	end
 end
 
+local function on_cwd_changed(ev)
+	if not S.started or ev.data.session_id ~= S.session_id then
+		return
+	end
+	if refresh_card(ev.data.cwd) then
+		publish_presence(S.presence_state)
+	end
+end
+
 local function on_session_end(ev)
 	if ev.data.session_id ~= S.session_id then
 		return
@@ -877,6 +977,9 @@ local function register_autocmds()
 	})
 	S.autocmds[#S.autocmds + 1] = maki.api.create_autocmd("SessionStatusChanged", {
 		callback = on_status,
+	})
+	S.autocmds[#S.autocmds + 1] = maki.api.create_autocmd("SessionCwdChanged", {
+		callback = on_cwd_changed,
 	})
 	S.autocmds[#S.autocmds + 1] = maki.api.create_autocmd("SessionEnd", {
 		callback = on_session_end,
@@ -925,6 +1028,14 @@ local function identity_lines()
 		{ "follow job", job_text() },
 		{ "last error", S.last_error or "(none)" },
 	}
+	if S.card then
+		for _, key in ipairs({ "project", "branch", "worktree", "path" }) do
+			local value = S.card[key]
+			if type(value) == "string" and value ~= "" then
+				rows[#rows + 1] = { key, value }
+			end
+		end
+	end
 	local lines = { S.address or "(none: the bus did not start)" }
 	for _, row in ipairs(rows) do
 		lines[#lines + 1] = string.format("  %-11s %s", row[1], row[2])
@@ -1120,15 +1231,16 @@ maki.api.register_tool({
 
 Messages starting with `[msgq]` in this session arrived through the bus. Use this tool to answer
 one (`reply`) or to message another process or session (`send`). `list` shows who is live on the
-bus right now. Addresses look like `session/<name>`, `cli/<who>@<host>`, or `group/<name>`; a bare
-name is a group.]],
+bus right now. `card` reports or changes this session's locator (project, branch, worktree, path);
+omit `card` to read it. Addresses look like `session/<name>`, `cli/<who>@<host>`, or `group/<name>`;
+a bare name is a group.]],
 	schema = {
 		type = "object",
 		properties = {
 			action = {
 				type = "string",
-				enum = { "send", "reply", "list" },
-				description = "send: publish to a peer. reply: answer the message received most recently. list: who is live.",
+				enum = { "send", "reply", "list", "card" },
+				description = "send: publish to a peer. reply: answer the message received most recently. list: who is live. card: read or change this session's locator.",
 				required = true,
 			},
 			to = {
@@ -1141,6 +1253,16 @@ name is a group.]],
 				enum = { "prompt", "steer", "follow_up", "note" },
 				description = "What the recipient should do with it. Default: prompt.",
 			},
+			card = {
+				type = "object",
+				description = "Locator overrides for the card action. An empty string clears an override.",
+				properties = {
+					project = { type = "string" },
+					branch = { type = "string" },
+					worktree = { type = "string" },
+					path = { type = "string" },
+				},
+			},
 		},
 		required = { "action" },
 	},
@@ -1152,6 +1274,45 @@ name is a group.]],
 			}
 		end
 		local action = input.action
+
+		if action == "card" then
+			if type(input.card) ~= "table" then
+				if S.card then
+					return { llm_output = maki.json.encode(S.card) }
+				end
+				return { llm_output = "no locator card is set" }
+			end
+			local allowed = { project = true, branch = true, worktree = true, path = true }
+			for key, value in pairs(input.card) do
+				if not allowed[key] then
+					return {
+						llm_output = "error: unknown card field '" .. tostring(key)
+							.. "'; expected project, branch, worktree, path",
+						is_error = true,
+					}
+				end
+				if type(value) ~= "string" then
+					return {
+						llm_output = "error: card field '" .. tostring(key) .. "' must be a string",
+						is_error = true,
+					}
+				end
+				local trimmed = trim(value)
+				if trimmed == "" then
+					S.card_overrides[key] = nil
+				else
+					S.card_overrides[key] = trimmed
+				end
+			end
+			local changed = refresh_card()
+			if changed then
+				publish_presence(S.presence_state)
+			end
+			if S.card then
+				return { llm_output = "card updated\n" .. maki.json.encode(S.card) }
+			end
+			return { llm_output = "card cleared" }
+		end
 
 		if action == "list" then
 			local entries, err = list_peers()
@@ -1230,6 +1391,8 @@ function M.setup(opts)
 		topics = true,
 		ttl = true,
 		presence_every_ms = true,
+		context = true,
+		card_paths = true,
 	}
 	for key, value in pairs(opts) do
 		if allowed[key] then
@@ -1237,6 +1400,14 @@ function M.setup(opts)
 		end
 	end
 	CONFIG.policy = CONFIG.policy == "display" and "display" or "honor"
+	CONFIG.context = CONFIG.context == "off" and "off" or "auto"
+	if
+		CONFIG.card_paths ~= "relative"
+		and CONFIG.card_paths ~= "full"
+		and CONFIG.card_paths ~= "none"
+	then
+		CONFIG.card_paths = "relative"
+	end
 
 	if type(CONFIG.trust) == "string" then
 		local list = {}
@@ -1317,6 +1488,9 @@ function M.start()
 	S.restart_ms = RESTART_MS
 	S.last_error = nil
 	S.pending = {}
+	S.derived_card = nil
+	S.card = nil
+	S.card_overrides = {}
 
 	register_autocmds()
 	start_follow()

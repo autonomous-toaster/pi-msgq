@@ -689,6 +689,84 @@ fn sessions_lists_a_live_presence_record() {
 }
 
 #[test]
+fn card_derives_a_locator_from_a_git_worktree() {
+    let db = temp_db();
+    let repo = db.parent().unwrap().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["config", "user.name", "Test"],
+        vec!["remote", "add", "origin", "https://github.com/org/repo.git"],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    std::fs::write(repo.join("src").join("file.txt"), "one\n").unwrap();
+    let cwd = repo.join("src");
+    let cwd = cwd.to_string_lossy();
+    let out = run(&db, &["card", "--cwd", &cwd, "--paths", "relative"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let card: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(card["project"], "github.com/org/repo");
+    assert_eq!(card["branch"], "main");
+    assert_eq!(card["worktree"], "repo");
+    assert_eq!(card["path"], "src");
+
+    let plain = run(&db, &["card", "--cwd", &cwd, "--paths", "none"]);
+    let plain: serde_json::Value = serde_json::from_str(plain.stdout.trim()).unwrap();
+    assert!(plain.get("path").is_none());
+}
+
+#[test]
+fn sessions_reports_cards_in_json_and_wide_text() {
+    let db = temp_db();
+    let card = serde_json::json!({
+        "project": "github.com/org/repo",
+        "branch": "main",
+        "worktree": "repo",
+        "path": "src",
+    });
+    publish_presence(
+        &db,
+        "session/planner",
+        serde_json::json!({"kind": "presence", "state": "idle", "ttl": 30,
+                           "participant": "01a1", "alias": "planner", "card": card}),
+    );
+
+    let json = run(&db, &["sessions", "--json"]);
+    let entry: serde_json::Value =
+        serde_json::from_str(json.stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["card"]["project"], "github.com/org/repo");
+    assert_eq!(entry["card"]["branch"], "main");
+    assert_eq!(entry["card"]["path"], "src");
+
+    let plain = run(&db, &["sessions"]);
+    assert!(
+        !plain.stdout.contains("github.com/org/repo"),
+        "{}",
+        plain.stdout
+    );
+    let wide = run(&db, &["sessions", "--wide"]);
+    assert!(
+        wide.stdout.contains("github.com/org/repo"),
+        "{}",
+        wide.stdout
+    );
+    assert!(wide.stdout.contains("main"), "{}", wide.stdout);
+    assert!(wide.stdout.contains("src"), "{}", wide.stdout);
+}
+
+#[test]
 fn sessions_lists_a_client_that_is_not_a_session() {
     let db = temp_db();
     // No `participant`, no `alias`: the minimum a client has to publish to appear.

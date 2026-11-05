@@ -652,7 +652,7 @@ fn live_participants(store: &Store) -> Result<BTreeSet<String>, Error> {
 }
 
 /// List live participants from the presence address.
-pub fn sessions(db_path: &Path, json_out: bool) -> Result<(), Error> {
+pub fn sessions(db_path: &Path, json_out: bool, wide: bool) -> Result<(), Error> {
     let (store, _) = Store::open(db_path)?;
     let now = unix_now();
 
@@ -676,6 +676,7 @@ pub fn sessions(db_path: &Path, json_out: bool) -> Result<(), Error> {
                 state: record.state.clone(),
                 alias: record.alias.clone(),
                 expires_at,
+                card: record.card.clone(),
             },
         );
     }
@@ -690,21 +691,22 @@ pub fn sessions(db_path: &Path, json_out: bool) -> Result<(), Error> {
 
     if json_out {
         for entry in &entries {
-            println!(
-                "{}",
-                serde_json::to_string(&json!({
-                    "address": entry.address,
-                    "kind": entry.kind,
-                    "state": entry.state,
-                    "alias": entry.alias,
-                    "expires_at": entry.expires_at,
-                    "expires_in": (entry.expires_at - now).max(0),
-                }))?
-            );
+            let mut value = json!({
+                "address": entry.address,
+                "kind": entry.kind,
+                "state": entry.state,
+                "alias": entry.alias,
+                "expires_at": entry.expires_at,
+                "expires_in": (entry.expires_at - now).max(0),
+            });
+            if let Some(card) = &entry.card {
+                value["card"] = card.clone();
+            }
+            println!("{}", serde_json::to_string(&value)?);
         }
     } else {
         for entry in &entries {
-            println!(
+            let mut line = format!(
                 "{}\t{}\t{}\t{}\t{}",
                 entry.address,
                 entry.kind,
@@ -712,6 +714,19 @@ pub fn sessions(db_path: &Path, json_out: bool) -> Result<(), Error> {
                 entry.alias.clone().unwrap_or_default(),
                 (entry.expires_at - now).max(0)
             );
+            if wide {
+                for key in ["project", "branch", "worktree", "path"] {
+                    let field = entry
+                        .card
+                        .as_ref()
+                        .and_then(|card| card.get(key))
+                        .and_then(Value::as_str)
+                        .unwrap_or("-");
+                    line.push('\t');
+                    line.push_str(field);
+                }
+            }
+            println!("{line}");
         }
     }
     Ok(())

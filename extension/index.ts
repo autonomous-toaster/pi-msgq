@@ -25,11 +25,15 @@ import {
 import {
 	ConfigError,
 	consumerId,
+	parseCardPaths,
+	parseContext,
 	parsePolicy,
 	parsePresence,
 	parseTopics,
 	parseTrustList,
 	parseTtlSeconds,
+	type CardPathMode,
+	type ContextMode,
 	type Policy,
 	recordId,
 	resolveDbPath,
@@ -57,6 +61,18 @@ import {
 	wantsReply,
 } from "./src/delivery.ts";
 import { type CommandDeps, registerCommands } from "./src/commands.ts";
+import {
+	type Card,
+	type CardOverrides,
+	CARD_MAX_BYTES,
+	cardBytes,
+	cardSummary,
+	cardWithinLimit,
+	mergeCard,
+	parseCardOverrides,
+	parseDerivedCard,
+	sameCard,
+} from "./src/card.ts";
 import { formatIdentity, type IdentityFacts } from "./src/commands-text.ts";
 import { runPlanned } from "./src/run.ts";
 import { Presence, PRESENCE_TTL_S } from "./src/presence.ts";
@@ -93,6 +109,14 @@ export default function (pi: ExtensionAPI) {
 		description: "Comma-separated senders allowed to start a turn under 'honor'",
 		type: "string",
 	});
+	pi.registerFlag("msgq-context", {
+		description: "Derive peer locator context: 'auto' (default) or 'off'",
+		type: "string",
+	});
+	pi.registerFlag("msgq-card-paths", {
+		description: "Locator path mode: 'relative' (default), 'full', or 'none'",
+		type: "string",
+	});
 
 	pi.registerMessageRenderer(MESSAGE_TYPE, renderMsgq);
 
@@ -114,6 +138,18 @@ export default function (pi: ExtensionAPI) {
 	let presenceConfigured = false;
 	/** Whether the session currently holds its presence lease. */
 	let presenceHeld = false;
+	/** Whether locator context is derived, and how much path it carries. */
+	let contextMode: ContextMode = "auto";
+	let cardPaths: CardPathMode = "relative";
+	/** The last derived locator, the per-field overrides, and what presence currently carries. */
+	let derivedCard: Card = {};
+	let cardOverrides: CardOverrides = {};
+	let currentCard: Card | undefined;
+	let currentCwd = "";
+	/** Guards overlapping `msgq card` runs during a slow git call. */
+	let refreshingCard = false;
+	/** A refresh requested while one was already running. */
+	let cardRefreshQueued = false;
 	/** Where the bus is. Resolved once: it does not depend on the session. */
 	const busPath = resolveDbPath(process.env, homedir());
 	/** Extra addresses beyond this session's own, kept so a rename can rebuild the set. */
@@ -147,6 +183,57 @@ export default function (pi: ExtensionAPI) {
 		if (failure === undefined) return "the lease is held elsewhere";
 		if (failure instanceof Error) return failure.message || "the write failed without a reason";
 		return String(failure);
+	}
+
+	/** Derive the locator, or undefined when context is off or derivation fails. */
+	async function deriveCard(cwd: string): Promise<Card | undefined> {
+		if (contextMode === "off") return undefined;
+		try {
+			const result = await pi.exec(
+				msgqBin,
+				["card", "--cwd", cwd, "--paths", cardPaths],
+				{ cwd, timeout: 3000 },
+			);
+			if (result.code !== 0) return undefined;
+			derivedCard = parseDerivedCard(JSON.parse(result.stdout.trim()));
+			const card = mergeCard(derivedCard, cardOverrides);
+			if (Object.keys(card).length === 0) return undefined;
+			if (!cardWithinLimit(card)) {
+				report(
+					`msgq locator card is ${cardBytes(card)} bytes; omitting it (limit ${CARD_MAX_BYTES})`,
+					"warning",
+				);
+				return undefined;
+			}
+			return card;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Re-derive the locator and publish it, only when it actually changed. */
+	async function refreshCard(cwd: string, force = false): Promise<void> {
+		if (contextMode === "off" || !presence) return;
+		if (refreshingCard) {
+			cardRefreshQueued = true;
+			return;
+		}
+		refreshingCard = true;
+		try {
+			const next = await deriveCard(cwd);
+			if (!force && sameCard(next, currentCard)) return;
+			currentCard = next;
+			presenceHeld = presence.setCard(next);
+			if (!presenceHeld) {
+				report(`msgq presence could not publish its locator card: ${presenceWhy()}`, "warning");
+			}
+		} finally {
+			refreshingCard = false;
+			if (cardRefreshQueued) {
+				cardRefreshQueued = false;
+				void refreshCard(currentCwd, true);
+			}
+		}
 	}
 
 	/**
@@ -221,6 +308,12 @@ export default function (pi: ExtensionAPI) {
 		presence?.stop();
 		presence = undefined;
 		presenceHeld = false;
+		derivedCard = {};
+		cardOverrides = {};
+		currentCard = undefined;
+		currentCwd = "";
+		refreshingCard = false;
+		cardRefreshQueued = false;
 		identity = undefined;
 		inFlight = [];
 		lastStopReason = undefined;
@@ -447,7 +540,31 @@ export default function (pi: ExtensionAPI) {
 			policy,
 			presence: presenceConfigured ? (presenceHeld ? "registered" : "lost") : "off",
 			trusted,
+			card: currentCard,
 		};
+	}
+
+	async function handleCardAction(value: unknown): Promise<ReturnType<typeof toolText>> {
+		if (contextMode === "off") {
+			return toolText("locator context is disabled; nothing was changed");
+		}
+		if (value === undefined) {
+			return toolText(
+				currentCard && Object.keys(currentCard).length > 0
+					? JSON.stringify(currentCard, null, 2)
+					: "no locator card is set",
+			);
+		}
+		const parsed = parseCardOverrides(value);
+		if (!parsed.ok) return toolText(parsed.error);
+		if (!currentCwd) currentCwd = context?.cwd ?? process.cwd();
+		cardOverrides = { ...cardOverrides, ...parsed.overrides };
+		await refreshCard(currentCwd, true);
+		return toolText(
+			currentCard && Object.keys(currentCard).length > 0
+				? `card updated\n${JSON.stringify(currentCard, null, 2)}`
+				: "card cleared",
+		);
 	}
 
 	const peersTool = {
@@ -456,13 +573,20 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Work with other agents on the message bus. 'list' the addresses that are reachable, " +
 			"'send' a message to one, 'ask' a question and wait for the answer, or 'reply' to the " +
-			"message you most recently received. To have a peer *run* something rather than be told " +
-			"about it, send a command: the body is the command line, and its own arguments are where " +
-			"you ask for the answer. Use it to hand work to another session on the bus and to read " +
-			"what comes back.",
+			"message you most recently received. 'card' reports or changes this session's locator " +
+			"(project, branch, worktree, path); omit the card to read it. To have a peer *run* " +
+			"something rather than be told about it, send a command: the body is the command line, " +
+			"and its own arguments are where you ask for the answer. Use it to hand work to another " +
+			"session on the bus and to read what comes back.",
 		parameters: Type.Object({
 			action: Type.Union(
-				[Type.Literal("list"), Type.Literal("send"), Type.Literal("ask"), Type.Literal("reply")],
+				[
+					Type.Literal("list"),
+					Type.Literal("send"),
+					Type.Literal("ask"),
+					Type.Literal("reply"),
+					Type.Literal("card"),
+				],
 				{ description: "what to do" },
 			),
 			to: Type.Optional(
@@ -478,12 +602,35 @@ export default function (pi: ExtensionAPI) {
 			timeoutSeconds: Type.Optional(
 				Type.Number({ description: "how long 'ask' waits; 0 waits without a limit" }),
 			),
+			card: Type.Optional(
+				Type.Object(
+					{
+						project: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+						branch: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+						worktree: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+						path: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+					},
+					{
+						description:
+							"locator overrides for the 'card' action; null clears one and returns it to the derived value",
+						additionalProperties: false,
+					},
+				),
+			),
 		}),
 		async execute(
 			_toolCallId: string,
-			params: { action: "list" | "send" | "ask" | "reply"; to?: string; message?: string; timeoutSeconds?: number; command?: boolean },
+			params: {
+				action: "list" | "send" | "ask" | "reply" | "card";
+				to?: string;
+				message?: string;
+				timeoutSeconds?: number;
+				command?: boolean;
+				card?: unknown;
+			},
 			signal: AbortSignal | undefined,
 		) {
+			if (params.action === "card") return handleCardAction(params.card);
 			const plan = planPeerAction(params, {
 				msgqBin,
 				self,
@@ -494,7 +641,16 @@ export default function (pi: ExtensionAPI) {
 			if (isError(plan)) return toolText(plan.error);
 			const seconds = params.action === "ask" ? (params.timeoutSeconds ?? DEFAULT_ASK_TIMEOUT_S) : 0;
 			const timeoutMs = seconds > 0 ? seconds * 1000 + 30_000 : undefined;
-			const report = await runPlanned(pi, plan, { signal, timeoutMs, binEnv: "MSGQ_BIN" });
+			let report = await runPlanned(pi, plan, { signal, timeoutMs, binEnv: "MSGQ_BIN" });
+			// Older CLIs do not know --wide. The locator is an enhancement, so fall back to the
+			// plain roster rather than failing the list action.
+			if (params.action === "list" && !report.ok && plan.args.includes("--wide")) {
+				report = await runPlanned(
+					pi,
+					{ command: plan.command, args: ["sessions"] },
+					{ signal, timeoutMs, binEnv: "MSGQ_BIN" },
+				);
+			}
 			// A reply went out, so the question this session owed an answer to is settled.
 			if (params.action === "reply" && report.ok) noteAnswered(lastInbound?.offset);
 			// "Who is out there" and "which of them is me" are one question, so the roster
@@ -529,6 +685,8 @@ export default function (pi: ExtensionAPI) {
 			const policyFlag = pi.getFlag("msgq-policy");
 			const presenceFlag = pi.getFlag("msgq-presence");
 			const trustFlag = pi.getFlag("msgq-trust");
+			const contextFlag = pi.getFlag("msgq-context");
+			const cardPathsFlag = pi.getFlag("msgq-card-paths");
 			extra = parseTopics(
 				(typeof topicsFlag === "string" ? topicsFlag : undefined) ??
 					process.env.MSGQ_TOPICS,
@@ -546,6 +704,14 @@ export default function (pi: ExtensionAPI) {
 				(typeof trustFlag === "string" ? trustFlag : undefined) ??
 					process.env.MSGQ_TRUST,
 			);
+			contextMode = parseContext(
+				(typeof contextFlag === "string" ? contextFlag : undefined) ??
+					process.env.MSGQ_CONTEXT,
+			);
+			cardPaths = parseCardPaths(
+				(typeof cardPathsFlag === "string" ? cardPathsFlag : undefined) ??
+					process.env.MSGQ_CARD_PATHS,
+			);
 		} catch (error) {
 			disable(error instanceof ConfigError ? error.message : String(error));
 			return;
@@ -559,6 +725,7 @@ export default function (pi: ExtensionAPI) {
 		self = selfAddress(identity);
 		consumer = consumerId(identity);
 		extraTopics = extra;
+		currentCwd = ctx.cwd;
 
 		// Bus.
 		try {
@@ -572,12 +739,14 @@ export default function (pi: ExtensionAPI) {
 		// Presence: a scoped write exception, published as a record any client could publish. A failure
 		// here is never fatal.
 		if (presenceConfigured && bus) {
+			currentCard = await deriveCard(currentCwd);
 			presence = new Presence(bus, {
 				address: self,
 				participant: identity.sessionId,
 				alias: identity.alias,
 				state: ctx.isIdle() ? "idle" : "busy",
 				ttlS: presenceTtl,
+				card: currentCard,
 			});
 			presenceHeld = presence.start();
 			if (!presenceHeld) {
@@ -585,8 +754,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			void reportPresenceCollision();
 			const renewMs = Math.max(1, Math.floor(presenceTtl / 3)) * 1000;
+			let renewCount = 0;
 			renewTimer = setInterval(() => {
 				if (!presence) return;
+				renewCount += 1;
+				if (contextMode === "auto" && renewCount % 6 === 0) void refreshCard(currentCwd);
 				const held = presenceHeld;
 				// A presence write is best-effort and cannot throw: a full disk or a closed
 				// handle must not take the session down with it.
@@ -662,8 +834,15 @@ export default function (pi: ExtensionAPI) {
 		return result;
 	});
 
-	pi.on("agent_start", async () => {
+	pi.on("input", async (_event, ctx) => {
+		currentCwd = ctx.cwd;
+		void refreshCard(currentCwd);
+	});
+
+	pi.on("agent_start", async (_event, ctx) => {
 		lastStopReason = undefined;
+		currentCwd = ctx.cwd;
+		void refreshCard(currentCwd);
 		setPresenceState("busy");
 		for (const entry of inFlight) {
 			if (entry.phases.includes("started")) {

@@ -5,6 +5,8 @@ import {
 	canonicalizeAddress,
 	ConfigError,
 	consumerId,
+	parseCardPaths,
+	parseContext,
 	parsePolicy,
 	parsePresence,
 	parseTopics,
@@ -64,6 +66,20 @@ test("presence is on by default and accepts explicit values", () => {
 	assert.equal(parsePresence("OFF"), false);
 	assert.equal(parsePresence("0"), false);
 	assert.throws(() => parsePresence("maybe"), ConfigError);
+});
+
+test("locator context defaults to auto and can be disabled", () => {
+	assert.equal(parseContext(undefined), "auto");
+	assert.equal(parseContext("AUTO"), "auto");
+	assert.equal(parseContext("off"), "off");
+	assert.throws(() => parseContext("on"), ConfigError);
+});
+
+test("locator path mode defaults to relative and validates", () => {
+	assert.equal(parseCardPaths(undefined), "relative");
+	assert.equal(parseCardPaths("full"), "full");
+	assert.equal(parseCardPaths("none"), "none");
+	assert.throws(() => parseCardPaths("short"), ConfigError);
 });
 
 test("lease lifetime falls back and validates", () => {

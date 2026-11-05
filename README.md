@@ -108,7 +108,7 @@ Records that arrive mid-run are **coalesced**: however many arrive during one tu
 delivered as a single message and cost at most one more model request.
 
 ```bash
-msgq sessions      # who is online, and what they are doing
+msgq sessions --wide   # who is online, where they work, and what they are doing
 msgq consumers     # which addresses are being followed
 msgq read session/planner --from-start    # the retained history
 ```

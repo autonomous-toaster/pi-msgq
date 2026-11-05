@@ -83,7 +83,8 @@ Presence is a normal record published to the presence address:
 
 ```json
 {"v":1,"type":"event","from":"session/planner","to":"group/presence",
- "event":{"kind":"presence","state":"idle","ttl":30,"participant":"01a187d8","alias":"planner"}}
+ "event":{"kind":"presence","state":"idle","ttl":30,"participant":"01a187d8","alias":"planner",
+          "card":{"project":"github.com/org/repo","branch":"main","worktree":"repo","path":"src"}}}
 ```
 
 - The presence address is `group/presence`. Every participant publishes there and the roster reads it;
@@ -95,9 +96,16 @@ Presence is a normal record published to the presence address:
   participant answers at. The roster shows one entry per participant, because two sessions may share an
   alias and therefore an address.
 - `state` is `idle`, `busy` or `blocked`.
+- `card` is optional. It is a flat locator, not a profile: `project` is the discovery key (a
+  normalized `host/owner/repo` origin, or a directory name), `branch` and `worktree` name the git
+  context when there is one, and `path` is the current directory relative to the repository root by
+  default. A publisher may omit `path` or use an absolute path instead. Readers ignore card keys they
+  do not know, and a card never invalidates a presence record.
 - A clean shutdown publishes `state: "gone"`, which retracts presence immediately.
 - Presence is advisory. It is not authentication, and it does not promise that a live session will
-  answer. A client that publishes nothing at all still works; it simply is not listed.
+  answer. A client that publishes nothing at all still works; it simply is not listed. The card is
+  public metadata and can reveal project, branch, worktree, and path names; publish it only where
+  that is acceptable.
 
 ## Addresses
 

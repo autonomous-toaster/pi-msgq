@@ -98,6 +98,30 @@ export function parseTrustList(raw: string | undefined | null): string[] {
 	return out;
 }
 
+/** Whether the session derives a locator card automatically. */
+export type ContextMode = "auto" | "off";
+
+/** How much of the working path a locator card carries. */
+export type CardPathMode = "relative" | "full" | "none";
+
+/** Parse the locator-context switch; the default is `auto`. */
+export function parseContext(raw: string | undefined | null): ContextMode {
+	const value = raw?.trim().toLowerCase();
+	if (!value) return "auto";
+	if (value === "auto" || value === "off") return value;
+	throw new ConfigError(`unknown context value '${raw}'; expected 'auto' or 'off'`);
+}
+
+/** Parse the locator path mode; the default is `relative`. */
+export function parseCardPaths(raw: string | undefined | null): CardPathMode {
+	const value = raw?.trim().toLowerCase();
+	if (!value) return "relative";
+	if (value === "relative" || value === "full" || value === "none") return value;
+	throw new ConfigError(
+		`unknown card path mode '${raw}'; expected 'relative', 'full', or 'none'`,
+	);
+}
+
 /**
  * Parse the presence switch. Presence is enabled unless explicitly disabled.
  */

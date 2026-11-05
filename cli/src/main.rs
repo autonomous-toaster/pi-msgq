@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use msgq::card::{self, PathMode};
 use msgq::commands::{self, AskArgs, ConsumersAction, CursorAction, FromSpec, PublishArgs};
 use msgq::error::Error;
 
@@ -140,6 +141,18 @@ enum Command {
     Sessions {
         #[arg(long)]
         json: bool,
+        /// Show the locator card fields.
+        #[arg(long)]
+        wide: bool,
+    },
+    /// Print the peer locator derived from a working directory.
+    Card {
+        /// Directory to describe (default: the current directory).
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Path detail: relative (default), full, or none.
+        #[arg(long, value_name = "MODE")]
+        paths: Option<String>,
     },
     /// List or remove consumer cursors.
     Consumers {
@@ -304,7 +317,16 @@ fn run(cli: Cli) -> Result<(), Error> {
             with_offset,
         ),
         Command::Topics { json } => commands::topics(&db, json),
-        Command::Sessions { json } => commands::sessions(&db, json),
+        Command::Sessions { json, wide } => commands::sessions(&db, json, wide),
+        Command::Card { cwd, paths } => {
+            let cwd = match cwd {
+                Some(path) => path,
+                None => std::env::current_dir()?,
+            };
+            let card = card::derive_card(&cwd, PathMode::parse(paths.as_deref())?)?;
+            println!("{}", serde_json::to_string(&card)?);
+            Ok(())
+        }
         Command::Prune { older_than, apply } => {
             commands::prune(&db, commands::PruneArgs { older_than, apply })
         }

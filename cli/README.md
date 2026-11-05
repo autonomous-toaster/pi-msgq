@@ -164,7 +164,8 @@ msgq [--db <PATH>] <COMMAND>
 | `read <ADDRESS>...` | stateless read; never creates or advances a cursor |
 | `follow <ADDRESS>... --consumer <NAME>` | durable subscription; advances the consumer's cursors |
 | `topics` | list addresses with message count and highest offset |
-| `sessions` | list live participants, from the presence records they publish |
+| `sessions` | list live participants, from the presence records they publish; `--wide` shows their locator card |
+| `card [--cwd PATH] [--paths relative\|full\|none]` | print the locator derived from a working directory |
 | `await <OFFSET>` | wait for acknowledgements of a published message |
 | `ask <ADDRESS> [MESSAGE]` | ask a peer a question and wait for the answer |
 | `consumers [--topic <T>]` | list consumer cursors |
@@ -286,10 +287,39 @@ Live participants advertise themselves with a short **record** on the presence a
 $ msgq sessions
 session/api-worker  session  busy  api-worker  27
 session/01a12cc5    session  idle             30
+
+$ msgq sessions --wide
+session/api-worker  session  busy  api-worker  27  github.com/org/repo  main  repo  src
 ```
 
-Columns are address, kind, state, and remaining lifetime in seconds. `--json` emits one object
-per participant.
+Columns are address, kind, state, and remaining lifetime in seconds. `--wide` appends the locator
+fields `project`, `branch`, `worktree`, and `path`; the default output is unchanged. `--json` emits
+one object per participant and includes a `card` object when the newest presence record has one.
+
+A presence record can carry a small **locator card** so an agent can find a peer by project rather
+than by session id:
+
+```json
+"card": {
+  "project": "github.com/org/repo",
+  "branch": "main",
+  "worktree": "repo",
+  "path": "src"
+}
+```
+
+`project` is the discovery key: a normalized `origin` remote when one exists, otherwise the
+repository root directory name. `branch`, `worktree`, and `path` are omitted when git or path
+reporting does not apply. The card is **not** a profile: it carries no state, current task, or work
+summary, and it is capped by the reference clients at 512 bytes.
+
+Use `msgq card` to derive the same card for a script or another client:
+
+```bash
+msgq card --cwd "$PWD" --paths relative
+msgq card --cwd "$PWD" --paths full      # path is the absolute current directory
+msgq card --cwd "$PWD" --paths none      # omit path
+```
 
 Presence is a record, so it is not a pi feature: any process that can publish can appear, with
 nothing but this CLI.
@@ -297,7 +327,8 @@ nothing but this CLI.
 ```bash
 msgq publish group/presence --json '{
   "v": 1, "type": "event", "from": "cli/nightly-build@host", "to": "group/presence",
-  "event": {"kind": "presence", "state": "busy", "ttl": 600, "participant": "nightly-build"}
+  "event": {"kind": "presence", "state": "busy", "ttl": 600, "participant": "nightly-build",
+            "card": {"project": "github.com/org/repo", "branch": "main", "path": "src"}}
 }'
 ```
 
@@ -305,7 +336,8 @@ A participant is live while its newest record is younger than the lifetime it de
 the bus's own clock. A clean shutdown publishes `state: "gone"`, which retracts it at once; a
 participant that crashes simply ages out, so there is nothing to clean up and no daemon involved.
 Presence is **advisory**: it tells you who is reachable right now, but publishing to an offline
-session still queues durably.
+session still queues durably. The locator card is public metadata: project names, branch names,
+worktree names, and paths can be read by any process that can read the bus.
 
 ## Retention
 

@@ -30,7 +30,14 @@ function presenceEvent(record: MsgqRecord): Record<string, unknown> {
 
 function makePresence(
 	db: string,
-	over: Partial<{ state: any; alias: string; address: string; participant: string; ttlS: number }> = {},
+	over: Partial<{
+		state: any;
+		alias: string;
+		address: string;
+		participant: string;
+		ttlS: number;
+		card: Record<string, string>;
+	}> = {},
 ) {
 	const bus = new Bus(db, INTERVAL);
 	const presence = new Presence(bus, {
@@ -39,6 +46,7 @@ function makePresence(
 		alias: "alias" in over ? over.alias : "api-worker",
 		state: over.state ?? "idle",
 		ttlS: over.ttlS ?? 30,
+		card: over.card,
 	});
 	return { bus, presence };
 }
@@ -61,6 +69,32 @@ test("start publishes one presence record", () => {
 	assert.equal(event.ttl, 30);
 	assert.equal(event.participant, "01a127d9");
 	assert.equal(event.alias, "api-worker");
+
+	presence.stop();
+	bus.close();
+});
+
+test("the presence record carries a locator card", () => {
+	const db = tempDb();
+	const card = { project: "github.com/org/repo", branch: "main", path: "src" };
+	const { bus, presence } = makePresence(db, { card });
+
+	presence.start();
+	const [record] = presenceRecords(db);
+	assert.deepEqual(presenceEvent(record).card, card);
+
+	presence.setCard({ ...card, branch: "review" });
+	const records = presenceRecords(db);
+	assert.equal(records.length, 2);
+	assert.equal((presenceEvent(records[1]).card as Record<string, string>).branch, "review");
+
+	// Setting the same card again publishes nothing new.
+	assert.equal(presence.setCard({ ...card, branch: "review" }), true);
+	assert.equal(presenceRecords(db).length, 2);
+
+	presence.setCard(undefined);
+	const last = presenceRecords(db);
+	assert.equal(presenceEvent(last[last.length - 1]).card, undefined);
 
 	presence.stop();
 	bus.close();

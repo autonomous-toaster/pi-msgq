@@ -53,7 +53,7 @@ const NO_IDENTITY = "this session has no bus address yet: the message bus did no
 export function planPeerAction(params: PeerParams, context: PeerContext): Command | PlanError {
 	const action = params.action as string;
 	if (action === "list") {
-		return { command: context.msgqBin, args: ["sessions"] }; // needs no identity
+		return { command: context.msgqBin, args: ["sessions", "--wide"] }; // needs no identity
 	}
 
 	// A command must be the whole message, so nothing can be wrapped around it: not a reply

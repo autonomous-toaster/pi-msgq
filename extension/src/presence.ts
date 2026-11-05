@@ -5,6 +5,7 @@
 // appear, which is the point — the roster is not a pi feature. See `PROTOCOL.md`.
 
 import type { Bus } from "./consumer.ts";
+import { type Card, sameCard } from "./card.ts";
 import { PROTOCOL_VERSION, type MsgqRecord } from "./record.ts";
 import { type PresenceState } from "./presence-text.ts";
 
@@ -30,6 +31,8 @@ export interface PresenceOptions {
 	state: PresenceState;
 	/** Lifetime of one record in seconds. Defaults to {@link PRESENCE_TTL_S}. */
 	ttlS?: number;
+	/** Optional flat peer-locator card. */
+	card?: Card;
 }
 
 /**
@@ -46,6 +49,7 @@ export class Presence {
 	private state: PresenceState;
 	private address: string;
 	private alias: string | undefined;
+	private card: Card | undefined;
 	private closed = false;
 	private failure: unknown;
 	private published = false;
@@ -57,6 +61,7 @@ export class Presence {
 		this.state = options.state;
 		this.address = options.address;
 		this.alias = options.alias;
+		this.card = options.card;
 	}
 
 	private get ttl(): number {
@@ -94,6 +99,7 @@ export class Presence {
 			participant: this.participant,
 		};
 		if (this.alias !== undefined && this.alias !== "") event.alias = this.alias;
+		if (this.card && Object.keys(this.card).length > 0) event.card = this.card;
 		return {
 			v: PROTOCOL_VERSION,
 			type: "event",
@@ -121,6 +127,14 @@ export class Presence {
 		if (state === this.state) return this.published;
 		this.state = state;
 		return this.publish(state);
+	}
+
+	/** Replace the locator card, and say so at once. */
+	setCard(card: Card | undefined): boolean {
+		if (this.closed) return false;
+		if (sameCard(card, this.card)) return this.published;
+		this.card = card;
+		return this.publish(this.state);
 	}
 
 	/** Re-register under a new address (a rename), or with a new alias. */

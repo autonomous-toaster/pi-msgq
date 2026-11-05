@@ -3,6 +3,7 @@
 // No host imports on purpose: the commands are thin, and everything they decide
 // on their own is decided here, where it is unit-testable without a session.
 
+import { type Card, cardSummary, parseDerivedCard } from "./card.ts";
 import { canonicalizeAddress } from "./config.ts";
 
 /** A resolved address, or why one could not be resolved. */
@@ -79,6 +80,7 @@ export interface RosterEntry {
 	state?: string;
 	alias?: string;
 	expiresIn?: number;
+	card?: Card;
 }
 
 /**
@@ -100,13 +102,15 @@ export function parseSessions(output: string): RosterEntry[] {
 		if (typeof value !== "object" || value === null) continue;
 		const record = value as Record<string, unknown>;
 		if (typeof record.address !== "string" || !record.address) continue;
-		out.push({
+		const entry: RosterEntry = {
 			address: record.address,
 			kind: typeof record.kind === "string" ? record.kind : undefined,
 			state: typeof record.state === "string" ? record.state : undefined,
 			alias: typeof record.alias === "string" ? record.alias : undefined,
 			expiresIn: typeof record.expires_in === "number" ? record.expires_in : undefined,
-		});
+		};
+		if (record.card !== undefined) entry.card = parseDerivedCard(record.card);
+		out.push(entry);
 	}
 	return out;
 }
@@ -115,7 +119,8 @@ export function parseSessions(output: string): RosterEntry[] {
 function rosterTail(entry: RosterEntry): string {
 	const state = entry.state?.trim() || "-";
 	const ttl = entry.expiresIn === undefined ? "" : `  ${entry.expiresIn}s`;
-	return `${state}${ttl}`;
+	const locator = cardSummary(entry.card);
+	return `${state}${ttl}${locator ? `  ${locator}` : ""}`;
 }
 
 /** One peer as a line, address first so it can be read off and typed. */
@@ -147,6 +152,7 @@ export interface IdentityFacts {
 	policy: string;
 	presence: "registered" | "lost" | "off";
 	trusted: string[];
+	card?: Card;
 }
 
 /** How presence reads in the identity report. */
@@ -168,6 +174,17 @@ export function formatIdentity(facts: IdentityFacts): string {
 		["presence", presenceText(facts.presence)],
 		["trust", facts.trusted.length > 0 ? facts.trusted.join(", ") : "(none set: every sender)"],
 	];
+	if (facts.card) {
+		for (const [label, key] of [
+			["project", "project"],
+			["branch", "branch"],
+			["worktree", "worktree"],
+			["path", "path"],
+		] as const) {
+			const value = facts.card[key];
+			if (value) rows.push([label, value]);
+		}
+	}
 	const width = Math.max(...rows.map(([label]) => label.length));
 	const header = facts.self || "(none: the message bus did not start)";
 	return [header, ...rows.map(([label, value]) => `  ${label.padEnd(width)}  ${value}`)].join("\n");

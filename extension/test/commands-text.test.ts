@@ -79,6 +79,17 @@ test("the roster parses the bus's json lines", () => {
 	]);
 });
 
+test("the roster keeps a locator card", () => {
+	const line = JSON.stringify({
+		address: "session/reviewer",
+		kind: "session",
+		state: "busy",
+		card: { project: "org/repo", branch: "main", path: "src", head: "ignored" },
+	});
+	const [entry] = parseSessions(line);
+	assert.deepEqual(entry.card, { project: "org/repo", branch: "main", path: "src" });
+});
+
 test("several participants parse, in order", () => {
 	const other = JSON.stringify({ address: "cli/ci-bot", kind: "cli", state: "idle" });
 	const entries = parseSessions([LINE, other].join("\n"));
@@ -137,6 +148,18 @@ test("a roster row leads with the address", () => {
 	assert.equal(rosterLabel({ address: "cli/bot" }), "cli/bot  -");
 });
 
+test("a roster row shows the locator next to the state", () => {
+	assert.equal(
+		rosterLabel({
+			address: "session/reviewer",
+			state: "busy",
+			expiresIn: 28,
+			card: { project: "org/repo", branch: "main", path: "src" },
+		}),
+		"session/reviewer  busy  28s  org/repo  main  src",
+	);
+});
+
 test("the roster lists the other participants, aligned", () => {
 	const entries = [
 		{ address: "session/me", state: "idle", expiresIn: 30 },
@@ -158,6 +181,22 @@ test("a roster with nobody else says so", () => {
 		"no other participant is reachable on the bus",
 	);
 	assert.equal(formatRoster([], "session/me"), "no other participant is reachable on the bus");
+});
+
+test("the identity report names the locator fields", () => {
+	const text = formatIdentity({
+		self: "session/planner",
+		bus: "db",
+		addresses: ["session/planner"],
+		policy: "honor",
+		presence: "registered",
+		trusted: [],
+		card: { project: "org/repo", branch: "main", worktree: "repo", path: "src" },
+	});
+	assert.match(text, /project\s+org\/repo/);
+	assert.match(text, /branch\s+main/);
+	assert.match(text, /worktree\s+repo/);
+	assert.match(text, /path\s+src/);
 });
 
 test("the identity report names every fact the session holds", () => {

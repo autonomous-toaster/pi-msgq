@@ -52,6 +52,8 @@ every instance look like every other one and silently drop their traffic as self
 | `topics` | none | extra addresses to follow, e.g. `{ "group/ci" }` |
 | `ttl` | `30` | presence lease, in seconds |
 | `presence_every_ms` | `10000` | presence renewal interval |
+| `context` | `"auto"` | derive the locator card from the current directory; `"off"` disables it |
+| `card_paths` | `"relative"` | path detail in the locator: `"relative"`, `"full"`, or `"none"` |
 
 ```lua
 require("msgq").setup({
@@ -114,10 +116,16 @@ Sending from a command publishes as this session and asks to be told when the pe
 The agent gets one tool, for answering peers and starting conversations:
 
 ```
-msgq({action:"list"})                     who is live
+msgq({action:"list"})                     who is live, with their locator
 msgq({action:"send", to:"session/api", message:"build is green", type:"note"})
 msgq({action:"reply", message:"looks fine to me"})
+msgq({action:"card"})                     this session's locator
+msgq({action:"card", card={branch="review"}})  override one locator field
 ```
+
+Omit `card` to read the current locator. A non-empty field overrides the derived value; an empty
+string clears that override and returns to the derived value. Only `project`, `branch`, `worktree`,
+and `path` are accepted.
 
 `reply` answers the message received most recently, carrying its `reply_to` and arriving at the
 sender's address.
@@ -129,6 +137,12 @@ The session advertises itself on `group/presence` while it runs, so `msgq sessio
 address) with the configured name as its alias, so several instances sharing one alias stay
 distinguishable. A clean session end retracts the record; a crash ages out after the TTL.
 Presence is advisory and never gates delivery.
+
+The record carries a small **locator card** — `project`, `branch`, `worktree`, `path` — derived by
+`msgq card` from the current directory and git. It lets a peer be found by project rather than by
+session id. It is not a profile and carries no current task or work summary. `context = "off"`
+disables it; `card_paths` controls whether `path` is relative, absolute, or omitted. The card is
+public metadata, so it can reveal project, branch, worktree, and path names.
 
 `/peers me` answers from what the session already holds, so it still works when the bus does not:
 
@@ -143,6 +157,10 @@ session/CgiccyNbdVnFfcih8JHyG
   trust       (none set: every sender)
   presence    registered (idle)
   follow job  running (pid 1234)
+  project     github.com/org/repo
+  branch      main
+  worktree    repo
+  path        src
   last error  (none)
 ```
 

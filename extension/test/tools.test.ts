@@ -26,7 +26,7 @@ function cmd(plan: Command | { error: string }): Command {
 test("list asks the bus who is reachable", () => {
 	assert.deepEqual(cmd(planPeerAction({ action: "list" }, peers)), {
 		command: "msgq",
-		args: ["sessions"],
+		args: ["sessions", "--wide"],
 	});
 });
 

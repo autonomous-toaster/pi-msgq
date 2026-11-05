@@ -5,6 +5,7 @@
 //! address grammar stay independent of it.
 
 pub mod address;
+pub mod card;
 pub mod commands;
 pub mod config;
 pub mod error;
