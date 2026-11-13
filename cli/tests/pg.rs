@@ -33,6 +33,25 @@ fn exclusive(dsn: &str) -> Client {
     guard
 }
 
+/// A credential with scopes over every address these tests use, minted fresh for the run.
+fn fixture_token(dsn: &str) -> String {
+    let mut client = client(dsn);
+    client
+        .query_one(
+            "SELECT msgq.register_identity('cli/fixture', ARRAY['group','session','cwd'])",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+}
+
+/// The bus, presenting the fixture credential.
+fn open(dsn: &str) -> Store {
+    Store::open_with(&Target::Shared(dsn.to_string()), Some(fixture_token(dsn)))
+        .expect("the shared engine must open")
+        .0
+}
+
 fn client(dsn: &str) -> Client {
     Client::connect(dsn, NoTls).expect("the named test database must accept connections")
 }
@@ -62,14 +81,20 @@ fn a_fresh_connection_bootstraps_only_the_bus_tables() {
     let mut raw = client(&dsn);
     let before = pgmq_footprint(&mut raw);
 
-    let target = Target::Shared(dsn.clone());
-    let (store, created) = Store::open(&target).expect("the shared engine must open");
+    let (store, created) =
+        Store::open_with(&Target::Shared(dsn.clone()), None).expect("the shared engine must open");
     assert!(!created, "opening a shared bus creates no file");
 
     assert_eq!(store.engine(), "shared");
 
     // The bus's own tables are the whole of what it adds.
-    for table in ["msgq.address", "msgq.cursor", "msgq.meta", "msgq.retention"] {
+    for table in [
+        "msgq.address",
+        "msgq.cursor",
+        "msgq.meta",
+        "msgq.retention",
+        "msgq.identity",
+    ] {
         let present: bool = raw
             .query_one("SELECT to_regclass($1) IS NOT NULL", &[&table])
             .unwrap()
@@ -102,10 +127,9 @@ fn opening_twice_records_one_set_of_facts() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let target = Target::Shared(dsn.clone());
-    let (first, _) = Store::open(&target).expect("open");
+    let first = open(&dsn);
     drop(first);
-    let (second, _) = Store::open(&target).expect("reopen");
+    let second = open(&dsn);
 
     let mut raw = client(&dsn);
     let versions: i64 = raw
@@ -153,10 +177,31 @@ fn headers_of(raw: &mut Client, queue: &str, offset: i64) -> serde_json::Value {
     serde_json::from_str(&text.expect("a stored record carries headers")).unwrap()
 }
 
+/// The canonical spelling the bus stores: lowercase, no surrounding space or slash, no doubled
+/// slash. A test that looks an address up has to use it.
+fn canonical(address: &str) -> String {
+    let trimmed = address
+        .trim_matches(|c: char| c == ' ' || c == '/')
+        .to_lowercase();
+    let mut out = String::new();
+    let mut after_slash = false;
+    for c in trimmed.chars() {
+        if c == '/' {
+            if !after_slash {
+                out.push(c);
+            }
+            after_slash = true;
+        } else {
+            out.push(c);
+            after_slash = false;
+        }
+    }
+    out
+}
+
 /// Publish one record and return the queue it landed in and the record's headers.
 fn publish_and_stamp(dsn: &str, address: &str) -> (String, serde_json::Value) {
-    let target = Target::Shared(dsn.to_string());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(dsn);
     let offset = store
         .publish(
             address,
@@ -164,7 +209,7 @@ fn publish_and_stamp(dsn: &str, address: &str) -> (String, serde_json::Value) {
         )
         .unwrap();
     let mut raw = client(dsn);
-    let queue = queue_for(&mut raw, address).expect("publishing registers the address");
+    let queue = queue_for(&mut raw, &canonical(address)).expect("publishing registers the address");
     let headers = headers_of(&mut raw, &queue, offset);
     (queue, headers)
 }
@@ -177,28 +222,36 @@ fn the_address_survives_a_long_path_and_a_case_pair() {
     let _serialised = exclusive(&dsn);
     let unique = unique();
 
-    // A long cwd address is the case that names cannot simply pass through: pgmq lowercases and
-    // caps the table name, and a cwd address is neither lower nor short.
+    // A long cwd address is the case a name cannot be passed through: pgmq lowercases and caps the
+    // table name, and a cwd address is neither lower nor short.
     let long = format!("cwd/Users/Somebody/src/{unique}/very-long-segment-name-here/deeper/still");
     let (queue, headers) = publish_and_stamp(&dsn, &long);
     assert!(queue.len() <= 47, "{queue} exceeds the engine's limit");
-    assert_eq!(headers["msgq"]["address"], json!(long));
+    assert_eq!(
+        headers["msgq"]["address"],
+        json!(long.to_lowercase()),
+        "the record carries the canonical address"
+    );
 
-    // Two addresses that differ only by case must not share a queue.
-    let (upper_queue, upper_headers) = publish_and_stamp(&dsn, &format!("session/Api{unique}"));
-    let (lower_queue, lower_headers) = publish_and_stamp(&dsn, &format!("session/api{unique}"));
-    assert_ne!(
-        upper_queue, lower_queue,
-        "a case-differing pair stays distinct"
-    );
-    assert_eq!(
-        upper_headers["msgq"]["address"],
-        json!(format!("session/Api{unique}"))
-    );
-    assert_eq!(
-        lower_headers["msgq"]["address"],
-        json!(format!("session/api{unique}"))
-    );
+    // Two spellings of one address are one address: the queue is shared and the registry holds the
+    // canonical form, so a scope cannot be escaped by capitalising it.
+    let upper = format!("session/Api{unique}");
+    let lower = format!("session/api{unique}");
+    let (upper_queue, upper_headers) = publish_and_stamp(&dsn, &upper);
+    let (lower_queue, lower_headers) = publish_and_stamp(&dsn, &lower);
+    assert_eq!(upper_queue, lower_queue, "one address, one queue");
+    assert_eq!(upper_headers["msgq"]["address"], json!(lower));
+    assert_eq!(lower_headers["msgq"]["address"], json!(lower));
+
+    let mut raw = client(&dsn);
+    let rows: i64 = raw
+        .query_one(
+            "SELECT COUNT(*) FROM msgq.address WHERE address = $1",
+            &[&lower],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(rows, 1, "the registry keeps the canonical spelling");
 }
 
 #[test]
@@ -257,8 +310,7 @@ fn reading_an_unpublished_address_creates_nothing() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
     let address = format!("group/never-published-{}", unique());
     let mut raw = client(&dsn);
     let queues_before: i64 = raw
@@ -295,14 +347,17 @@ fn two_first_publishers_both_succeed() {
     };
     let _serialised = exclusive(&dsn);
     let address = format!("group/race-{}", unique());
+    let token = fixture_token(&dsn);
 
     let mut workers = Vec::new();
     for index in 0..2 {
         let dsn = dsn.clone();
         let address = address.clone();
+        let token = token.clone();
         workers.push(std::thread::spawn(move || {
-            let target = Target::Shared(dsn);
-            let (store, _) = Store::open(&target).unwrap();
+            let store = Store::open_with(&Target::Shared(dsn), Some(token))
+                .expect("the shared engine must open")
+                .0;
             store
                 .publish(
                     &address,
@@ -346,8 +401,7 @@ fn a_second_publish_runs_no_ddl() {
 
     let mut raw = client(&dsn);
     let oid_before = queue_oid(&mut raw, &queue).expect("the queue exists");
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
     for _ in 0..3 {
         store
             .publish(
@@ -371,8 +425,7 @@ fn reading_twice_changes_nothing() {
     let _serialised = exclusive(&dsn);
     let address = format!("group/readonly-{}", unique());
     let (queue, _) = publish_and_stamp(&dsn, &address);
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
     store
         .publish(
             &address,
@@ -407,8 +460,7 @@ fn a_cursor_never_moves_backwards_and_reading_never_moves_it() {
     let _serialised = exclusive(&dsn);
     let address = format!("group/cursor-{}", unique());
     let (_, _) = publish_and_stamp(&dsn, &address);
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
     let consumer = format!("cli/cursor-{}", unique());
 
     assert!(store.cursor_set(&consumer, &address, 5).unwrap());
@@ -435,8 +487,7 @@ fn a_publish_wakes_a_watcher_under_a_second() {
     };
     let _serialised = exclusive(&dsn);
     let address = format!("group/wake-{}", unique());
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
     store.ensure_address(&address).unwrap();
 
     let watching = store.wake(&[&address]);
@@ -446,8 +497,7 @@ fn a_publish_wakes_a_watcher_under_a_second() {
         std::thread::spawn(move || {
             // Give the watcher time to subscribe before the record exists.
             std::thread::sleep(std::time::Duration::from_millis(200));
-            let target = Target::Shared(dsn);
-            let (store, _) = Store::open(&target).unwrap();
+            let store = open(&dsn);
             store
                 .publish(
                     &address,
@@ -477,8 +527,7 @@ fn a_wake_with_no_publication_returns_after_one_slice() {
     };
     let _serialised = exclusive(&dsn);
     let address = format!("group/quiet-{}", unique());
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
     store.ensure_address(&address).unwrap();
 
     // This is the polling path in disguise: nothing will ever notify, so the slice is the bound.
@@ -497,8 +546,7 @@ fn a_prune_reports_its_total_and_keeps_the_presence_pin() {
     };
     let _serialised = exclusive(&dsn);
     let address = format!("group/prune-{}", unique());
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
 
     // Presence records for three participants, interleaved with ordinary ones.
     let mut presence = Vec::new();
@@ -556,8 +604,7 @@ fn an_address_whose_records_aged_out_is_still_listed() {
     };
     let _serialised = exclusive(&dsn);
     let address = format!("group/aged-{}", unique());
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
     let offset = store
         .publish(
             &address,
@@ -602,8 +649,7 @@ fn a_summary_reports_records_and_the_age_of_the_oldest() {
     let _serialised = exclusive(&dsn);
     let address = format!("group/summary-{}", unique());
     let (_, _) = publish_and_stamp(&dsn, &address);
-    let target = Target::Shared(dsn.clone());
-    let (store, _) = Store::open(&target).unwrap();
+    let store = open(&dsn);
     store
         .publish(
             &address,
@@ -621,5 +667,304 @@ fn a_summary_reports_records_and_the_age_of_the_oldest() {
     assert!(
         summary.oldest_at > 0,
         "the summary carries a real timestamp, not zero"
+    );
+}
+
+#[test]
+fn rust_and_sql_agree_on_a_queue_name() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    for address in [
+        "session/alice",
+        "group/a.b",
+        "cwd/users/somebody/src/very-long-segment-name-here/deeper/still",
+        "g",
+    ] {
+        let from_sql: String = raw
+            .query_one("SELECT msgq.queue_name($1)", &[&address])
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            from_sql,
+            msgq::pg::queue_name(address),
+            "the derived name has one definition, and it is checked here: {address}"
+        );
+    }
+}
+
+#[test]
+fn a_credential_is_never_stored() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/secret-{}", unique());
+    let token = fixture_token(&dsn);
+    let mut raw = client(&dsn);
+    let digest: String = raw
+        .query_one(
+            "SELECT encode(msgq.token_digest($1), 'hex')",
+            &[&token.as_str()],
+        )
+        .unwrap()
+        .get(0);
+
+    let store = Store::open_with(&Target::Shared(dsn.clone()), Some(token.clone()))
+        .expect("open")
+        .0;
+    store
+        .publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address,
+                    "message": "hi", "meta": {"token": token}}),
+        )
+        .unwrap();
+
+    let queue = queue_for(&mut raw, &address).expect("registered");
+    let stored: String = raw
+        .query_one(
+            &format!("SELECT message::text FROM pgmq.\"q_{queue}\" LIMIT 1"),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        !stored.contains(&token),
+        "the credential is not in the record"
+    );
+    assert!(!stored.contains(&digest), "nor anything that derives one");
+    assert!(
+        !stored.contains("\"token\""),
+        "the field itself is discarded: {stored}"
+    );
+
+    // And nothing on the wire either: a reader obtains no write capability.
+    let from_api = store
+        .meta("protocol_version")
+        .unwrap()
+        .expect("a version is recorded");
+    assert!(!from_api.contains(&token));
+}
+
+#[test]
+fn a_write_outside_the_scopes_is_refused_and_changes_nothing() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let token: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['group/red'])",
+            &[&format!("cli/red-{}", unique()).as_str()],
+        )
+        .unwrap()
+        .get(0);
+    let store = Store::open_with(&Target::Shared(dsn.clone()), Some(token))
+        .expect("open")
+        .0;
+    let inside = format!("group/red/sub-{}", unique());
+    let outside = format!("group/redder-{}", unique());
+
+    // A differently-spelled form of an address inside the scope is still inside it.
+    store
+        .publish(
+            &inside.to_uppercase(),
+            &json!({"v": 1, "type": "note", "from": "cli/lier@h", "to": inside,
+                    "message": "hi"}),
+        )
+        .unwrap();
+    assert!(queue_for(&mut raw, &inside).is_some());
+
+    let before = raw
+        .query_one("SELECT COUNT(*) FROM msgq.address", &[])
+        .unwrap()
+        .get::<_, i64>(0);
+    let refused = store.publish(
+        &outside,
+        &json!({"v": 1, "type": "note", "from": "cli/lier@h", "to": outside, "message": "hi"}),
+    );
+    let error = refused.expect_err("a write outside the scopes is refused");
+    assert!(error.to_string().contains("outside the scopes"), "{error}");
+    let after = raw
+        .query_one("SELECT COUNT(*) FROM msgq.address", &[])
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(before, after, "a refused write leaves the bus unchanged");
+    assert_eq!(queue_for(&mut raw, &outside), None);
+}
+
+#[test]
+fn a_missing_or_expired_credential_is_named() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let address = format!("group/cred-{}", unique());
+
+    // Ensure the bus has an identity, so it is a bus that can authorize.
+    raw.execute(
+        "SELECT msgq.register_identity($1, ARRAY['group'])",
+        &[&format!("cli/keeper-{}", unique()).as_str()],
+    )
+    .unwrap();
+    let anonymous = Store::open_with(&Target::Shared(dsn.clone()), None)
+        .expect("open")
+        .0;
+    let error = anonymous
+        .publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address, "message": "hi"}),
+        )
+        .expect_err("a bus with identities refuses an anonymous write");
+    assert!(error.to_string().contains("no credential"), "{error}");
+
+    let expired: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['group'], now() - interval '1 hour')",
+            &[&format!("cli/expired-{}", unique()).as_str()],
+        )
+        .unwrap()
+        .get(0);
+    let store = Store::open_with(&Target::Shared(dsn.clone()), Some(expired))
+        .expect("open")
+        .0;
+    let error = store
+        .publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address, "message": "hi"}),
+        )
+        .expect_err("an expired credential is refused");
+    assert!(error.to_string().contains("expired"), "{error}");
+}
+
+#[test]
+fn a_runtime_role_cannot_write_a_stream_directly() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    raw.batch_execute(
+        "DO $$ BEGIN
+             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'msgq_runtime') THEN
+                 CREATE ROLE msgq_runtime LOGIN;
+             END IF;
+         END $$;
+         SELECT msgq.grant_runtime('msgq_runtime');",
+    )
+    .unwrap();
+
+    // A queue to try against, and a credential the runtime role may use through the function.
+    let address = format!("group/runtime-{}", unique());
+    let token: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['group'])",
+            &[&format!("cli/runtime-{}", unique()).as_str()],
+        )
+        .unwrap()
+        .get(0);
+    let store = Store::open_with(&Target::Shared(dsn.clone()), Some(token.clone()))
+        .expect("open")
+        .0;
+    store
+        .publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address, "message": "hi"}),
+        )
+        .unwrap();
+    let queue = queue_for(&mut raw, &address).expect("registered");
+
+    let runtime_dsn = dsn.replace("//msgq@", "//msgq_runtime@");
+    assert_ne!(runtime_dsn, dsn, "the fixture connects as a non-owner");
+    let mut runtime = Client::connect(&runtime_dsn, NoTls).expect("the runtime role connects");
+
+    let direct = runtime.execute(
+        &format!("INSERT INTO pgmq.\"q_{queue}\" (message) VALUES ('{{\"v\":1}}'::jsonb)"),
+        &[],
+    );
+    assert!(
+        direct.is_err(),
+        "the runtime role must not insert into a stream directly"
+    );
+
+    let created = runtime.execute("CREATE TABLE pgmq.sneaky ()", &[]);
+    assert!(created.is_err(), "the runtime role must not create in pgmq");
+
+    // And the one path it does have works, which is what makes the refusal meaningful.
+    let offset: i64 = runtime
+        .query_one(
+            "SELECT msgq.publish_as($1, $2, $3::text::jsonb)",
+            &[
+                &token.as_str(),
+                &address,
+                &r#"{"v":1,"type":"note","message":"hi"}"#,
+            ],
+        )
+        .unwrap()
+        .get(0);
+    assert!(offset > 0);
+}
+
+#[test]
+fn the_reported_credential_state_distinguishes_the_four_cases() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    // Start from a bus that has no identity at all.
+    raw.execute("DELETE FROM msgq.identity", &[]).unwrap();
+    let anonymous = || {
+        Store::open_with(&Target::Shared(dsn.clone()), None)
+            .expect("open")
+            .0
+    };
+    assert!(
+        anonymous()
+            .credential()
+            .unwrap()
+            .starts_with("none (no identity"),
+        "a bus without identities says so"
+    );
+
+    let token = fixture_token(&dsn);
+    assert!(
+        anonymous()
+            .credential()
+            .unwrap()
+            .starts_with("missing (this bus has"),
+        "a bus that can authorize reports that a credential is required"
+    );
+
+    let known = Store::open_with(&Target::Shared(dsn.clone()), Some(token))
+        .expect("open")
+        .0;
+    assert_eq!(known.credential().unwrap(), "accepted as cli/fixture");
+
+    let unknown = Store::open_with(&Target::Shared(dsn.clone()), Some("nope".to_string()))
+        .expect("open")
+        .0;
+    assert!(
+        unknown.credential().unwrap().starts_with("rejected"),
+        "an unknown credential is named as rejected, not as absent"
+    );
+
+    // And the local bus is never asked for one.
+    let local = Store::open_with(
+        &Target::Local(std::env::temp_dir().join(format!("msgq-cred-{}.db", unique()))),
+        None,
+    )
+    .expect("open")
+    .0;
+    let described = local.credential().unwrap();
+    assert!(described.contains("file permissions"), "{described}");
+    assert!(
+        described.contains("claim"),
+        "no false assurance: {described}"
     );
 }

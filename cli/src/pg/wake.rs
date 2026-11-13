@@ -21,9 +21,9 @@ pub struct PgWake {
 }
 
 /// A wake source for the named topics, listening when the connection can.
-pub fn source(dsn: &str, topics: &[&str]) -> Box<dyn Wake> {
+pub fn source(config: postgres::Config, topics: &[&str]) -> Box<dyn Wake> {
     Box::new(PgWake {
-        listener: listen(dsn, topics).map(Mutex::new),
+        listener: listen(config, topics).map(Mutex::new),
     })
 }
 
@@ -47,8 +47,8 @@ impl Wake for PgWake {
 }
 
 /// A connection registered for the insert notifications of the given topics.
-fn listen(dsn: &str, topics: &[&str]) -> Option<Client> {
-    let mut client = Client::connect(dsn, postgres::NoTls).ok()?;
+fn listen(config: postgres::Config, topics: &[&str]) -> Option<Client> {
+    let mut client = config.connect(postgres::NoTls).ok()?;
     for topic in topics {
         let name = queue_name(topic);
         let channel = format!("pgmq.q_{}.INSERT", escaped(&name));

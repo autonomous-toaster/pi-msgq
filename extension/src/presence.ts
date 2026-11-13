@@ -6,11 +6,29 @@
 
 import type { Bus } from "./consumer.ts";
 import { type Card, sameCard } from "./card.ts";
+import { canonicalizeAddress } from "./config.ts";
 import { PROTOCOL_VERSION, type MsgqRecord } from "./record.ts";
 import { type PresenceState } from "./presence-text.ts";
 
-/** The address every participant publishes presence to, and the roster reads. */
+/** The presence address when no scope is configured. */
 export const PRESENCE_ADDRESS = "group/presence";
+
+/**
+ * The presence address for a scope.
+ *
+ * Presence is per scope because the roster is: two teams on one bus do not appear in each other's
+ * lists. The scope is part of the address, so the separation is the address grammar rather than a
+ * filter a client is trusted to apply.
+ */
+export function presenceAddress(scope?: string): string {
+	const trimmed = scope?.trim().replace(/^\/+|\/+$/g, "").toLowerCase();
+	if (!trimmed) return PRESENCE_ADDRESS;
+	try {
+		return canonicalizeAddress(`group/${trimmed}/presence`);
+	} catch {
+		return PRESENCE_ADDRESS;
+	}
+}
 
 /** Default lifetime of one presence record, in seconds. */
 export const PRESENCE_TTL_S = 30;
@@ -33,6 +51,8 @@ export interface PresenceOptions {
 	ttlS?: number;
 	/** Optional flat peer-locator card. */
 	card?: Card;
+	/** The scope this session belongs to; presence and the roster are per scope. */
+	scope?: string;
 }
 
 /**
@@ -44,6 +64,7 @@ export interface PresenceOptions {
  */
 export class Presence {
 	private readonly bus: Bus;
+	private readonly address_to_publish_to: string;
 	private readonly participant: string;
 	private readonly options: PresenceOptions;
 	private state: PresenceState;
@@ -56,6 +77,7 @@ export class Presence {
 
 	constructor(bus: Bus, options: PresenceOptions) {
 		this.bus = bus;
+		this.address_to_publish_to = presenceAddress(options.scope);
 		this.options = options;
 		this.participant = options.participant;
 		this.state = options.state;
@@ -104,7 +126,7 @@ export class Presence {
 			v: PROTOCOL_VERSION,
 			type: "event",
 			from: this.address,
-			to: PRESENCE_ADDRESS,
+			to: this.address_to_publish_to,
 			event,
 		};
 	}
@@ -155,7 +177,7 @@ export class Presence {
 
 	private publish(state: PresenceRecordState): boolean {
 		try {
-			this.bus.publish(PRESENCE_ADDRESS, this.record(state));
+			this.bus.publish(this.address_to_publish_to, this.record(state));
 		} catch (error) {
 			// A bus write fails for reasons that have nothing to do with this presence: a full disk, a
 			// handle closed underneath us. The reason is kept for the caller, and nothing is claimed.

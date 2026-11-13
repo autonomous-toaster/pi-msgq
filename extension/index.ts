@@ -843,6 +843,7 @@ export default function (pi: ExtensionAPI) {
 				state: ctx.isIdle() ? "idle" : "busy",
 				ttlS: presenceTtl,
 				card: currentCard,
+				scope: process.env.MSGQ_SCOPE?.trim() || undefined,
 			});
 			presenceHeld = presence.start();
 			if (!presenceHeld) {

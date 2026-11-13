@@ -4,6 +4,10 @@ use postgres::Client;
 
 use crate::error::Error;
 
+/// The authorizing write path, kept as SQL so a deployment can review it and a runtime role can be
+/// granted it without the bus's own code being in the trust boundary.
+const AUTHORIZATION: &str = include_str!("../../../sql/authorization.sql");
+
 /// Everything the bus adds to a database. A fresh connection runs exactly this and touches no
 /// pgmq table: creating a queue is a decision made per address, not at connect time.
 pub const BOOTSTRAP: &str = "CREATE SCHEMA IF NOT EXISTS msgq;
@@ -36,11 +40,12 @@ pub const BOOTSTRAP: &str = "CREATE SCHEMA IF NOT EXISTS msgq;
 /// Connect, install the bus's tables, and record what this build is.
 ///
 /// Never creates a queue: a fresh connection touches nothing in the pgmq schema.
-pub fn connect(dsn: &str) -> Result<Client, Error> {
-    let mut client = postgres::Client::connect(dsn, postgres::NoTls)
+pub fn connect(config: postgres::Config) -> Result<Client, Error> {
+    let mut client = config
+        .connect(postgres::NoTls)
         .map_err(|e| Error::runtime(format!("cannot connect to the bus: {e}")))?;
     client
-        .batch_execute(BOOTSTRAP)
+        .batch_execute(&format!("{BOOTSTRAP}\n{AUTHORIZATION}"))
         .map_err(|e| Error::runtime(format!("cannot bootstrap the bus schema: {}", pg(e))))?;
 
     let created_by = format!("msgq {}", crate::version());

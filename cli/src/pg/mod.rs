@@ -31,93 +31,35 @@ const PRUNE_BATCH_DEFAULT: usize = 500;
 pub struct PgStore {
     client: Mutex<Client>,
     /// Kept so the wake source can open its own connection: LISTEN needs a connection that is idle.
-    dsn: String,
+    config: postgres::Config,
+    /// The credential this bus presents, if the deployment names one.
+    credential: Option<String>,
 }
 
 impl PgStore {
     /// Connect and bootstrap the bus's own tables.
-    pub fn connect(dsn: &str) -> Result<Self, Error> {
+    ///
+    /// The location is either a URI or libpq keyword settings; `PI_MSGQ_PG*` variables win over
+    /// whatever it said, so a URI can name the server while the secret stays in the environment.
+    pub fn connect(dsn: &str, credential: Option<String>) -> Result<Self, Error> {
+        let mut config: postgres::Config = dsn
+            .parse()
+            .map_err(|e| Error::usage(format!("unusable bus connection settings: {e}")))?;
+        crate::config::apply_pg_env(&mut config)?;
         Ok(PgStore {
-            client: Mutex::new(schema::connect(dsn)?),
-            dsn: dsn.to_string(),
+            client: Mutex::new(schema::connect(config.clone())?),
+            config,
+            credential,
         })
     }
 
-    /// The connection, locked for the length of one call.
-    fn conn(&self) -> Result<MutexGuard<'_, Client>, Error> {
-        self.client
-            .lock()
-            .map_err(|_| Error::runtime("the shared bus connection was poisoned"))
-    }
-}
-
-impl Bus for PgStore {
-    fn engine(&self) -> &'static str {
-        "shared"
-    }
-
-    fn ensure_address(&self, topic: &str) -> Result<(), Error> {
-        let name = queue_name(topic);
-        let mut client = self.conn()?;
-        let exists: Option<String> = client
-            .query_opt(
-                "SELECT queue_name FROM msgq.address WHERE address = $1",
-                &[&topic],
-            )
-            .map_err(pg)?
-            .map(|row| row.get(0));
-        if exists.is_some() {
-            return Ok(());
-        }
-        let created: bool = client
-            .query_one(
-                "SELECT to_regclass($1) IS NOT NULL",
-                &[&format!("pgmq.q_{name}")],
-            )
+    /// Write a record with no identity: the posture of a bus that has none registered.
+    fn publish_direct(client: &mut Client, to: &str, payload: &str) -> Result<i64, Error> {
+        let name: String = client
+            .query_one("SELECT msgq.ensure_queue($1)", &[&to])
             .map_err(pg)?
             .get(0);
-        if !created {
-            // Creation is three statements, and the engine's notification trigger is not created
-            // under the engine's own lock, so two first publishers would race it. One transaction
-            // holding an advisory lock of our own makes creation idempotent end to end.
-            let mut tx = client.transaction().map_err(pg)?;
-            tx.batch_execute(&format!(
-                "SELECT pg_advisory_xact_lock(hashtext('msgq.create:{}'))",
-                escaped(&name)
-            ))
-            .map_err(pg)?;
-            tx.batch_execute(&format!("SELECT pgmq.create('{}')", escaped(&name)))
-                .map_err(pg)?;
-            tx.batch_execute(&format!(
-                "CREATE INDEX IF NOT EXISTS {} ON pgmq.{} (enqueued_at)",
-                quote_ident(&format!("q_{name}_enq_idx")),
-                quote_ident(&format!("q_{name}"))
-            ))
-            .map_err(pg)?;
-            // Throttled per queue by the engine: a burst of publishes wakes a follower once.
-            tx.batch_execute(&format!(
-                "SELECT pgmq.enable_notify_insert('{}', 250)",
-                escaped(&name)
-            ))
-            .map_err(pg)?;
-            tx.commit().map_err(pg)?;
-        }
-        client
-            .execute(
-                "INSERT INTO msgq.address (address, queue_name) VALUES ($1, $2)
-                 ON CONFLICT (address) DO NOTHING",
-                &[&topic, &name.as_str()],
-            )
-            .map_err(pg)?;
-        Ok(())
-    }
-
-    fn publish(&self, to: &str, record: &Value) -> Result<i64, Error> {
-        self.ensure_address(to)?;
-        let name = queue_name(to);
-        let mut client = self.conn()?;
         let headers = serde_json::json!({ "msgq": { "address": to } });
-        let payload = serde_json::to_string(record).map_err(|e| Error::runtime(e.to_string()))?;
         let row = client
             .query_one(
                 &format!(
@@ -136,6 +78,75 @@ impl Bus for PgStore {
             )
             .map_err(pg)?;
         Ok(offset)
+    }
+
+    /// The connection, locked for the length of one call.
+    fn conn(&self) -> Result<MutexGuard<'_, Client>, Error> {
+        self.client
+            .lock()
+            .map_err(|_| Error::runtime("the shared bus connection was poisoned"))
+    }
+}
+
+impl Bus for PgStore {
+    fn engine(&self) -> &'static str {
+        "shared"
+    }
+
+    fn ensure_address(&self, topic: &str) -> Result<(), Error> {
+        let mut client = self.conn()?;
+        client
+            .execute("SELECT msgq.ensure_queue($1)", &[&topic])
+            .map_err(pg)?;
+        Ok(())
+    }
+
+    fn publish(&self, to: &str, record: &Value) -> Result<i64, Error> {
+        let payload = serde_json::to_string(record).map_err(|e| Error::runtime(e.to_string()))?;
+        let mut client = self.conn()?;
+        // A bus with identities enforces them. A bus with none cannot authorize anything, so it
+        // writes unauthenticated and says so in `db info` rather than pretending otherwise.
+        let registered = scalar_i64(&mut client, "SELECT COUNT(*) FROM msgq.identity", &[])?;
+        match (&self.credential, registered) {
+            (Some(token), _) => {
+                let row = client
+                    .query_one(
+                        "SELECT msgq.publish_as($1, $2, $3::text::jsonb)",
+                        &[token, &to.to_string(), &payload],
+                    )
+                    .map_err(pg)?;
+                Ok(row.get(0))
+            }
+            (None, 0) => PgStore::publish_direct(&mut client, to, &payload),
+            (None, _) => Err(Error::runtime(
+                "msgq: no credential was presented; set MSGQ_TOKEN or write ~/.config/msgq/token",
+            )),
+        }
+    }
+
+    fn credential(&self) -> Result<String, Error> {
+        let mut client = self.conn()?;
+        let registered = scalar_i64(&mut client, "SELECT COUNT(*) FROM msgq.identity", &[])?;
+        match &self.credential {
+            None if registered == 0 => {
+                Ok("none (no identity is registered, so this bus cannot authorize)".to_string())
+            }
+            None => Ok(format!(
+                "missing (this bus has {registered} identities and refuses writes without one)"
+            )),
+            Some(token) => {
+                let row = client
+                    .query_opt(
+                        "SELECT name FROM msgq.identity WHERE digest = msgq.token_digest($1)",
+                        &[token],
+                    )
+                    .map_err(pg)?;
+                match row {
+                    Some(row) => Ok(format!("accepted as {}", row.get::<_, String>(0))),
+                    None => Ok("rejected (this bus does not know the credential)".to_string()),
+                }
+            }
+        }
     }
 
     fn read_since(&self, topic: &str, offset: i64, limit: i64) -> Result<Vec<StoredRecord>, Error> {
@@ -332,7 +343,7 @@ impl Bus for PgStore {
         // Polling is the guaranteed path. A listening connection is an optimisation: a pooler in
         // transaction mode cannot keep a LISTEN alive, and a bus that depends on an optimisation
         // stalls whenever the deployment changes shape.
-        wake::source(&self.dsn, topics)
+        wake::source(self.config.clone(), topics)
     }
 
     fn try_lock(

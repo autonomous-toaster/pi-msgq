@@ -1562,3 +1562,61 @@ fn maintenance_bounds_a_bus_with_live_and_dead_participants() {
     let roster = run(&db, &["sessions", "--json"]).stdout;
     assert!(roster.contains(&format!("session/{live}")), "{roster}");
 }
+
+#[test]
+fn each_scope_reads_only_its_own_roster() {
+    let db = temp_db();
+    // Two teams on one bus: presence goes to the address of the scope, so the separation is the
+    // address grammar and not a filter either side is trusted to apply.
+    for (scope, participant, address) in [
+        ("red", "01red", "session/red-worker"),
+        ("blue", "01blue", "session/blue-worker"),
+    ] {
+        let record = serde_json::json!({
+            "v": 1, "type": "event", "from": address,
+            "to": format!("group/{scope}/presence"),
+            "event": {"kind": "presence", "state": "idle", "ttl": 30, "participant": participant},
+        });
+        let out = run_env(
+            &db,
+            &[
+                "publish",
+                &format!("group/{scope}/presence"),
+                "--json",
+                &record.to_string(),
+            ],
+            &[("MSGQ_SCOPE", scope)],
+        );
+        assert_eq!(out.code, 0, "{}", out.stderr);
+    }
+
+    let red = run_env(&db, &["sessions", "--json"], &[("MSGQ_SCOPE", "red")]);
+    assert_eq!(red.code, 0, "{}", red.stderr);
+    assert!(red.stdout.contains("session/red-worker"), "{}", red.stdout);
+    assert!(
+        !red.stdout.contains("session/blue-worker"),
+        "another scope's participant leaked into the roster: {}",
+        red.stdout
+    );
+
+    let blue = run_env(&db, &["sessions", "--json"], &[("MSGQ_SCOPE", "blue")]);
+    assert!(
+        blue.stdout.contains("session/blue-worker"),
+        "{}",
+        blue.stdout
+    );
+    assert!(
+        !blue.stdout.contains("session/red-worker"),
+        "{}",
+        blue.stdout
+    );
+
+    // And a bus with no scope still sees the global address, which neither scope wrote to.
+    let unscoped = run(&db, &["sessions", "--json"]);
+    assert_eq!(unscoped.code, 0, "{}", unscoped.stderr);
+    assert!(
+        !unscoped.stdout.contains("red-worker") && !unscoped.stdout.contains("blue-worker"),
+        "the global roster is its own scope: {}",
+        unscoped.stdout
+    );
+}

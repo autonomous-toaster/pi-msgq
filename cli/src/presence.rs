@@ -5,8 +5,28 @@
 
 use serde_json::Value;
 
-/// The address every participant publishes presence to, and the roster reads.
+/// The address every participant publishes presence to, and the roster reads, when no scope is
+/// configured.
 pub const PRESENCE_ADDRESS: &str = "group/presence";
+
+/// The presence address for a scope.
+///
+/// Presence is per scope because the roster is: a team reads its own participants, and a session
+/// that joined one team does not appear in another team's list. A scope is part of the address, so
+/// the separation is the address grammar rather than a filter a client is trusted to apply.
+pub fn address(scope: Option<&str>) -> String {
+    match scope.map(str::trim) {
+        None | Some("") => PRESENCE_ADDRESS.to_string(),
+        Some(scope) => {
+            let candidate = format!(
+                "group/{}/presence",
+                scope.trim().trim_matches('/').to_lowercase()
+            );
+            crate::address::canonicalize(&candidate)
+                .unwrap_or_else(|_| PRESENCE_ADDRESS.to_string())
+        }
+    }
+}
 
 /// How many of the newest presence records the roster reads.
 ///

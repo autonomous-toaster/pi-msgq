@@ -7,6 +7,133 @@ use crate::error::Error;
 /// Environment variable that overrides the default database path.
 pub const ENV_VAR: &str = "MSGQ_DB";
 
+/// The credential for a shared bus: the environment first, then the identity file.
+pub const TOKEN_ENV: &str = "MSGQ_TOKEN";
+
+/// The scope this session belongs to. Presence and the roster are per scope, so two teams on one
+/// bus do not see each other's participants.
+pub const SCOPE_ENV: &str = "MSGQ_SCOPE";
+
+/// The configured scope, if any.
+pub fn scope() -> Option<String> {
+    let scope = std::env::var(SCOPE_ENV).ok()?;
+    let scope = scope.trim().to_string();
+    if scope.is_empty() { None } else { Some(scope) }
+}
+
+/// Where a credential may be kept instead of in the environment. A deployment that can avoid
+/// leaving a secret in the process table does so.
+pub fn identity_file() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".config/msgq/token"))
+}
+
+/// The credential to present, if one is configured.
+pub fn credential() -> Option<String> {
+    if let Ok(token) = std::env::var(TOKEN_ENV) {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+    let path = identity_file()?;
+    let token = std::fs::read_to_string(path).ok()?;
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+/// The PostgreSQL settings this bus reads, in libpq's spelling under a prefix of our own.
+///
+/// The prefix is deliberate: a shell's global `PG*` settings belong to whatever else the operator
+/// runs, and a message bus that silently connects to the wrong database is worse than one that
+/// asks. Each entry maps a `PI_MSGQ_PG*` variable to the libpq keyword it stands for.
+pub const PG_ENV: [(&str, &str); 6] = [
+    ("PI_MSGQ_PGHOST", "host"),
+    ("PI_MSGQ_PGPORT", "port"),
+    ("PI_MSGQ_PGUSER", "user"),
+    ("PI_MSGQ_PGPASSWORD", "password"),
+    ("PI_MSGQ_PGDATABASE", "dbname"),
+    ("PI_MSGQ_PGSSLMODE", "sslmode"),
+];
+
+/// The `PI_MSGQ_PG*` settings that are present, in libpq keyword order.
+pub fn pg_settings() -> Vec<(&'static str, String)> {
+    PG_ENV
+        .iter()
+        .filter_map(|(variable, keyword)| {
+            let value = std::env::var(variable).ok()?;
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some((*keyword, value.to_string()))
+            }
+        })
+        .collect()
+}
+
+/// Whether the environment names a server at all. A password alone does not select the shared
+/// engine; a host or a database does.
+pub fn pg_env_names_a_server() -> bool {
+    pg_settings()
+        .iter()
+        .any(|(keyword, _)| matches!(*keyword, "host" | "dbname"))
+}
+
+/// Apply the `PI_MSGQ_PG*` settings to a connection configuration.
+///
+/// They win over anything the connection string said, so a URI can name the server while the
+/// secret stays in the environment and out of the URI.
+pub fn apply_pg_env(config: &mut postgres::Config) -> Result<(), Error> {
+    apply_pg_settings(config, pg_settings())
+}
+
+/// The same mapping, applied to settings a caller already has. Separated so it can be tested
+/// without touching the process environment.
+pub fn apply_pg_settings(
+    config: &mut postgres::Config,
+    settings: Vec<(&'static str, String)>,
+) -> Result<(), Error> {
+    // The variables supply what the location does not, which is how libpq treats PG*: a host named
+    // in the connection string is not overwritten by PGHOST, but a missing password is filled in.
+    for (keyword, value) in settings {
+        match keyword {
+            "host" if config.get_hosts().is_empty() => {
+                config.host(&value);
+            }
+            "port" if config.get_ports().is_empty() => {
+                let port: u16 = value.parse().map_err(|_| {
+                    Error::usage(format!("PI_MSGQ_PGPORT is not a port number: {value}"))
+                })?;
+                config.port(port);
+            }
+            "user" if config.get_user().is_none() => {
+                config.user(&value);
+            }
+            "password" if config.get_password().is_none() => {
+                config.password(&value);
+            }
+            "dbname" if config.get_dbname().is_none() => {
+                config.dbname(&value);
+            }
+            // Accepted and reported rather than silently ignored: this build connects without TLS,
+            // so asking for it would be a promise the bus cannot keep.
+            "sslmode" if !matches!(value.as_str(), "disable" | "allow" | "prefer") => {
+                return Err(Error::usage(format!(
+                    "PI_MSGQ_PGSSLMODE={value} needs a TLS build of the bus; this build connects without TLS"
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Environment variable that overrides the retention window.
 pub const RETENTION_ENV: &str = "MSGQ_RETENTION";
 
@@ -82,13 +209,18 @@ pub enum Target {
 /// is a usage error rather than a filename.
 pub fn resolve_target(cli_db: Option<&PathBuf>) -> Result<Target, Error> {
     let raw = match cli_db {
-        Some(path) => path.display().to_string(),
+        Some(path) => Some(path.display().to_string()),
         None => match std::env::var(ENV_VAR) {
-            Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
-            _ => default_db_path().display().to_string(),
+            Ok(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+            _ => None,
         },
     };
-    target_from(&raw)
+    match raw {
+        Some(raw) => target_from(&raw),
+        // Nothing named a location, but the environment names a server: that is a choice too.
+        None if pg_env_names_a_server() => Ok(Target::Shared(String::new())),
+        None => Ok(Target::Local(default_db_path())),
+    }
 }
 
 /// Classify one location: a connection string or a path.
@@ -128,6 +260,35 @@ impl Target {
     pub fn display(&self) -> String {
         match self {
             Target::Local(path) => crate::config::display(path),
+            Target::Shared(dsn) if dsn.trim().is_empty() => {
+                // Named by the environment: report the parts, never the secret.
+                let host = std::env::var("PI_MSGQ_PGHOST").unwrap_or_else(|_| "localhost".into());
+                let database = std::env::var("PI_MSGQ_PGDATABASE").unwrap_or_default();
+                if database.is_empty() {
+                    format!("postgres://{host}")
+                } else {
+                    format!("postgres://{host}/{database}")
+                }
+            }
+            Target::Shared(dsn) if !dsn.contains("://") => {
+                // A libpq keyword string: report host and database, and nothing else.
+                let part = |keyword: &str| {
+                    dsn.split_whitespace()
+                        .find_map(|pair| pair.strip_prefix(&format!("{keyword}=")))
+                        .map(str::to_string)
+                };
+                match part("dbname") {
+                    Some(database) => format!(
+                        "postgres://{}/{}",
+                        part("host").unwrap_or_else(|| "localhost".to_string()),
+                        database
+                    ),
+                    None => format!(
+                        "postgres://{}",
+                        part("host").unwrap_or_else(|| "localhost".to_string())
+                    ),
+                }
+            }
             Target::Shared(dsn) => {
                 let after_scheme = dsn.split_once("://").map(|(_, rest)| rest).unwrap_or(dsn);
                 let authority = after_scheme.split(['/', '?']).next().unwrap_or("");
@@ -230,5 +391,104 @@ mod tests {
 
         unsafe { std::env::remove_var(RETENTION_ENV) };
         assert_eq!(resolve_retention(None).unwrap(), DEFAULT_RETENTION_S);
+    }
+}
+
+#[cfg(test)]
+mod pg_env_tests {
+    use super::*;
+
+    fn settings(pairs: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| (*key, (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_pg_variables_fill_what_the_location_does_not() {
+        let mut config: postgres::Config = "postgres://someone@db.example:6000/other"
+            .parse()
+            .expect("a URI");
+        apply_pg_settings(
+            &mut config,
+            settings(&[
+                ("host", "127.0.0.1"),
+                ("port", "55433"),
+                ("user", "msgq_runtime"),
+                ("password", "secret"),
+                ("dbname", "msgq"),
+            ]),
+        )
+        .expect("the settings apply");
+        assert_eq!(
+            config.get_hosts().len(),
+            1,
+            "a host in the location is not overwritten"
+        );
+        assert_eq!(config.get_ports(), &[6000]);
+        assert_eq!(config.get_user(), Some("someone"));
+        assert_eq!(config.get_dbname(), Some("other"));
+        assert_eq!(
+            config.get_password(),
+            Some(b"secret".as_slice()),
+            "a missing secret is supplied"
+        );
+    }
+
+    #[test]
+    fn the_pg_variables_are_enough_on_their_own() {
+        let mut config = postgres::Config::new();
+        apply_pg_settings(
+            &mut config,
+            settings(&[
+                ("host", "127.0.0.1"),
+                ("port", "55433"),
+                ("user", "msgq"),
+                ("dbname", "msgq"),
+            ]),
+        )
+        .expect("the settings apply");
+        assert_eq!(config.get_hosts().len(), 1);
+        assert_eq!(config.get_ports(), &[55433]);
+        assert_eq!(config.get_user(), Some("msgq"));
+        assert_eq!(config.get_dbname(), Some("msgq"));
+    }
+
+    #[test]
+    fn a_bad_port_is_a_usage_error_rather_than_a_default() {
+        let mut config = postgres::Config::new();
+        let failure = apply_pg_settings(&mut config, settings(&[("port", "not-a-port")]))
+            .expect_err("a malformed port cannot be guessed");
+        assert!(failure.to_string().contains("PI_MSGQ_PGPORT"));
+    }
+
+    #[test]
+    fn asking_for_tls_is_refused_rather_than_ignored() {
+        let mut config = postgres::Config::new();
+        let failure = apply_pg_settings(&mut config, settings(&[("sslmode", "require")]))
+            .expect_err("this build cannot honour require");
+        assert!(failure.to_string().contains("without TLS"));
+
+        // The permissive modes are accepted: they describe what this build already does.
+        for mode in ["disable", "allow", "prefer"] {
+            apply_pg_settings(&mut config, settings(&[("sslmode", mode)]))
+                .expect("a permissive mode is honest");
+        }
+    }
+
+    #[test]
+    fn a_secret_never_reaches_the_displayed_location() {
+        let target = Target::Shared("host=db.example dbname=msgq password=hunter2".to_string());
+        let shown = target.display();
+        assert_eq!(shown, "postgres://db.example/msgq");
+        assert!(!shown.contains("hunter2"), "{shown}");
+
+        let uri = Target::Shared("postgres://bus:hunter2@db.example/msgq".to_string());
+        assert_eq!(uri.display(), "postgres://db.example/msgq");
+        assert!(!uri.display().contains("hunter2"));
+
+        let by_env = Target::Shared(String::new());
+        assert!(by_env.display().starts_with("postgres://"));
     }
 }

@@ -40,11 +40,11 @@
 
 ## 5. Authorization on the shared engine
 
-- [ ] 5.1 Add the identity table and credential verification with `gen_random_bytes(32)` and `digest(token,'sha256')`. Read the credential from the identity file or `MSGQ_TOKEN`. Place no credential inside a record. Verify a test that publishes and then asserts no field of the stored record contains the token or its digest.
-- [ ] 5.2 Add the authorizing publish function (`SECURITY DEFINER`, `SET search_path = pg_catalog, pg_temp`) that resolves the credential, checks the address against scopes, stamps `from`, creates the queue when absent, and sends the record. Verify in scope, out of scope, expired, and missing-credential cases each produce the specified outcome and leave the bus unchanged when refused.
-- [ ] 5.3 Revoke direct write access (`CREATE` on the engine schema, `INSERT` on queue tables) from the runtime role so the function is the only write path. Verify a direct insert attempt as the runtime role is refused.
-- [ ] 5.4 Make the CLI report a refused or missing credential as an error with no unauthenticated retry, and report credential state in `db info`. Verify `cli/tests/cli.rs` covers refusal (non-zero exit, nothing written) and that no fallback path exists.
-- [ ] 5.5 Scope presence to a per-scope address in both the CLI roster and the extension's registration. Verify a test where two scopes publish presence and each roster lists only its own.
+- [x] 5.1 Add the identity table and credential verification with `gen_random_bytes(32)` and `digest(token,'sha256')`. Read the credential from the identity file or `MSGQ_TOKEN`. Place no credential inside a record. Verify a test that publishes and then asserts no field of the stored record contains the token or its digest.
+- [x] 5.2 Add the authorizing publish function (`SECURITY DEFINER`, `SET search_path = pg_catalog, pg_temp`) that resolves the credential, checks the address against scopes, stamps `from`, creates the queue when absent, and sends the record. Verify in scope, out of scope, expired, and missing-credential cases each produce the specified outcome and leave the bus unchanged when refused.
+- [x] 5.3 Revoke direct write access (`CREATE` on the engine schema, `INSERT` on queue tables) from the runtime role so the function is the only write path. Verify a direct insert attempt as the runtime role is refused.
+- [x] 5.4 Make the CLI report a refused or missing credential as an error with no unauthenticated retry, and report credential state in `db info`. Verify `cli/tests/cli.rs` covers refusal (non-zero exit, nothing written) and that no fallback path exists.
+- [x] 5.5 Scope presence to a per-scope address in both the CLI roster and the extension's registration. Verify a test where two scopes publish presence and each roster lists only its own.
 
 ## 6. Extension on the shared engine
 

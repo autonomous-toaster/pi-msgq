@@ -78,6 +78,10 @@ pub trait Bus: Send {
     fn retention_watermark(&self, topic: &str) -> Result<Option<(i64, i64)>, Error>;
     fn retention_dropped(&self, topic: &str, cursor: i64) -> Result<i64, Error>;
     fn record_at(&self, offset: i64) -> Result<Option<(String, String)>, Error>;
+    /// What this bus will accept as proof of who is writing, for reporting.
+    fn credential(&self) -> Result<String, Error> {
+        Ok("none (the local bus trusts file permissions; the sender is a claim)".to_string())
+    }
 }
 
 /// One stream's size, and how old its oldest record is.
@@ -755,6 +759,14 @@ impl Store {
     ///
     /// Returns the store and whether the location was created here.
     pub fn open(target: &crate::config::Target) -> Result<(Self, bool), Error> {
+        Self::open_with(target, crate::config::credential())
+    }
+
+    /// Open the bus, presenting the given credential if the engine asks for one.
+    pub fn open_with(
+        target: &crate::config::Target,
+        credential: Option<String>,
+    ) -> Result<(Self, bool), Error> {
         match target {
             crate::config::Target::Local(path) => {
                 let (local, created) = LocalStore::open(path)?;
@@ -766,7 +778,7 @@ impl Store {
                 ))
             }
             crate::config::Target::Shared(dsn) => {
-                let pg = crate::pg::PgStore::connect(dsn)?;
+                let pg = crate::pg::PgStore::connect(dsn, credential)?;
                 Ok((
                     Store {
                         inner: Box::new(pg),
@@ -890,6 +902,9 @@ impl Bus for Store {
     }
     fn record_at(&self, offset: i64) -> Result<Option<(String, String)>, Error> {
         self.inner.record_at(offset)
+    }
+    fn credential(&self) -> Result<String, Error> {
+        self.inner.credential()
     }
 }
 

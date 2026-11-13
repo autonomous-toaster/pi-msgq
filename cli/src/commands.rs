@@ -732,9 +732,10 @@ pub fn consumers(
 
 /// The presence tail, oldest first: what the roster and the collection commands both read.
 fn presence_tail(store: &dyn Bus) -> Result<Vec<(i64, presence::PresenceRecord)>, Error> {
-    let head = store.head(presence::PRESENCE_ADDRESS)?;
+    let presence_address = presence::address(crate::config::scope().as_deref());
+    let head = store.head(&presence_address)?;
     let start = (head - presence::SCAN_RECORDS).max(0);
-    let events = store.read_since(presence::PRESENCE_ADDRESS, start, presence::SCAN_RECORDS)?;
+    let events = store.read_since(&presence_address, start, presence::SCAN_RECORDS)?;
 
     let mut out = Vec::new();
     for event in events {
@@ -863,7 +864,8 @@ pub fn prune(db: &crate::config::Target, args: PruneArgs) -> Result<(), Error> {
 
     // Presence is a window, not a history: the newest record of every participant is what the
     // roster reads, so it stays even when it is older than the window.
-    let presence_keep = store.newest_presence_offsets(presence::PRESENCE_ADDRESS)?;
+    let presence_address = presence::address(crate::config::scope().as_deref());
+    let presence_keep = store.newest_presence_offsets(&presence_address)?;
 
     // A cursor pins nothing. Keeping a record because one consumer has not passed it would let a
     // single offline session hold history forever, which is the opposite of a short window; the
@@ -879,7 +881,7 @@ pub fn prune(db: &crate::config::Target, args: PruneArgs) -> Result<(), Error> {
         let Some(end) = store.prefix_end(&stream.topic, threshold)? else {
             continue;
         };
-        let keep: &[i64] = if stream.topic == presence::PRESENCE_ADDRESS {
+        let keep: &[i64] = if stream.topic == presence_address {
             &presence_keep
         } else {
             &[]
@@ -1090,11 +1092,11 @@ pub fn db_info(db: &crate::config::Target) -> Result<(), Error> {
         "retention_s:      {}",
         resolve_retention(None).unwrap_or(crate::config::DEFAULT_RETENTION_S)
     );
-    println!("credential:       none (the local bus trusts file permissions)");
+    println!("credential:       {}", store.credential()?);
 
     let presence_age = streams
         .iter()
-        .find(|stream| stream.topic == presence::PRESENCE_ADDRESS)
+        .find(|stream| stream.topic == presence::address(crate::config::scope().as_deref()))
         .map(|stream| (now - stream.oldest_at).max(0));
     match presence_age {
         Some(age) => println!("presence_age_s:   {age}"),

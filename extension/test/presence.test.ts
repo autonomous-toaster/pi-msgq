@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { HonkerBus, openRaw, type Bus } from "../src/consumer.ts";
-import { PRESENCE_ADDRESS, Presence, PRESENCE_TTL_S } from "../src/presence.ts";
+import { PRESENCE_ADDRESS, Presence, PRESENCE_TTL_S, presenceAddress } from "../src/presence.ts";
 import type { MsgqRecord } from "../src/record.ts";
 
 const INTERVAL = 50;
@@ -235,4 +235,30 @@ test("a renewal that fails leaves the session running and retries later", () => 
 	// The next renewal is attempted, not skipped.
 	assert.equal(presence.renew(), false);
 	assert.equal(writes, 3);
+});
+
+test("presence is per scope, because the roster is", () => {
+	assert.equal(presenceAddress(), "group/presence");
+	assert.equal(presenceAddress(""), "group/presence");
+	assert.equal(presenceAddress("red"), "group/red/presence");
+	assert.equal(presenceAddress(" RED/ "), "group/red/presence", "the address grammar decides");
+});
+
+test("a scoped session publishes to its own scope address", () => {
+	const db = tempDb();
+	const bus = new HonkerBus(db);
+	const presence = new Presence(bus, {
+		address: "session/red-worker",
+		participant: "01red",
+		state: "idle",
+		scope: "red",
+	});
+	assert.equal(presence.start(), true);
+	presence.stop();
+
+	const native = openRaw(db) as any;
+	const topics = native.query("SELECT DISTINCT topic FROM _honker_stream ORDER BY topic", []);
+	native.close();
+	const rows = topics.map((row: { topic: string }) => row.topic);
+	assert.deepEqual(rows, ["group/red/presence"]);
 });
