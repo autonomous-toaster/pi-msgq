@@ -17,7 +17,7 @@
 - [x] 2.5 Extend `db info` with backend kind, retention window, and credential state (absent on the local engine). Verify a test asserting all three fields appear.
 - [x] 2.6 Update `README.md` (retention, the `await` addressing change). Verify every documented command in the changed sections runs as written against a local bus.
 - [x] 2.7 Address `await` by record id, and refuse a bare offset with no `--on`. Verify `cli/tests/cli.rs` covers the id form, the offset-plus-address form, both given, and an id naming no record.
-- [ ] 2.8 Update `DEVELOPMENT.md` with the two-engine story. Blocked on group 3, which introduces the second engine.
+- [x] 2.8 Update `DEVELOPMENT.md` with the two-engine story.
 
 ## 3. Store boundary
 
@@ -28,15 +28,15 @@
 
 ## 4. Shared engine: storage and delivery
 
-- [ ] 4.1 Add the Postgres store skeleton. Connect to the engine. Bootstrap `msgq.address` and `msgq.cursor`. Record `protocol_version`, `created_by` and the pgmq version. Verify against a local Postgres that a fresh connection creates only the bus's own tables and touches no `pgmq` table.
-- [ ] 4.2 Implement address-to-queue naming (slug plus digest, under the engine's length limit) with the registry and the `headers` address stamp. Verify round-trip tests for a long `cwd/` address, a case-differing pair, and two addresses whose slugs collide.
-- [ ] 4.3 Implement `ensure_address` and `publish` with lazy, idempotent creation outside the record transaction. Verify that two concurrent first publishes both succeed, that a read of an unpublished address creates nothing, and that the second publish costs no DDL.
-- [ ] 4.4 Implement `read_since`, `head` and `tail` as read-only queries over the engine's queue tables. Confirm that nothing mutates on read. Verify by comparing a per-record counter and a row checksum before and after two identical reads.
-- [ ] 4.5 Implement cursors on `msgq.cursor` with monotonic semantics. Verify a cursor write with a lower value is ignored and that a read never advances one.
-- [ ] 4.6 Implement `wake` with the engine's insert notification, throttled per queue, falling back to polling when the connection cannot listen. Verify a latency test (wake under a second) and a forced-fallback test (polling still delivers).
-- [ ] 4.7 Implement `prune_before` for the shared engine. Create the `enqueued_at` index on each queue. Delete in batches. Keep the newest presence record per participant. Verify on a queue with a large old prefix that the total is reported and the presence pin survives.
-- [ ] 4.8 Implement `list_addresses` and `list_consumers` from the engine's queue registry plus the bus's own registry and cursor table, including addresses whose records have aged out. Verify `topics` shows a zero-count address and `consumers` shows lag and dropped counts.
-- [ ] 4.9 Run the behavioural fixture family against the shared engine. Make the runner fail rather than skip. Verify both engines produce identical outcomes for every fixture.
+- [x] 4.1 Add the Postgres store skeleton. Connect to the engine. Bootstrap `msgq.address` and `msgq.cursor`. Record `protocol_version`, `created_by` and the pgmq version. Verify against a local Postgres that a fresh connection creates only the bus's own tables and touches no `pgmq` table.
+- [x] 4.2 Implement address-to-queue naming (slug plus digest, under the engine's length limit) with the registry and the `headers` address stamp. Verify round-trip tests for a long `cwd/` address, a case-differing pair, and two addresses whose slugs collide.
+- [x] 4.3 Implement `ensure_address` and `publish` with lazy, idempotent creation outside the record transaction. Verify that two concurrent first publishes both succeed, that a read of an unpublished address creates nothing, and that the second publish costs no DDL.
+- [x] 4.4 Implement `read_since`, `head` and `tail` as read-only queries over the engine's queue tables. Confirm that nothing mutates on read. Verify by comparing a per-record counter and a row checksum before and after two identical reads.
+- [x] 4.5 Implement cursors on `msgq.cursor` with monotonic semantics. Verify a cursor write with a lower value is ignored and that a read never advances one.
+- [x] 4.6 Implement `wake` with the engine's insert notification, throttled per queue, falling back to polling when the connection cannot listen. Verify a latency test (wake under a second) and a forced-fallback test (polling still delivers).
+- [x] 4.7 Implement `prune_before` for the shared engine. Create the `enqueued_at` index on each queue. Delete in batches. Keep the newest presence record per participant. Verify on a queue with a large old prefix that the total is reported and the presence pin survives.
+- [x] 4.8 Implement `list_addresses` and `list_consumers` from the engine's queue registry plus the bus's own registry and cursor table, including addresses whose records have aged out. Verify `topics` shows a zero-count address and `consumers` shows lag and dropped counts.
+- [x] 4.9 Run the behavioural fixture family against the shared engine. Make the runner fail rather than skip. Verify both engines produce identical outcomes for every fixture.
 
 ## 5. Authorization on the shared engine
 

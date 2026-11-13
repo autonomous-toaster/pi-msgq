@@ -170,6 +170,15 @@ of records removed for that topic up to `cut_offset`. Three consequences:
 *Rejected.* Reporting `oldest_retained - cursor`: offsets are sparse, so the number would look exact
 and be wrong.
 
+### 12. A stream's head is a watermark, not a maximum
+
+pgmq deletes from the front, but a time window can also remove the only record in a queue, which
+would make the maximum msg_id fall to zero. A head that moves backwards breaks every consumer of
+it: a cursor comparison, a read from the end, a lag figure. The registry therefore keeps
+msgq.address.newest_offset, advanced on each publish with GREATEST, and every reading of a head
+takes the larger of that and what survives. The local engine needs no equivalent because its
+stream counter outlives its rows.
+
 ## Risks / Trade-offs
 
 - **[DDL on the publish path]** First publish to an address creates two tables. → Idempotent and

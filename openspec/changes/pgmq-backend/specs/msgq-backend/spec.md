@@ -41,9 +41,9 @@ T2.8 ALWAYS, the documentation SHALL name the two engines and the location form 
 - **WHEN** a deployment starts
 - **THEN** exactly one engine SHALL serve the deployment
 
-#### Scenario: No message is copied
+#### Scenario: No message crosses deployments
 - **WHEN** two deployments run on different engines
-- **THEN** the bus SHALL copy no message between the deployments
+- **THEN** the bus SHALL confine every record to the deployment that wrote the record
 
 ### Requirement: One address maps to one stream
 
