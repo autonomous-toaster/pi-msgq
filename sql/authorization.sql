@@ -384,6 +384,36 @@ BEGIN
 END;
 $$;
 
+-- A session may stay silent for longer than its lease and then continue. Renewal extends the same row:
+-- it never re-mints, because a new digest would log out every sibling session sharing the credential.
+CREATE OR REPLACE FUNCTION msgq.renew_credential(p_token TEXT, p_lease INTERVAL DEFAULT '1 hour')
+RETURNS TIMESTAMPTZ
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    presented BYTEA := msgq.token_digest(p_token);
+    extended TIMESTAMPTZ;
+BEGIN
+    IF p_token IS NULL OR btrim(p_token) = '' THEN
+        RAISE EXCEPTION 'msgq: no credential was presented' USING ERRCODE = '28000';
+    END IF;
+
+    -- Deliberately not identity_of: a lease that has already elapsed is exactly the case being
+    -- renewed, and refusing here would make a resumed session unrecoverable.
+    UPDATE msgq.identity i
+       SET expires_at = now() + coalesce(p_lease, '1 hour')
+     WHERE i.digest = presented
+    RETURNING i.expires_at INTO extended;
+
+    IF extended IS NULL THEN
+        RAISE EXCEPTION 'msgq: the credential is not recognised' USING ERRCODE = '28P01';
+    END IF;
+    RETURN extended;
+END;
+$$;
+
 -- How much a particular consumer has lost: what was removed after the point it had reached. Exact at a
 -- prune boundary, an over-report inside the last batch, which is the honest direction for a warning.
 CREATE OR REPLACE FUNCTION msgq.dropped(p_token TEXT, p_address TEXT, p_cursor BIGINT)
@@ -579,6 +609,7 @@ BEGIN
         GRANT EXECUTE ON FUNCTION msgq.prune(TEXT, TEXT, BIGINT, BIGINT[], INT) TO msgq_runtime;
         GRANT EXECUTE ON FUNCTION msgq.cursor_reset(TEXT, TEXT, TEXT) TO msgq_runtime;
         GRANT EXECUTE ON FUNCTION msgq.dropped(TEXT, TEXT, BIGINT) TO msgq_runtime;
+        GRANT EXECUTE ON FUNCTION msgq.renew_credential(TEXT, INTERVAL) TO msgq_runtime;
     END IF;
 END;
 $$;

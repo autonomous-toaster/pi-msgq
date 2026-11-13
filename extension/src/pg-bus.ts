@@ -12,6 +12,9 @@ import { readFileSync } from "node:fs";
 import type { Bus, BusEvent, Subscription } from "./consumer.ts";
 
 /** Records fetched per read. */
+/** The lease a session renews for, and half of it is when the next renewal is due. */
+export const DEFAULT_LEASE = "1 hour";
+
 const READ_BATCH = 100;
 
 /** Fallback wait when nothing notifies. */
@@ -293,6 +296,19 @@ export class PgBus implements Bus {
 
 	private async persist(consumer: string, address: string, offset: number): Promise<void> {
 		await this.cursor(address, consumer, offset);
+	}
+
+	/**
+	 * Extend the lease on this session's credential. The digest is unchanged, so sibling sessions
+	 * sharing it stay logged in; a session that stayed silent past its lease recovers here.
+	 */
+	async renew(lease = DEFAULT_LEASE): Promise<string | undefined> {
+		const result = await this.client.query(
+			"SELECT msgq.renew_credential($1, $2::text::interval) AS expiry",
+			[this.token, lease],
+		);
+		const expiry = result.rows[0]?.expiry;
+		return expiry === undefined || expiry === null ? undefined : String(expiry);
 	}
 
 	/** What a consumer has lost to the retention window, for the gap report. */

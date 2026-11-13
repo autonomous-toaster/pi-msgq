@@ -27,7 +27,7 @@
 
 ## 5. Credential lease
 
-- [ ] 5.1 Make the lease renewable. Add `msgq.renew_credential` that extends the same row. Keep the digest on renewal. Accept a renewal once the lease elapsed. Renew at session start. Renew at half the lease. Verify sibling sessions keep working. Verify a resumed session renews.
+- [x] 5.1 Make the lease renewable. Add `msgq.renew_credential` that extends the same row. Keep the digest on renewal. Accept a renewal once the lease elapsed. Renew at session start. Renew at half the lease. Verify sibling sessions keep working. Verify a resumed session renews.
 
 ## 6. The teams door
 

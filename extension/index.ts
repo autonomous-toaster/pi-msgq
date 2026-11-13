@@ -139,7 +139,24 @@ export default function (pi: ExtensionAPI) {
 	let consumer = "";
 	let policy: Policy = "display";
 	/** The key this session seals and opens bodies with, when a passphrase is configured. */
+/** Half of the default one-hour lease, in milliseconds. */
+	const HALF_LEASE_MS = 30 * 60 * 1000;
+	let leaseTimer: ReturnType<typeof setInterval> | undefined;
 	let sealingKey: SealingKey | undefined;
+
+	/** Renew once now, then at half the lease, so the deadline never passes unnoticed. */
+	function renewLease(shared: PgBus): void {
+		const attempt = () => {
+			void shared.renew().catch((error: unknown) => {
+				report(`msgq could not renew its credential: ${String(error)}`, "warning");
+			});
+		};
+		attempt();
+		if (leaseTimer) clearInterval(leaseTimer);
+		leaseTimer = setInterval(attempt, HALF_LEASE_MS);
+		// A timer must not be the reason the process stays alive.
+		leaseTimer.unref?.();
+	}
 	let addresses: string[] = [];
 	let skipped = 0;
 	/** Senders allowed to start a turn under the honour policy. Empty means no allowlist. */
@@ -880,6 +897,9 @@ export default function (pi: ExtensionAPI) {
 		try {
 			if (busPath.includes("://")) {
 				bus = await PgBus.open(busPath, subscriptionAddresses(identity, extraTopics));
+				// A session may stay silent far longer than its lease. Renewing at start and again at
+				// half the lease keeps a resumed session usable without minting a second credential.
+				renewLease(bus);
 			} else {
 				bus = new HonkerBus(busPath);
 			}

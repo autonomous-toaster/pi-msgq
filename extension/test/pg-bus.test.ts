@@ -153,6 +153,25 @@ test("a cursor moves forward and never back", async (t) => {
 	}
 });
 
+test("a renewal extends the lease without minting a second credential", async (t) => {
+	if (!DSN) {
+		t.diagnostic("MSGQ_TEST_DB_URI is unset: the renewal was not exercised");
+		return;
+	}
+	process.env.MSGQ_TOKEN = await credential(DSN);
+	const address = `group/ext-renew-${unique()}`;
+	const bus = await PgBus.open(DSN, [address]);
+	try {
+		const expiry = await bus.renew();
+		assert.ok(expiry !== undefined, "renewal reports the new expiry");
+		// The same credential still works afterwards: renewal extends, it does not replace.
+		const event = await bus.readOneAsync(address, 1);
+		assert.equal(event, undefined, "the same credential reads an empty stream");
+	} finally {
+		await bus.close();
+	}
+});
+
 test("lost records are reported, not hidden", async (t) => {
 	if (!DSN) {
 		t.diagnostic("MSGQ_TEST_DB_URI is unset: the gap report was not exercised");

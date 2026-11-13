@@ -1264,3 +1264,58 @@ fn a_consumer_name_is_deleted_only_where_the_caller_holds_it() {
     assert_eq!(store.delete_consumers(&consumer, None).unwrap(), 1);
     assert_eq!(store.list_consumers(Some(&second)).unwrap().len(), 0);
 }
+
+#[test]
+fn a_silent_session_renews_the_same_credential() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let principal = format!("renewer-{}", unique());
+    let token: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['group'])",
+            &[&principal.as_str()],
+        )
+        .unwrap()
+        .get(0);
+    let digest_of = |client: &mut Client, token: &str| -> String {
+        client
+            .query_one("SELECT encode(msgq.token_digest($1), 'hex')", &[&token])
+            .unwrap()
+            .get(0)
+    };
+    let before = digest_of(&mut raw, &token);
+
+    // A session that stayed silent past its lease is renewed, not re-minted.
+    raw.execute(
+        "UPDATE msgq.identity SET expires_at = now() - interval '1 hour' WHERE name = $1",
+        &[&principal],
+    )
+    .unwrap();
+    let expired = raw.query("SELECT * FROM msgq.identity_of($1)", &[&token.as_str()]);
+    assert!(expired.is_err(), "an elapsed lease is refused for writes");
+
+    let extended: bool = raw
+        .query_one(
+            "SELECT msgq.renew_credential($1, '2 hours') > now() + interval '90 minutes' AS extended",
+            &[&token.as_str()],
+        )
+        .unwrap()
+        .get(0);
+    assert!(extended, "the lease is extended by the requested span");
+
+    // The same digest, so every sibling session stays logged in.
+    assert_eq!(
+        digest_of(&mut raw, &token),
+        before,
+        "renewal keeps the digest"
+    );
+    let usable = raw.query("SELECT * FROM msgq.identity_of($1)", &[&token.as_str()]);
+    assert!(usable.is_ok(), "a renewed credential is accepted again");
+
+    // A credential nobody issued is refused rather than minted.
+    let stranger = raw.query_one("SELECT msgq.renew_credential($1)", &[&"nobody".to_string()]);
+    assert!(stranger.is_err(), "renewal never creates a credential");
+}
