@@ -1,0 +1,99 @@
+# Hooks for a repo with two halves and no root Cargo workspace:
+#   cli/       the Rust crate (cargo runs inside it)
+#   extension/ the pi extension (node --test)
+# Every cargo entry therefore changes directory first; a bare `cargo fmt` at the repo root fails.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt (cli)
+        entry: bash -c 'cd cli && cargo fmt --all -- --check'
+        language: system
+        files: ^cli/
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (cli, warnings are errors)
+        entry: bash -c 'cd cli && cargo clippy --all-targets -- -Dwarnings'
+        language: system
+        files: ^cli/
+        pass_filenames: false
+
+      - id: cargo-machete
+        name: cargo machete (cli)
+        entry: bash -c 'cd cli && cargo machete'
+        language: system
+        files: ^cli/Cargo\.(toml|lock)$
+        pass_filenames: false
+
+      - id: rust-file-length
+        name: Rust file length (target 550 lines, cli/src only)
+        entry: >-
+          bash -c '
+          rc=0;
+          debt=" cli/src/commands.rs cli/src/store.rs ";
+          for f in "$@"; do
+            n=$(wc -l < "$f");
+            if [ "$n" -gt 550 ]; then
+              case "$debt" in
+                *" $f "*) echo "WARN $f: $n lines (target 550) - known debt" ;;
+                *) echo "$f: $n lines (target 550)"; rc=1 ;;
+              esac;
+            fi;
+          done;
+          exit $rc' --
+        language: system
+        files: ^cli/src/.*\.rs$
+        pass_filenames: true
+
+      - id: rust-test-file-names
+        name: Rust test file naming (no numeric suffix)
+        entry: >-
+          bash -c '
+          rc=0;
+          for f in "$@"; do
+            stem=$(basename "$f" .rs);
+            if printf "%s" "$stem" | grep -Eq "tests?_?[0-9]+$"; then
+              echo "$f: numeric test-file suffix; name it for its topic (tests_<topic>.rs)";
+              rc=1;
+            fi;
+          done;
+          exit $rc' --
+        language: system
+        files: ^cli/src/.*\.rs$
+        pass_filenames: true
+
+      - id: rust-clippy-suppressions
+        name: "Rust clippy suppression (advisory: too_many_arguments/lines)"
+        entry: >-
+          bash -c '
+          for f in "$@"; do
+            hits=$(grep -nE "#!?\[(allow|expect)\([^]]*clippy::(too_many_arguments|too_many_lines)" "$f" || true);
+            if [ -n "$hits" ]; then
+              echo "WARN $f clippy suppression for too_many_arguments/lines; prefer restructuring";
+              echo "$hits";
+            fi;
+          done;
+          exit 0' --
+        language: system
+        files: ^cli/src/.*\.rs$
+        pass_filenames: true
+
+      - id: extension-tests
+        name: extension tests (node --test)
+        entry: bash -c 'cd extension && node --test test/'
+        language: system
+        files: ^extension/(src|test|scripts)/.*\.(ts|mjs)$|^extension/package\.json$|^protocol/
+        pass_filenames: false
+
+      - id: hadolint
+        name: hadolint Dockerfile
+        entry: hadolint
+        language: system
+        files: Dockerfile
+        pass_filenames: true
