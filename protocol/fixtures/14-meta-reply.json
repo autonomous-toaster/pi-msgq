@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "type": "prompt",
+  "from": "session/me",
+  "to": "session/reviewer",
+  "message": "which tests should I run?",
+  "meta": { "reply": true }
+}

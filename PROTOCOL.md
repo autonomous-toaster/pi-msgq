@@ -50,12 +50,30 @@ a record. Adding a type is an additive change and keeps `v`.
 |---|---|---|
 | `ack` | `true`, or a comma-separated subset of `received,started,completed` | the sender asks the receiver to report lifecycle phases |
 | `trace` | a string | a correlation identifier, so records belonging to one piece of work can be listed together |
+| `reply` | `true` | the sender wants an answer; a reader can detect the request without reading the body |
+| `enc` | an object with at least `alg` and `kid` | the record's body is encoded; see *Readable and opaque* below |
 
 `meta.trace` is how a delegation tree is reconstructed: a client stamps an identifier on the request
 and every participant stamps the same identifier on what it sends in that work. A client that ignores
 it loses nothing else.
 
 Anything else a client puts in `meta` is preserved and ignored.
+
+### Readable and opaque
+
+The envelope is always readable, and a body may not be. A client can route, deliver, acknowledge and
+correlate a record without understanding the record's body:
+
+- `v`, `type`, `from`, `to`, `reply_to` and `meta` are always readable.
+- Presence bodies and acknowledgement bodies are always readable, because the roster and the
+  lifecycle depend on them and both are already public metadata.
+- `message` and `event` content **may be opaque** to a given reader. A reader that cannot interpret a
+  body reports an error and does not treat the body as content.
+
+A record whose body is encoded declares it in `meta.enc`, carrying at least an algorithm name and a
+key identifier. A client that does not recognize the declaration preserves and ignores it; a reader
+that cannot honour it takes the record as having an opaque body. This document does not define any
+encoding — the reservation exists so that adding one is an additive change.
 ## Events
 
 An `event` record carries an object in `event`. Two kinds are conventions:
@@ -87,8 +105,9 @@ Presence is a normal record published to the presence address:
           "card":{"project":"github.com/org/repo","branch":"main","worktree":"repo","path":"src"}}}
 ```
 
-- The presence address is `group/presence`. Every participant publishes there and the roster reads it;
-  no session subscribes to it.
+- The presence address is `group/presence` on an unscoped bus, and `group/<scope>/presence` on a
+  bus with scopes. Every participant publishes there and the roster reads it; no session subscribes
+  to it, and a roster lists only its own scope.
 - A participant is live while its most recent presence record is younger than the `ttl` it declares, as
   measured by the **bus's stored timestamp** for that record — never by a clock the publisher claims.
 - `participant` is the stable identity (the session id, or any stable name a non-session client
@@ -130,8 +149,10 @@ wire only requires the `publisher` to agree with the `to` field. A record's **id
 ## Streams, offsets and cursors
 
 - Each address is a stream. Records are appended and keep their position.
-- Offsets are monotonic **within a stream** and unique across the database, so a stream's offsets are
-  sparse. An offset is the record's identity for `reply_to` and for ids.
+- Offsets are monotonic **within a stream** and unique **within that stream**, so a stream's offsets
+  are sparse. A record's identity is the address whose stream holds it together with the offset
+  assigned there: an offset alone names no record. `reply_to` names an offset in the stream named by
+  the answering record's `from`.
 - A consumer is a named position in a stream. Reading does not advance it; advancing is a separate,
   explicit act taken once responsibility for the record has been accepted. An interrupted consumer
   therefore redelivers rather than losing work — **at-least-once** is the promise, and idempotence is
@@ -154,8 +175,11 @@ wire only requires the `publisher` to agree with the `to` field. A record's **id
   that session's policy and trust list, not of the wire.
 - **Acknowledgements or presence.** Both are conventions composed from ordinary records: a client may
   send them, ignore them, or never implement them.
-- **Authentication.** `from` is a claim. The trust boundary is who can write the database file.
-- **Retention.** Records stay until an operator removes them; no policy is implied.
+- **Authentication.** `from` is a claim. On a local bus the trust boundary is who can write the
+  database file (permissions). On a shared bus the bus stamps `from` from the writer's credential,
+  and a credential never travels inside a record.
+- **Retention.** Records stay for the bus's declared retention window, reported by `msgq db info`.
+  A consumer that falls behind the window loses records, and is told how many.
 
 ## Conformance
 

@@ -18,7 +18,8 @@ import type {
 import { Type } from "@earendil-works/pi-ai";
 
 import {
-	Bus,
+	HonkerBus,
+	type Bus,
 	type BusEvent,
 	type Subscription,
 } from "./src/consumer.ts";
@@ -824,7 +825,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Bus.
 		try {
-			bus = new Bus(busPath);
+			bus = new HonkerBus(busPath);
 			resubscribe();
 		} catch (error) {
 			disable(`cannot open ${busPath}: ${String(error)}`);

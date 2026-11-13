@@ -186,4 +186,18 @@ mod tests {
         assert!(is_retraction("gone"));
         assert!(!is_retraction("idle"));
     }
+
+    #[test]
+    fn a_presence_body_stays_readable_under_an_encoding_declaration() {
+        // Presence is public metadata the roster must read, so a declaration never hides it.
+        let payload = json!({
+            "v": 1, "type": "event", "from": "session/api-worker", "to": PRESENCE_ADDRESS,
+            "event": {"kind": "presence", "state": "busy", "ttl": 30,
+                      "participant": "01a127d9"},
+            "meta": {"enc": {"alg": "age", "kid": "acme-1"}}
+        });
+        let record = parse_presence(&payload).expect("presence stays readable");
+        assert_eq!(record.participant, "01a127d9");
+        assert_eq!(record.state, "busy");
+    }
 }

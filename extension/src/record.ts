@@ -81,3 +81,21 @@ export function recordBody(record: MsgqRecord): string {
 	if (record.event !== undefined) return JSON.stringify(record.event);
 	return "";
 }
+
+/**
+ * The key identifier of a body this build cannot interpret, when the record declares one.
+ *
+ * A record whose body is encoded declares it in `meta.enc`. Presence and acknowledgement bodies are
+ * never opaque: the roster and the lifecycle read them, and `PROTOCOL.md` calls both public
+ * metadata. A declaration on those bodies is therefore ignored rather than obeyed.
+ */
+export function opaqueBody(record: MsgqRecord): string | undefined {
+	const event = record.event as { kind?: unknown } | undefined;
+	const kind = event?.kind;
+	if (record.type === "event" && (kind === "presence" || kind === "ack")) return undefined;
+
+	const meta = record.meta as { enc?: unknown } | undefined;
+	const enc = meta?.enc as { alg?: unknown; kid?: unknown } | undefined;
+	if (typeof enc?.alg !== "string") return undefined;
+	return typeof enc.kid === "string" ? enc.kid : undefined;
+}

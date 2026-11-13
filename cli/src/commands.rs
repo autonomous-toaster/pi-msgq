@@ -7,15 +7,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use honker::StreamEvent;
 use serde_json::{Value, json};
 
 use crate::address;
 use crate::card;
+use crate::config::resolve_retention;
 use crate::error::Error;
 use crate::presence::{self, Roster};
 use crate::record;
-use crate::store::Store;
+use crate::store::{Bus, Store, StoredRecord};
 
 /// Advisory lock lifetime for a follow; renewed while running.
 const LOCK_TTL_S: i64 = 60;
@@ -125,36 +125,72 @@ pub fn publish(db_path: &Path, args: PublishArgs) -> Result<(), Error> {
     Ok(())
 }
 
-/// Wait for acknowledgements of an already published offset.
+/// Wait for acknowledgements of an already published record.
+///
+/// Acknowledgements are addressed to the sender of the original record, so the wait needs to know
+/// which stream to watch. Offsets are unique only within a stream, so a bare offset names no
+/// record: the caller gives a record id of the form address#offset, or an offset plus --on.
 pub fn await_ack(
     db_path: &Path,
-    offset: i64,
+    target: &str,
     on: Option<&str>,
     timeout_s: u64,
     json_out: bool,
 ) -> Result<(), Error> {
     let (store, _) = Store::open(db_path)?;
-    // Without an explicit address, ask whoever sent the message: acknowledgements are
-    // addressed to the sender, not to the stream the message was published to.
-    let stream = match on {
-        Some(value) => address::canonicalize(value)?,
-        None => match sender_of(&store, offset)? {
-            Some(sender) => address::canonicalize(&sender)?,
-            None => address::canonicalize(&record::default_sender())?,
-        },
-    };
+    let (stream, offset) = resolve_await_target(&store, target, on)?;
     // Re-attaching has no snapshot to take, so the reply stream is read from its start.
     await_terminal(&store, &stream, 0, offset, timeout_s, json_out)
 }
 
-/// `msgq ask`: publish a question and wait for the answer.
+/// Turn the await argument into the stream to watch and the offset being acknowledged.
 ///
-/// Ends on a reply, on a terminal acknowledgement, or on the wait window. None of
-/// the three is an error: in all of them the peer is fine.
-///
-/// With `no_wait` it ends as soon as the question is published: the record is the
-/// same, so the wire cannot tell the two apart, and the answer arrives by the path
-/// every other message takes.
+/// Acknowledgements are addressed to the sender of the original record, which is not the stream the
+/// original was published to. A record id therefore names the record being awaited and the wait
+/// looks up who to watch; a bare offset cannot, because offsets are unique only within a stream, so
+/// it needs --on to say where the acknowledgements will land.
+fn resolve_await_target(
+    store: &dyn Bus,
+    target: &str,
+    on: Option<&str>,
+) -> Result<(String, i64), Error> {
+    let trimmed = target.trim();
+    if let Ok((address, offset)) = address::parse_record_id(trimmed) {
+        if on.is_some() {
+            return Err(Error::usage(format!(
+                "await {trimmed} already names the record, so --on is not needed"
+            )));
+        }
+        let events = store.read_since(&address, offset.saturating_sub(1), 1)?;
+        let found = events.into_iter().find(|event| event.offset == offset);
+        let Some(event) = found else {
+            return Err(Error::usage(format!("no record at {trimmed}")));
+        };
+        let value: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
+        let from = value
+            .get("from")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if from.is_empty() {
+            return Err(Error::usage(format!(
+                "the record at {trimmed} names no sender, so the wait cannot be addressed"
+            )));
+        }
+        return Ok((address::canonicalize(from)?, offset));
+    }
+    let Ok(offset) = trimmed.parse::<i64>() else {
+        return Err(Error::usage(format!(
+            "'{trimmed}' is not a record id; expected address#offset or an offset with --on"
+        )));
+    };
+    match on {
+        Some(on) => Ok((address::canonicalize(on)?, offset)),
+        None => Err(Error::usage(format!(
+            "offset {offset} alone does not name a record, because offsets are unique only within a stream; pass --on ADDRESS or a record id such as session/x#{offset}"
+        ))),
+    }
+}
+
 pub fn ask(db_path: &Path, args: AskArgs) -> Result<(), Error> {
     let canonical = address::canonicalize(&args.address)?;
     let message = match args.message.as_deref() {
@@ -201,14 +237,14 @@ pub fn ask(db_path: &Path, args: AskArgs) -> Result<(), Error> {
 
 /// Print the answer to an ask, or report why there is none yet.
 fn await_reply(
-    store: &Store,
+    store: &dyn Bus,
     stream: &str,
     from_offset: i64,
     reply_to: i64,
     timeout_s: u64,
     json_out: bool,
 ) -> Result<(), Error> {
-    let updates = store.update_events();
+    let updates = store.wake();
     let started = Instant::now();
     let mut cursor = from_offset;
 
@@ -223,7 +259,7 @@ fn await_reply(
                 );
                 return Ok(());
             }
-            updates.recv_timeout(Duration::from_millis(500))?;
+            updates.wait(Duration::from_millis(500))?;
             continue;
         }
 
@@ -278,28 +314,16 @@ fn report_outcome(json_out: bool, value: Value, human: &str) {
     }
 }
 
-/// The sender recorded on the message at `offset`, when the offset is known.
-fn sender_of(store: &Store, offset: i64) -> Result<Option<String>, Error> {
-    let Some((_topic, payload)) = store.record_at(offset)? else {
-        return Ok(None);
-    };
-    let value: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
-    Ok(value
-        .get("from")
-        .and_then(Value::as_str)
-        .map(|sender| sender.to_string()))
-}
-
 /// Print acknowledgements of `reply_to` until a terminal one arrives or the window closes.
 fn await_terminal(
-    store: &Store,
+    store: &dyn Bus,
     stream: &str,
     from_offset: i64,
     reply_to: i64,
     timeout_s: u64,
     json_out: bool,
 ) -> Result<(), Error> {
-    let updates = store.update_events();
+    let updates = store.wake();
     let started = Instant::now();
     let mut cursor = from_offset;
 
@@ -311,7 +335,7 @@ fn await_terminal(
                     "no terminal acknowledgement for offset {reply_to} within {timeout_s}s"
                 )));
             }
-            updates.recv_timeout(Duration::from_millis(500))?;
+            updates.wait(Duration::from_millis(500))?;
             continue;
         }
 
@@ -464,19 +488,46 @@ pub fn read(
     limit: i64,
     json: bool,
     with_offset: bool,
+    strict: bool,
 ) -> Result<(), Error> {
     let targets = address::canonicalize_all(addresses)?;
     let (store, _) = Store::open(db_path)?;
     let limit = limit.max(1);
 
-    let mut events: Vec<StreamEvent> = Vec::new();
+    let mut events: Vec<StoredRecord> = Vec::new();
+    let mut lost = 0i64;
+    let mut truncated: Vec<String> = Vec::new();
     for topic in &targets {
         let offset = match from {
             FromSpec::Start => 0,
             FromSpec::Offset(n) => n,
             FromSpec::End => store.max_offset(topic)?,
         };
-        events.extend(store.read_since(topic, offset, limit)?);
+        // A position below the oldest retained record has lost whatever retention removed beyond it.
+        let oldest = store.oldest_offset(topic)?;
+        let effective = match oldest {
+            Some(first) if offset < first => {
+                let dropped = store.retention_dropped(topic, offset)?;
+                lost += dropped;
+                truncated.push(topic.clone());
+                first - 1
+            }
+            _ => offset,
+        };
+        events.extend(store.read_since(topic, effective, limit)?);
+    }
+    if lost > 0 {
+        if strict {
+            return Err(Error::runtime(format!(
+                "{} record(s) are no longer retained in {}; refusing to print a partial view",
+                lost,
+                truncated.join(", ")
+            )));
+        }
+        eprintln!(
+            "msgq: {lost} record(s) are no longer retained in {}",
+            truncated.join(", ")
+        );
     }
     events.sort_by(|a, b| a.offset.cmp(&b.offset).then_with(|| a.topic.cmp(&b.topic)));
     events.truncate(limit as usize);
@@ -485,6 +536,72 @@ pub fn read(
         render(event, json, with_offset);
     }
     Ok(())
+}
+
+/// Take one lock per followed address, so two processes cannot share a consumer's cursor.
+fn take_follow_locks(
+    store: &dyn Bus,
+    targets: &[String],
+    consumer: &str,
+    owner: &str,
+) -> Result<Vec<Box<dyn crate::store::FollowLock>>, Error> {
+    let mut locks: Vec<Box<dyn crate::store::FollowLock>> = Vec::new();
+    for topic in targets {
+        let name = format!("msgq:follow:{consumer}:{topic}");
+        let Some(lock) = store.try_lock(&name, owner, LOCK_TTL_S)? else {
+            return Err(Error::runtime(format!(
+                "consumer '{consumer}' is already following '{topic}' in another process"
+            )));
+        };
+        locks.push(lock);
+    }
+    Ok(locks)
+}
+
+/// Where each followed stream starts, after reporting anything retention already took.
+///
+/// A follow never stops on a gap: report the loss and carry on from the oldest retained record, so a
+/// session that was offline keeps receiving.
+fn starting_positions(
+    store: &dyn Bus,
+    targets: &[String],
+    consumer: &str,
+    from: FromSpec,
+) -> Result<BTreeMap<String, i64>, Error> {
+    let mut offsets = BTreeMap::new();
+    for topic in targets {
+        let start = match from {
+            FromSpec::Start => 0,
+            FromSpec::Offset(n) => n,
+            FromSpec::End => store
+                .cursor_get(consumer, topic)?
+                .unwrap_or(store.head(topic)?),
+        };
+        let resumed = match store.oldest_offset(topic)? {
+            Some(first) if start < first => {
+                eprintln!(
+                    "msgq: {} record(s) are no longer retained in {topic}",
+                    store.retention_dropped(topic, start)?
+                );
+                first - 1
+            }
+            _ => start,
+        };
+        offsets.insert(topic.clone(), resumed);
+    }
+    Ok(offsets)
+}
+
+/// Order one round of records by stream position, so a follow is deterministic across addresses.
+fn sort_by_position(batch: &mut [StoredRecord]) {
+    batch.sort_by(|a, b| a.offset.cmp(&b.offset).then_with(|| a.topic.cmp(&b.topic)));
+}
+
+/// Renew every follow lock; best effort, because losing one only risks a second follower.
+fn renew_all(locks: &[Box<dyn crate::store::FollowLock>]) {
+    for lock in locks {
+        let _ = lock.heartbeat(LOCK_TTL_S);
+    }
 }
 
 /// Cursor-based follow: resumes a consumer and advances its offsets.
@@ -500,31 +617,8 @@ pub fn follow(
     let (store, _) = Store::open(db_path)?;
     let owner = format!("msgq:{}:{}", std::process::id(), nanos());
 
-    let mut locks = Vec::new();
-    for topic in &targets {
-        let name = format!("msgq:follow:{consumer}:{topic}");
-        match store.try_lock(&name, &owner, LOCK_TTL_S)? {
-            Some(lock) => locks.push(lock),
-            None => {
-                return Err(Error::runtime(format!(
-                    "consumer '{consumer}' is already following '{topic}' in another process"
-                )));
-            }
-        }
-    }
-
-    let mut offsets: BTreeMap<String, i64> = BTreeMap::new();
-    for topic in &targets {
-        let start = match from {
-            FromSpec::Start => 0,
-            FromSpec::Offset(n) => n,
-            FromSpec::End => match store.cursor_get(consumer, topic)? {
-                Some(saved) => saved,
-                None => store.max_offset(topic)?,
-            },
-        };
-        offsets.insert(topic.clone(), start);
-    }
+    let locks = take_follow_locks(&store, &targets, consumer, &owner)?;
+    let mut offsets = starting_positions(&store, &targets, consumer, from)?;
 
     let interrupted = Arc::new(AtomicBool::new(false));
     {
@@ -532,25 +626,23 @@ pub fn follow(
         let _ = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst));
     }
 
-    let updates = store.update_events();
+    let updates = store.wake();
     let mut last_renew = Instant::now();
 
     while !interrupted.load(Ordering::SeqCst) {
-        let mut batch: Vec<StreamEvent> = Vec::new();
+        let mut batch: Vec<StoredRecord> = Vec::new();
         for topic in &targets {
             let offset = *offsets.get(topic).unwrap_or(&0);
             batch.extend(store.read_since(topic, offset, FOLLOW_BATCH)?);
         }
-        batch.sort_by(|a, b| a.offset.cmp(&b.offset).then_with(|| a.topic.cmp(&b.topic)));
+        sort_by_position(&mut batch);
 
         if batch.is_empty() {
             if last_renew.elapsed() >= LOCK_RENEW_EVERY {
-                for lock in &locks {
-                    let _ = lock.heartbeat(LOCK_TTL_S);
-                }
+                renew_all(&locks);
                 last_renew = Instant::now();
             }
-            updates.recv_timeout(WAIT_SLICE)?;
+            updates.wait(WAIT_SLICE)?;
             continue;
         }
 
@@ -600,17 +692,26 @@ pub fn consumers(
     match action {
         ConsumersAction::List => {
             let rows = store.list_consumers(topic.as_deref())?;
+            let mut described: Vec<(String, String, i64, i64, i64)> = Vec::new();
+            for (name, topic, offset) in rows {
+                // Lag is how far behind the newest record the cursor sits; dropped is how much
+                // retention already took out from under it.
+                let lag = (store.max_offset(&topic)? - offset).max(0);
+                let dropped = store.retention_dropped(&topic, offset)?;
+                described.push((name, topic, offset, lag, dropped));
+            }
             if json_out {
-                let array: Vec<Value> = rows
+                let array: Vec<Value> = described
                     .iter()
-                    .map(|(name, topic, offset)| {
-                        json!({"consumer": name, "topic": topic, "offset": offset})
+                    .map(|(name, topic, offset, lag, dropped)| {
+                        json!({"consumer": name, "topic": topic, "offset": offset,
+                               "lag": lag, "dropped": dropped})
                     })
                     .collect();
                 println!("{}", serde_json::to_string(&array)?);
             } else {
-                for (name, topic, offset) in rows {
-                    println!("{name}\t{topic}\t{offset}");
+                for (name, topic, offset, lag, dropped) in described {
+                    println!("{name}\t{topic}\t{offset}\t{lag}\t{dropped}");
                 }
             }
         }
@@ -630,8 +731,8 @@ pub fn consumers(
 }
 
 /// The presence tail, oldest first: what the roster and the collection commands both read.
-fn presence_tail(store: &Store) -> Result<Vec<(i64, presence::PresenceRecord)>, Error> {
-    let head = store.max_offset(presence::PRESENCE_ADDRESS)?;
+fn presence_tail(store: &dyn Bus) -> Result<Vec<(i64, presence::PresenceRecord)>, Error> {
+    let head = store.head(presence::PRESENCE_ADDRESS)?;
     let start = (head - presence::SCAN_RECORDS).max(0);
     let events = store.read_since(presence::PRESENCE_ADDRESS, start, presence::SCAN_RECORDS)?;
 
@@ -649,7 +750,7 @@ fn presence_tail(store: &Store) -> Result<Vec<(i64, presence::PresenceRecord)>, 
 }
 
 /// Who is live, by participant. The roster and cursor collection agree by construction.
-fn live_participants(store: &Store) -> Result<BTreeSet<String>, Error> {
+fn live_participants(store: &dyn Bus) -> Result<BTreeSet<String>, Error> {
     let now = unix_now();
     let mut live: BTreeSet<String> = BTreeSet::new();
     for (created_at, record) in presence_tail(store)? {
@@ -744,90 +845,66 @@ pub fn sessions(db_path: &Path, json_out: bool, wide: bool) -> Result<(), Error>
 }
 
 /// Parse an age such as `7d`, `36h`, `90m` or `45s` into seconds.
-fn parse_age(raw: &str) -> Result<i64, Error> {
-    let trimmed = raw.trim();
-    let (digits, unit) = if let Some(rest) = trimmed.strip_suffix('d') {
-        (rest, 86_400)
-    } else if let Some(rest) = trimmed.strip_suffix('h') {
-        (rest, 3_600)
-    } else if let Some(rest) = trimmed.strip_suffix('m') {
-        (rest, 60)
-    } else if let Some(rest) = trimmed.strip_suffix('s') {
-        (rest, 1)
-    } else {
-        return Err(Error::usage(format!(
-            "'{trimmed}' is not an age; expected a number and one of d, h, m, s (for example 7d)"
-        )));
-    };
-    let count: i64 = digits.trim().parse().map_err(|_| {
-        Error::usage(format!(
-            "'{trimmed}' is not an age; expected a number and one of d, h, m, s (for example 7d)"
-        ))
-    })?;
-    if count <= 0 {
-        return Err(Error::usage(format!("'{trimmed}' must be a positive age")));
-    }
-    Ok(count * unit)
-}
-
 /// What `msgq prune` was asked to do.
 pub struct PruneArgs {
-    pub older_than: String,
+    /// From --older-than or --retention; None uses the configured window.
+    pub window: Option<String>,
     pub apply: bool,
 }
 
+/// Records removed per statement, so a large prefix is never one unbounded write.
+const PRUNE_BATCH: usize = 500;
+
 /// Remove records older than an age, never removing one a consumer has not passed.
 pub fn prune(db_path: &Path, args: PruneArgs) -> Result<(), Error> {
-    let age = parse_age(&args.older_than)?;
+    let age = resolve_retention(args.window.as_deref())?;
     let (store, _) = Store::open(db_path)?;
     let threshold = unix_now() - age;
 
-    // The oldest cursor in a stream pins everything from that record onwards: retention may only
-    // take what every consumer of that stream has already passed.
-    let mut pins: BTreeMap<String, (i64, BTreeSet<String>)> = BTreeMap::new();
-    for (name, topic, offset) in store.list_consumers(None)? {
-        let entry = pins.entry(topic).or_insert((offset, BTreeSet::new()));
-        entry.0 = entry.0.min(offset);
-        entry.1.insert(name);
-    }
-
     // Presence is a window, not a history: the newest record of every participant is what the
-    // roster reads, so it stays even when it is older than the age asked for.
+    // roster reads, so it stays even when it is older than the window.
     let presence_keep = store.newest_presence_offsets(presence::PRESENCE_ADDRESS)?;
+
+    // A cursor pins nothing. Keeping a record because one consumer has not passed it would let a
+    // single offline session hold history forever, which is the opposite of a short window; the
+    // session is named in the report and told what it lost instead.
+    let mut losing: BTreeSet<String> = BTreeSet::new();
 
     let mut planned = 0i64;
     let mut removed = 0i64;
-    let mut pinned_total = 0i64;
+    let mut batches = 0usize;
     let mut report: Vec<String> = Vec::new();
 
     for stream in store.stream_summaries()? {
-        // A cursor names the last record its consumer has taken responsibility for, so the
-        // removable range is inclusive at both ends.
         let Some(end) = store.prefix_end(&stream.topic, threshold)? else {
             continue;
         };
-        let mut cut = end;
-        if let Some((pin, _)) = pins.get(&stream.topic) {
-            let capped = cut.min(*pin);
-            pinned_total += cut - capped;
-            cut = capped;
-        }
-        if cut < 0 {
-            continue;
-        }
-
         let keep: &[i64] = if stream.topic == presence::PRESENCE_ADDRESS {
             &presence_keep
         } else {
             &[]
         };
-        let count = store.count_stream_prefix(&stream.topic, cut, keep)?;
+        let count = store.count_stream_prefix(&stream.topic, end, keep)?;
         if count <= 0 {
             continue;
         }
         planned += count;
+        for (name, _topic, offset) in store.list_consumers(Some(&stream.topic))? {
+            if offset < end {
+                losing.insert(name);
+            }
+        }
         if args.apply {
-            removed += store.delete_stream_prefix(&stream.topic, cut, keep)? as i64;
+            let removal = store.delete_stream_prefix(&stream.topic, end, keep, PRUNE_BATCH)?;
+            removed += removal.removed as i64;
+            batches += removal.batches;
+            // The engine cannot count what it deleted after the fact, so the watermark carries the
+            // running total: that is what a lagging consumer reads to learn what it lost.
+            let previous = store
+                .retention_watermark(&stream.topic)?
+                .map(|(_, total)| total)
+                .unwrap_or(0);
+            store.retention_record(&stream.topic, end, previous + removal.removed as i64)?;
         }
         report.push(format!(
             "  {}\t{} of {}",
@@ -836,29 +913,24 @@ pub fn prune(db_path: &Path, args: PruneArgs) -> Result<(), Error> {
     }
 
     if report.is_empty() {
-        println!("nothing is older than {}", args.older_than);
+        println!("nothing is older than the retention window ({age}s)");
         return Ok(());
     }
     for line in &report {
         println!("{line}");
     }
-    if pinned_total > 0 {
-        // A bus accumulates a dead cursor per session per address, so naming all of them would be a
-        // wall of text. Name a few, say how many more there are, and let `db info` be the index.
-        let names: BTreeSet<&str> = pins
-            .values()
-            .flat_map(|(_, names)| names.iter().map(String::as_str))
-            .collect();
-        let shown: Vec<&str> = names.iter().take(5).copied().collect();
-        let more = names.len().saturating_sub(shown.len());
+    if !losing.is_empty() {
+        let names: Vec<&str> = losing.iter().take(5).map(String::as_str).collect();
+        let more = losing.len().saturating_sub(names.len());
         let tail = if more > 0 {
             format!(" and {more} more")
         } else {
             String::new()
         };
         eprintln!(
-            "msgq: {pinned_total} record(s) kept because a consumer has not passed them ({}{tail})",
-            shown.join(", ")
+            "msgq: {} consumer(s) will lose records: {}{tail}",
+            losing.len(),
+            names.join(", ")
         );
     }
     if !presence_keep.is_empty() {
@@ -868,7 +940,7 @@ pub fn prune(db_path: &Path, args: PruneArgs) -> Result<(), Error> {
         );
     }
     if args.apply {
-        println!("removed {removed} record(s)");
+        println!("removed {removed} record(s) in {batches} batch(es)");
         if removed > 0 {
             // The pages a prune frees are reused, not returned; compacting is what makes the file
             // smaller again, and it is allowed to fail.
@@ -1005,6 +1077,12 @@ pub fn db_info(db_path: &Path) -> Result<(), Error> {
     println!("topics:           {}", streams.len());
     println!("messages:         {messages}");
     println!("consumers:        {}", consumers.len());
+    println!("backend:          local");
+    println!(
+        "retention_s:      {}",
+        resolve_retention(None).unwrap_or(crate::config::DEFAULT_RETENTION_S)
+    );
+    println!("credential:       none (the local bus trusts file permissions)");
 
     let presence_age = streams
         .iter()
@@ -1061,7 +1139,7 @@ fn nanos() -> u128 {
 }
 
 /// Render one event as a raw JSON line or a human-readable line.
-fn render(event: &StreamEvent, json_out: bool, with_offset: bool) {
+fn render(event: &StoredRecord, json_out: bool, with_offset: bool) {
     if json_out {
         let payload = String::from_utf8_lossy(&event.payload);
         if with_offset {
@@ -1130,6 +1208,11 @@ fn describe(value: &Value) -> (String, String) {
     }
 
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("?");
+    // A body this build cannot interpret is an error, not content: printing ciphertext as if it
+    // were a message would be worse than saying so.
+    if let Some(kid) = record::opaque_body(value) {
+        return (kind.to_string(), format!("cannot decrypt: kid={kid}"));
+    }
     let body = if kind == "event" {
         value
             .get("event")

@@ -69,7 +69,12 @@ pub fn derive_card(cwd: &Path, paths: PathMode) -> Result<Value, Error> {
 /// the repository name inside `project`, so the column keeps only what tells peers apart. A `path`
 /// of `.` means the repository root and is left out; a card with nothing to say is `-`.
 pub fn summary(card: &Value) -> String {
-    let field = |key: &str| card.get(key).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    let field = |key: &str| {
+        card.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
     let mut parts: Vec<&str> = Vec::new();
     for key in ["project", "branch"] {
         if let Some(value) = field(key) {
@@ -104,16 +109,16 @@ pub fn normalize_remote(raw: &str) -> String {
     }
 
     // Strip userinfo, including the common `git@` form and the scp-like `git@host:path`.
-    if let Some((user, rest)) = value.split_once('@') {
-        if !user.contains('/') {
-            value = rest.to_string();
-        }
+    if let Some((user, rest)) = value.split_once('@')
+        && !user.contains('/')
+    {
+        value = rest.to_string();
     }
 
-    if let Some((host, path)) = value.split_once(':') {
-        if !host.contains('/') {
-            value = format!("{host}/{path}");
-        }
+    if let Some((host, path)) = value.split_once(':')
+        && !host.contains('/')
+    {
+        value = format!("{host}/{path}");
     }
 
     value
@@ -379,7 +384,10 @@ mod tests {
     #[test]
     fn summarizes_a_card_as_one_locator_column() {
         let dir = init_repo("summary");
-        git_in(&dir, &["remote", "add", "origin", "git@github.com:org/repo.git"]);
+        git_in(
+            &dir,
+            &["remote", "add", "origin", "git@github.com:org/repo.git"],
+        );
         let card = derive_card(&dir, PathMode::Relative).unwrap();
 
         assert_eq!(summary(&card), "github.com/org/repo  main");
@@ -388,7 +396,10 @@ mod tests {
     #[test]
     fn a_summary_names_a_subdirectory_and_skips_the_worktree() {
         let dir = init_repo("summary-sub");
-        git_in(&dir, &["remote", "add", "origin", "git@github.com:org/repo.git"]);
+        git_in(
+            &dir,
+            &["remote", "add", "origin", "git@github.com:org/repo.git"],
+        );
         let sub = dir.join("src").join("api");
         fs::create_dir_all(&sub).unwrap();
         let card = derive_card(&sub, PathMode::Relative).unwrap();

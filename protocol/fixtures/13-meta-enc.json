@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "type": "note",
+  "from": "cli/me@host",
+  "to": "session/planner",
+  "message": "AGE-ENCRYPTED-BODY-1",
+  "meta": { "enc": { "alg": "age", "kid": "acme-2026-11" } }
+}

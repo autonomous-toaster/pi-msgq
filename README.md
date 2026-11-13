@@ -109,9 +109,15 @@ delivered as a single message and cost at most one more model request.
 
 ```bash
 msgq sessions --wide   # who is online, where they work, and what they are doing
-msgq consumers     # which addresses are being followed
+msgq consumers     # which addresses are being followed, how far behind, and what they lost
 msgq read session/planner --from-start    # the retained history
 ```
+
+History is a **window**, not an archive: records are retained for one hour by default
+(`MSGQ_RETENTION=6h`, or `msgq prune --retention 6h`). `msgq prune` removes what is older and names the
+consumers that will lose records; `msgq consumers` reports each consumer's lag and how many records
+retention already took from it; `msgq read --strict` refuses to print a partial view instead of
+warning about the gap.
 
 ## Ask, and get an answer back
 
@@ -126,8 +132,14 @@ Any record can ask to be told what happened to it, and you can wait for that sep
 
 ```bash
 msgq publish session/planner "run the suite" --type prompt --await
-msgq await 42 --on cli/ci-bot        # by offset
+msgq await session/planner#42           # by record id: the wait finds who to watch
+msgq await 42 --on cli/ci-bot           # by offset, when you know where the acks land
 ```
+
+An offset alone names no record — offsets are unique only within a stream — so `await` takes a
+record id, or an offset together with `--on`. Acknowledgements are addressed to the sender of the
+record being awaited, which is not the stream the record was published to; the record id form looks
+that sender up for you.
 
 The phases are `received` (responsibility taken, with the delivery mode), `started`, and
 `completed` (with an outcome). A display-only delivery stops at `received`: the record was shown,

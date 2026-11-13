@@ -75,8 +75,24 @@ function waitForUpdate(updates: NativeUpdateEvents, timeoutMs: number): Promise<
 	});
 }
 
-/** An open message bus. */
-export class Bus {
+/**
+ * An open message bus.
+ *
+ * The interface is what the session depends on, so a second engine can be added without touching
+ * delivery: only this module knows about tables, cursors and the native binding.
+ */
+export interface Bus {
+	subscribe(
+		address: string,
+		consumer: string,
+		onEvent: (event: BusEvent) => void,
+		onError: (error: unknown) => void,
+	): Subscription;
+	readOne(address: string, offset: number): BusEvent | undefined;
+}
+
+/** The bus over the local engine: one SQLite file, read through the native binding. */
+export class HonkerBus implements Bus {
 	private readonly db: NativeDatabase;
 	private closed = false;
 

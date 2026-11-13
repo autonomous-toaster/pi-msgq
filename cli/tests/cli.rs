@@ -45,6 +45,21 @@ fn run(db: &Path, args: &[&str]) -> Run {
     }
 }
 
+/// Run the binary with extra environment, for the settings the CLI reads from the environment.
+fn run_env(db: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
+    let mut command = Command::new(bin());
+    command.arg("--db").arg(db).args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let out = command.output().unwrap();
+    Run {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+    }
+}
+
 fn spawn_follow(db: &Path, address: &str, consumer: &str) -> std::process::Child {
     Command::new(bin())
         .arg("--db")
@@ -329,10 +344,86 @@ fn await_derives_the_reply_address_from_the_message() {
     let ack = r#"{"v":1,"type":"event","from":"session/w","to":"cli/bot","reply_to":1,"event":{"kind":"ack","phase":"completed","outcome":"ok"}}"#;
     assert_eq!(run(&db, &["publish", "cli/bot", "--json", ack]).code, 0);
 
-    // No --on: the wait must find it through the referenced message's sender.
-    let out = run(&db, &["await", "1", "--timeout", "5"]);
+    // A record id names the record being awaited; the wait finds who to watch from its sender.
+    let out = run(&db, &["await", "session/w#1", "--timeout", "5"]);
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert!(out.stdout.contains("completed"), "{}", out.stdout);
+}
+
+#[test]
+fn a_connection_string_is_refused_and_creates_nothing() {
+    let db = temp_db();
+    let dir = db.parent().unwrap();
+    let dsn = "postgres://bus@host/db";
+
+    let out = Command::new(bin())
+        .current_dir(dir)
+        .args(["--db", dsn, "publish", "group/a", "hi"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an unimplemented engine is a usage error"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("shared engine"), "{stderr}");
+
+    // The location is a connection string, so it must not become a file on disk.
+    let created: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(created.is_empty(), "nothing is created: {created:?}");
+}
+
+#[test]
+fn await_refuses_a_bare_offset_without_an_address() {
+    let db = temp_db();
+    let out = run(&db, &["await", "1", "--timeout", "1"]);
+    assert_eq!(out.code, 2, "a bare offset names no record: {}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("offsets are unique only within a stream"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn await_accepts_an_offset_with_an_address() {
+    let db = temp_db();
+    let message = r#"{"v":1,"type":"note","from":"cli/bot","to":"session/w","message":"hi"}"#;
+    assert_eq!(
+        run(&db, &["publish", "session/w", "--json", message]).code,
+        0
+    );
+    let ack = r#"{"v":1,"type":"event","from":"session/w","to":"cli/bot","reply_to":1,"event":{"kind":"ack","phase":"completed","outcome":"ok"}}"#;
+    assert_eq!(run(&db, &["publish", "cli/bot", "--json", ack]).code, 0);
+
+    let out = run(&db, &["await", "1", "--on", "cli/bot", "--timeout", "5"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("completed"), "{}", out.stdout);
+}
+
+#[test]
+fn await_rejects_both_a_record_id_and_an_address() {
+    let db = temp_db();
+    let out = run(
+        &db,
+        &["await", "session/w#1", "--on", "cli/bot", "--timeout", "1"],
+    );
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("--on is not needed"), "{}", out.stderr);
+}
+
+#[test]
+fn await_rejects_an_id_that_names_no_record() {
+    let db = temp_db();
+    let out = run(&db, &["await", "session/w#7", "--timeout", "1"]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("no record at"), "{}", out.stderr);
 }
 
 fn spawn_ask(db: &Path, args: &[&str]) -> std::process::Child {
@@ -898,7 +989,10 @@ fn card_reports_the_address_beside_the_locator() {
     let value: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
     assert_eq!(value["address"], "session/planner");
     assert!(value["card"].is_object(), "{value}");
-    assert!(value["card"].get("path").is_none(), "path mode none: {value}");
+    assert!(
+        value["card"].get("path").is_none(),
+        "path mode none: {value}"
+    );
     assert!(value["locator"].is_string(), "{value}");
 }
 
@@ -1103,33 +1197,149 @@ fn prune_reports_before_it_removes() {
 }
 
 #[test]
-fn prune_keeps_what_a_consumer_has_not_passed() {
+fn prune_does_not_obey_a_lagging_consumer() {
     let db = temp_db();
     for i in 0..3 {
         run(&db, &["publish", "group/a", &format!("record {i}")]);
     }
     age_out();
-    // A cursor names the last record its consumer has taken responsibility for. Offsets are 1-based,
-    // so a cursor at 2 covers the first two records and the third is still owed.
     run(&db, &["cursor", "set", "worker#c", "group/a", "2"]);
 
     let out = run(&db, &["prune", "--older-than", "1s", "--apply"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(out.stdout.contains("removed 2 record(s)"), "{}", out.stdout);
     assert!(
-        out.stderr
-            .contains("kept because a consumer has not passed"),
+        out.stdout.contains("removed 3 record(s)"),
+        "the window wins, not the cursor: {}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("consumer(s) will lose records"),
         "{}",
         out.stderr
     );
+    assert!(out.stderr.contains("worker#c"), "{}", out.stderr);
 
-    let remaining = run(&db, &["read", "group/a", "--from-start"]).stdout;
-    assert!(
-        remaining.contains("record 2"),
-        "the record past the cursor is still there: {remaining}"
+    assert_eq!(
+        run(&db, &["read", "group/a", "--from-start"]).stdout.trim(),
+        ""
     );
-    assert!(!remaining.contains("record 0"), "{remaining}");
-    assert!(!remaining.contains("record 1"), "{remaining}");
+    let consumers = run(&db, &["consumers", "--json"]);
+    assert!(
+        consumers.stdout.contains("\"dropped\":3"),
+        "the consumer is told what it lost: {}",
+        consumers.stdout
+    );
+}
+
+#[test]
+fn read_reports_a_gap_and_strict_refuses_it() {
+    let db = temp_db();
+    // Two records age out; two arrive afterwards, so the stream is half retained.
+    for i in 0..2 {
+        run(&db, &["publish", "group/a", &format!("old {i}")]);
+    }
+    age_out();
+    for i in 0..2 {
+        run(&db, &["publish", "group/a", &format!("new {i}")]);
+    }
+    let pruned = run(&db, &["prune", "--older-than", "1s", "--apply"]);
+    assert_eq!(pruned.code, 0, "{}", pruned.stderr);
+
+    let relaxed = run(&db, &["read", "group/a", "--from-start"]);
+    assert_eq!(relaxed.code, 0, "{}", relaxed.stderr);
+    assert!(
+        relaxed
+            .stderr
+            .contains("2 record(s) are no longer retained"),
+        "{}",
+        relaxed.stderr
+    );
+    assert!(relaxed.stdout.contains("new 0"), "{}", relaxed.stdout);
+
+    let strict = run(&db, &["read", "group/a", "--from-start", "--strict"]);
+    assert_eq!(
+        strict.code, 1,
+        "a truncated read is fatal on request: {}",
+        strict.stderr
+    );
+    assert!(
+        strict.stdout.trim().is_empty(),
+        "no partial view is printed"
+    );
+}
+
+#[test]
+fn consumers_report_lag_and_dropped() {
+    let db = temp_db();
+    for i in 0..2 {
+        run(&db, &["publish", "group/a", &format!("old {i}")]);
+    }
+    age_out();
+    for i in 0..2 {
+        run(&db, &["publish", "group/a", &format!("new {i}")]);
+    }
+    run(&db, &["prune", "--older-than", "1s", "--apply"]);
+    run(&db, &["cursor", "set", "worker#c", "group/a", "1"]);
+
+    let out = run(&db, &["consumers", "--json"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("\"lag\":"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("\"dropped\":2"),
+        "both retained-away records are reported: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn db_info_names_the_backend_window_and_credential() {
+    let db = temp_db();
+    run(&db, &["publish", "group/a", "hello"]);
+    let out = run(&db, &["db", "info"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("backend:          local"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("retention_s:      3600"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("credential:       none"),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn retention_flag_and_environment_select_the_window() {
+    let db = temp_db();
+    for i in 0..2 {
+        run(&db, &["publish", "group/a", &format!("record {i}")]);
+    }
+    age_out();
+
+    let by_flag = run(&db, &["prune", "--retention", "1s"]);
+    assert_eq!(by_flag.code, 0, "{}", by_flag.stderr);
+    assert!(
+        by_flag.stdout.contains("would remove 2 record(s)"),
+        "{}",
+        by_flag.stdout
+    );
+
+    let by_env = run_env(&db, &["prune"], &[("MSGQ_RETENTION", "1s")]);
+    assert_eq!(by_env.code, 0, "{}", by_env.stderr);
+    assert!(
+        by_env.stdout.contains("would remove 2 record(s)"),
+        "{}",
+        by_env.stdout
+    );
+
+    let malformed = run(&db, &["prune", "--retention", "soon"]);
+    assert_eq!(malformed.code, 2, "{}", malformed.stderr);
 }
 
 #[test]

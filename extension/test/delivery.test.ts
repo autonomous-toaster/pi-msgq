@@ -12,7 +12,7 @@ import {
 	planDelivery,
 	wantsReply,
 } from "../src/delivery.ts";
-import type { MsgqRecord } from "../src/record.ts";
+import { opaqueBody, type MsgqRecord } from "../src/record.ts";
 
 const SELF = "session/api-worker";
 
@@ -233,4 +233,26 @@ test("an answer a wait already returned is not delivered twice", () => {
 	);
 	// A reference that could not be read says nothing, so nothing is consumed.
 	assert.equal(answersConsumedAsk(answer, SELF_ADDRESS, [asker], { id: "session/reviewer#7" }), false);
+});
+
+test("a declared encoding makes a body uninterpretable", () => {
+	assert.equal(
+		opaqueBody(record({ meta: { enc: { alg: "age", kid: "acme-1" } } })),
+		"acme-1",
+	);
+	assert.equal(opaqueBody(record()), undefined);
+	// A malformed declaration never costs the reader a body it could have read.
+	assert.equal(opaqueBody(record({ meta: { enc: { alg: "age" } } })), undefined);
+});
+
+test("presence and acknowledgement bodies are never uninterpretable", () => {
+	for (const kind of ["presence", "ack"]) {
+		const r = record({
+			type: "event",
+			message: undefined,
+			event: { kind },
+			meta: { enc: { alg: "age", kid: "acme-1" } },
+		});
+		assert.equal(opaqueBody(r), undefined, `${kind} must stay readable`);
+	}
 });

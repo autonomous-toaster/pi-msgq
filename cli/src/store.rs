@@ -5,10 +5,77 @@
 
 use std::path::{Path, PathBuf};
 
-use honker::{Database, Lock, StreamEvent, UpdateEvents};
+use honker::{Database, Lock, UpdateEvents};
 
 use crate::error::Error;
 use crate::record::PROTOCOL_VERSION;
+
+/// One stored record, in the shape the bus promises rather than the shape the engine uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRecord {
+    /// The address whose stream holds the record.
+    pub topic: String,
+    /// The offset assigned within that stream.
+    pub offset: i64,
+    /// When the bus stored the record, in unix seconds. Liveness is judged by this, never by a
+    /// clock the publisher claims.
+    pub created_at: i64,
+    /// The stored record, as JSON bytes.
+    pub payload: Vec<u8>,
+}
+
+/// A waiter's wake source: blocks until the bus may have new records, or the slice elapses.
+pub trait Wake: Send {
+    fn wait(&self, slice: std::time::Duration) -> Result<(), Error>;
+}
+
+/// A held follow lock, renewed while the follow runs.
+pub trait FollowLock: Send {
+    fn heartbeat(&self, ttl_s: i64) -> Result<(), Error>;
+}
+
+/// The storage contract behind the bus.
+///
+/// Every method here is engine-neutral: the CLI above this boundary sees records, offsets and
+/// cursors, never a table or a driver type. Two implementations exist by design (design.md,
+/// decision 1) and both must satisfy the behavioural fixtures.
+pub trait Bus: Send + Sync {
+    fn ensure_address(&self, topic: &str) -> Result<(), Error>;
+    fn publish(&self, to: &str, record: &serde_json::Value) -> Result<i64, Error>;
+    fn read_since(&self, topic: &str, offset: i64, limit: i64) -> Result<Vec<StoredRecord>, Error>;
+    fn head(&self, topic: &str) -> Result<i64, Error>;
+    fn cursor_get(&self, consumer: &str, topic: &str) -> Result<Option<i64>, Error>;
+    fn cursor_set(&self, consumer: &str, topic: &str, offset: i64) -> Result<bool, Error>;
+    fn cursor_reset(&self, consumer: &str, topic: &str) -> Result<usize, Error>;
+    fn prune_before(
+        &self,
+        topic: &str,
+        cut: i64,
+        keep: &[i64],
+        batch: usize,
+    ) -> Result<Removal, Error>;
+    fn list_addresses(&self) -> Result<Vec<(String, i64, i64)>, Error>;
+    fn list_consumers(&self, topic: Option<&str>) -> Result<Vec<(String, String, i64)>, Error>;
+    fn delete_consumers(&self, name: &str, topic: Option<&str>) -> Result<usize, Error>;
+    fn wake(&self) -> Box<dyn Wake>;
+    fn try_lock(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_s: i64,
+    ) -> Result<Option<Box<dyn FollowLock>>, Error>;
+    fn meta(&self, key: &str) -> Result<Option<String>, Error>;
+    fn compact(&self) -> Result<(), Error>;
+    fn stream_summaries(&self) -> Result<Vec<StreamSummary>, Error>;
+    fn prefix_end(&self, topic: &str, threshold: i64) -> Result<Option<i64>, Error>;
+    fn count_stream_prefix(&self, topic: &str, cut: i64, keep: &[i64]) -> Result<i64, Error>;
+    fn newest_presence_offsets(&self, topic: &str) -> Result<Vec<i64>, Error>;
+    fn oldest_offset(&self, topic: &str) -> Result<Option<i64>, Error>;
+    fn retention_record(&self, topic: &str, cut: i64, removed_total: i64) -> Result<(), Error>;
+    fn retention_watermark(&self, topic: &str) -> Result<Option<(i64, i64)>, Error>;
+    fn retention_dropped(&self, topic: &str, cursor: i64) -> Result<i64, Error>;
+    fn record_at(&self, offset: i64) -> Result<Option<(String, String)>, Error>;
+}
 
 /// One stream's size, and how old its oldest record is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +85,13 @@ pub struct StreamSummary {
     /// When the oldest record still stored in this stream was written.
     pub oldest_at: i64,
     pub newest_offset: i64,
+}
+
+/// How much a removal took, and how many statements it took to take it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Removal {
+    pub removed: usize,
+    pub batches: usize,
 }
 
 /// An open message bus.
@@ -67,6 +141,12 @@ impl Store {
                 c.execute(
                     "INSERT OR IGNORE INTO msgq_meta (key, value) VALUES (?1, ?2)",
                     ["created_by", created_by.as_str()],
+                )
+                .map_err(|e| e.to_string())?;
+                // Retention deletes records, so the count of what a lagging consumer lost has to be
+                // kept somewhere else: one row per prune, carrying the cumulative total removed.
+                c.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS msgq_retention (                         topic TEXT NOT NULL,                         cut_offset INTEGER NOT NULL,                         removed_total INTEGER NOT NULL,                         removed_at INTEGER NOT NULL,                         PRIMARY KEY (topic, cut_offset))",
                 )
                 .map_err(|e| e.to_string())?;
                 Ok(())
@@ -161,26 +241,131 @@ impl Store {
 
     /// Delete records in a stream at or below `cut`, ignoring the offsets named in `keep`.
     ///
-    /// The offsets in `keep` come from this database, so a literal list is safe and needs no
-    /// parameter juggling.
+    /// Removal runs in bounded statements so a large prefix never becomes one unbounded write. The
+    /// offsets in `keep` come from this database, so a literal list is safe and needs no parameter
+    /// juggling.
     pub fn delete_stream_prefix(
         &self,
         topic: &str,
         cut: i64,
         keep: &[i64],
-    ) -> Result<usize, Error> {
+        batch: usize,
+    ) -> Result<Removal, Error> {
+        let batch = batch.max(1) as i64;
         self.db
-            .with_conn(|c| -> Result<usize, String> {
-                c.execute(
-                    &format!(
-                        "DELETE FROM _honker_stream WHERE topic = ?1 AND offset <= {cut}{}",
+            .with_conn(|c| -> Result<Removal, String> {
+                let mut removed = 0usize;
+                let mut batches = 0usize;
+                loop {
+                    let sql = format!(
+                        "DELETE FROM _honker_stream WHERE offset IN (\
+                         SELECT offset FROM _honker_stream \
+                         WHERE topic = ?1 AND offset <= {cut}{} LIMIT {batch})",
                         self.keep_clause(keep)
-                    ),
+                    );
+                    let deleted = c.execute(&sql, [topic]).map_err(|e| e.to_string())?;
+                    if deleted == 0 {
+                        break;
+                    }
+                    removed += deleted;
+                    batches += 1;
+                    if deleted < batch as usize {
+                        break;
+                    }
+                }
+                Ok(Removal { removed, batches })
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// The oldest offset still retained in a stream, or `None` when the stream is empty.
+    pub fn oldest_offset(&self, topic: &str) -> Result<Option<i64>, Error> {
+        self.db
+            .with_conn(|c| -> Result<Option<i64>, String> {
+                c.query_row(
+                    "SELECT MIN(offset) FROM _honker_stream WHERE topic = ?1",
                     [topic],
+                    |r| r.get::<_, Option<i64>>(0),
                 )
                 .map_err(|e| e.to_string())
             })
             .map_err(Error::runtime)
+    }
+
+    /// Record that a prune removed records up to `cut`, `removed_total` of them in total.
+    pub fn retention_record(&self, topic: &str, cut: i64, removed_total: i64) -> Result<(), Error> {
+        self.db
+            .with_conn(|c| -> Result<(), String> {
+                c.execute(
+                    &format!(
+                        "INSERT INTO msgq_retention (topic, cut_offset, removed_total, removed_at) \
+                         VALUES (?1, {cut}, {removed_total}, {}) \
+                         ON CONFLICT(topic, cut_offset) DO UPDATE SET removed_total = {removed_total}, \
+                         removed_at = {}",
+                        Self::now_unix(),
+                        Self::now_unix()
+                    ),
+                    [topic],
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// How many records this stream removed after `cursor`. Zero when nothing was removed beyond it.
+    pub fn retention_dropped(&self, topic: &str, cursor: i64) -> Result<i64, Error> {
+        self.db
+            .with_conn(|c| -> Result<i64, String> {
+                let latest: i64 = c
+                    .query_row(
+                        "SELECT COALESCE(MAX(removed_total), 0) FROM msgq_retention WHERE topic = ?1",
+                        [topic],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let at_or_before: i64 = c
+                    .query_row(
+                        &format!(
+                            "SELECT COALESCE(MAX(removed_total), 0) FROM msgq_retention \
+                             WHERE topic = ?1 AND cut_offset <= {cursor}"
+                        ),
+                        [topic],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok((latest - at_or_before).max(0))
+            })
+            .map_err(Error::runtime)
+    }
+
+    /// The newest retention watermark for a stream: the last offset pruned and the running total.
+    pub fn retention_watermark(&self, topic: &str) -> Result<Option<(i64, i64)>, Error> {
+        self.db
+            .with_conn(|c| -> Result<Option<(i64, i64)>, String> {
+                let mut stmt = c
+                    .prepare(
+                        "SELECT cut_offset, removed_total FROM msgq_retention WHERE topic = ?1 \
+                         ORDER BY cut_offset DESC LIMIT 1",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let mut rows = stmt.query([topic]).map_err(|e| e.to_string())?;
+                match rows.next().map_err(|e| e.to_string())? {
+                    Some(row) => Ok(Some((
+                        row.get::<_, i64>(0).map_err(|e| e.to_string())?,
+                        row.get::<_, i64>(1).map_err(|e| e.to_string())?,
+                    ))),
+                    None => Ok(None),
+                }
+            })
+            .map_err(Error::runtime)
+    }
+
+    fn now_unix() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
     }
 
     fn keep_clause(&self, keep: &[i64]) -> String {
@@ -253,8 +438,17 @@ impl Store {
         topic: &str,
         offset: i64,
         limit: i64,
-    ) -> Result<Vec<StreamEvent>, Error> {
-        Ok(self.db.stream(topic).read_since(offset, limit)?)
+    ) -> Result<Vec<StoredRecord>, Error> {
+        let events = self.db.stream(topic).read_since(offset, limit)?;
+        Ok(events
+            .into_iter()
+            .map(|event| StoredRecord {
+                topic: event.topic,
+                offset: event.offset,
+                created_at: event.created_at,
+                payload: event.payload,
+            })
+            .collect())
     }
 
     /// Highest offset in a stream, or 0 when it has no records.
@@ -410,12 +604,236 @@ impl Store {
     }
 
     /// Acquire an advisory lock.
-    pub fn try_lock(&self, name: &str, owner: &str, ttl_s: i64) -> Result<Option<Lock>, Error> {
-        Ok(self.db.try_lock(name, owner, ttl_s)?)
+    pub fn try_lock(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_s: i64,
+    ) -> Result<Option<Box<dyn FollowLock>>, Error> {
+        let held = self.db.try_lock(name, owner, ttl_s)?;
+        Ok(held.map(|lock| Box::new(HonkerLock { lock }) as Box<dyn FollowLock>))
     }
 
-    /// A raw update waker for custom poll loops.
-    pub fn update_events(&self) -> UpdateEvents {
-        self.db.update_events()
+    /// A wake source for a poll loop.
+    pub fn wake(&self) -> Box<dyn Wake> {
+        Box::new(HonkerWake {
+            updates: self.db.update_events(),
+        })
+    }
+
+    /// The local engine needs no per-address furniture: one table holds every stream.
+    pub fn ensure_address(&self, _topic: &str) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// A held follow lock over the engine's advisory lock.
+struct HonkerLock {
+    lock: Lock,
+}
+
+impl FollowLock for HonkerLock {
+    fn heartbeat(&self, ttl_s: i64) -> Result<(), Error> {
+        Ok(self.lock.heartbeat(ttl_s).map(|_| ())?)
+    }
+}
+
+/// A wake source over the engine's update watcher.
+struct HonkerWake {
+    updates: UpdateEvents,
+}
+
+impl Wake for HonkerWake {
+    fn wait(&self, slice: std::time::Duration) -> Result<(), Error> {
+        Ok(self.updates.recv_timeout(slice).map(|_| ())?)
+    }
+}
+
+impl Bus for Store {
+    fn ensure_address(&self, topic: &str) -> Result<(), Error> {
+        Store::ensure_address(self, topic)
+    }
+    fn publish(&self, to: &str, record: &serde_json::Value) -> Result<i64, Error> {
+        Store::publish(self, to, record)
+    }
+    fn read_since(&self, topic: &str, offset: i64, limit: i64) -> Result<Vec<StoredRecord>, Error> {
+        Store::read_since(self, topic, offset, limit)
+    }
+    fn head(&self, topic: &str) -> Result<i64, Error> {
+        Store::max_offset(self, topic)
+    }
+    fn cursor_get(&self, consumer: &str, topic: &str) -> Result<Option<i64>, Error> {
+        Store::cursor_get(self, consumer, topic)
+    }
+    fn cursor_set(&self, consumer: &str, topic: &str, offset: i64) -> Result<bool, Error> {
+        Store::cursor_set(self, consumer, topic, offset)
+    }
+    fn cursor_reset(&self, consumer: &str, topic: &str) -> Result<usize, Error> {
+        Store::cursor_reset(self, consumer, topic)
+    }
+    fn prune_before(
+        &self,
+        topic: &str,
+        cut: i64,
+        keep: &[i64],
+        batch: usize,
+    ) -> Result<Removal, Error> {
+        Store::delete_stream_prefix(self, topic, cut, keep, batch)
+    }
+    fn list_addresses(&self) -> Result<Vec<(String, i64, i64)>, Error> {
+        Store::list_topics(self)
+    }
+    fn list_consumers(&self, topic: Option<&str>) -> Result<Vec<(String, String, i64)>, Error> {
+        Store::list_consumers(self, topic)
+    }
+    fn delete_consumers(&self, name: &str, topic: Option<&str>) -> Result<usize, Error> {
+        Store::delete_consumers(self, name, topic)
+    }
+    fn wake(&self) -> Box<dyn Wake> {
+        Store::wake(self)
+    }
+    fn try_lock(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_s: i64,
+    ) -> Result<Option<Box<dyn FollowLock>>, Error> {
+        Store::try_lock(self, name, owner, ttl_s)
+    }
+    fn meta(&self, key: &str) -> Result<Option<String>, Error> {
+        Store::meta(self, key)
+    }
+    fn compact(&self) -> Result<(), Error> {
+        Store::compact(self)
+    }
+    fn stream_summaries(&self) -> Result<Vec<StreamSummary>, Error> {
+        Store::stream_summaries(self)
+    }
+    fn prefix_end(&self, topic: &str, threshold: i64) -> Result<Option<i64>, Error> {
+        Store::prefix_end(self, topic, threshold)
+    }
+    fn count_stream_prefix(&self, topic: &str, cut: i64, keep: &[i64]) -> Result<i64, Error> {
+        Store::count_stream_prefix(self, topic, cut, keep)
+    }
+    fn newest_presence_offsets(&self, topic: &str) -> Result<Vec<i64>, Error> {
+        Store::newest_presence_offsets(self, topic)
+    }
+    fn oldest_offset(&self, topic: &str) -> Result<Option<i64>, Error> {
+        Store::oldest_offset(self, topic)
+    }
+    fn retention_record(&self, topic: &str, cut: i64, removed_total: i64) -> Result<(), Error> {
+        Store::retention_record(self, topic, cut, removed_total)
+    }
+    fn retention_watermark(&self, topic: &str) -> Result<Option<(i64, i64)>, Error> {
+        Store::retention_watermark(self, topic)
+    }
+    fn retention_dropped(&self, topic: &str, cursor: i64) -> Result<i64, Error> {
+        Store::retention_dropped(self, topic, cursor)
+    }
+    fn record_at(&self, offset: i64) -> Result<Option<(String, String)>, Error> {
+        Store::record_at(self, offset)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn temp_db() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "msgq-store-{}-{nanos}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("msgq.db")
+    }
+
+    fn publish(store: &Store, topic: &str, body: &str) {
+        store
+            .publish(
+                topic,
+                &json!({"v": 1, "type": "note", "from": "cli/a@b", "to": topic, "message": body}),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn removal_runs_in_bounded_batches() {
+        let path = temp_db();
+        let (store, _) = Store::open(&path).unwrap();
+        for i in 0..1_200 {
+            publish(&store, "group/a", &format!("m{i}"));
+        }
+        let head = store.max_offset("group/a").unwrap();
+        let removal = store
+            .delete_stream_prefix("group/a", head, &[], 500)
+            .unwrap();
+        assert_eq!(removal.removed, 1_200, "every record is removed");
+        assert_eq!(removal.batches, 3, "1200 records at 500 per statement");
+        assert_eq!(store.oldest_offset("group/a").unwrap(), None);
+    }
+
+    #[test]
+    fn the_watermark_counts_what_was_removed_after_a_cursor() {
+        let path = temp_db();
+        let (store, _) = Store::open(&path).unwrap();
+        for i in 0..10 {
+            publish(&store, "group/a", &format!("m{i}"));
+        }
+        let cut = store.max_offset("group/a").unwrap() - 4;
+        let removal = store
+            .delete_stream_prefix("group/a", cut, &[], 500)
+            .unwrap();
+        store
+            .retention_record("group/a", cut, removal.removed as i64)
+            .unwrap();
+
+        assert_eq!(store.retention_dropped("group/a", 0).unwrap(), 6);
+        assert_eq!(
+            store.retention_dropped("group/a", cut).unwrap(),
+            0,
+            "a cursor at the watermark lost nothing after it"
+        );
+        assert_eq!(
+            store.retention_dropped("group/a", cut - 3).unwrap(),
+            6,
+            "a cursor inside the pruned range reports the whole removed range"
+        );
+    }
+
+    #[test]
+    fn the_watermark_is_cumulative_across_prunes() {
+        let path = temp_db();
+        let (store, _) = Store::open(&path).unwrap();
+        for i in 0..6 {
+            publish(&store, "group/a", &format!("m{i}"));
+        }
+        let first = store.max_offset("group/a").unwrap() - 3;
+        let r1 = store
+            .delete_stream_prefix("group/a", first, &[], 500)
+            .unwrap();
+        store
+            .retention_record("group/a", first, r1.removed as i64)
+            .unwrap();
+
+        let second = store.max_offset("group/a").unwrap();
+        let r2 = store
+            .delete_stream_prefix("group/a", second, &[], 500)
+            .unwrap();
+        store
+            .retention_record("group/a", second, r1.removed as i64 + r2.removed as i64)
+            .unwrap();
+
+        assert_eq!(r1.removed + r2.removed, 6);
+        assert_eq!(store.retention_dropped("group/a", 0).unwrap(), 6);
+        assert_eq!(store.retention_dropped("group/a", first).unwrap(), 3);
     }
 }

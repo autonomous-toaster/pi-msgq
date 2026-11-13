@@ -66,6 +66,12 @@ The rule that keeps it that way: if pi needs something, it lands in the extensio
 convention composed from records that already exist. If a bash script cannot do it with `publish`
 and `read`, it is a protocol change and needs a reason that is not "the reference client wants it".
 
+Retention is the one place where the store keeps bookkeeping of its own. Because a prune deletes the
+records it reports on, a lagging consumer could not otherwise be told what it lost; `msgq_retention`
+records, per address, the last offset pruned and the running total removed, and `msgq consumers`
+subtracts the total at the consumer's position from the latest one. A cursor inside the last pruned
+batch therefore over-reports, which is the honest direction to be wrong in.
+
 ## Tests
 
 ```bash

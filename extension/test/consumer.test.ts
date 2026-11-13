@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import honker from "@russellthehippo/honker-node";
 
-import { Bus } from "../src/consumer.ts";
+import { HonkerBus } from "../src/consumer.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: the binding is a CJS module without usable ESM types.
 const native = honker as any;
@@ -43,7 +43,7 @@ test("first attach delivers only new records, never the retained history", async
 	publish(db, "group/a", "old-1");
 	publish(db, "group/a", "old-2");
 
-	const bus = new Bus(db, INTERVAL);
+	const bus = new HonkerBus(db, INTERVAL);
 	const seen: string[] = [];
 	const sub = bus.subscribe(
 		"group/a",
@@ -68,7 +68,7 @@ test("first attach delivers only new records, never the retained history", async
 test("the cursor advances only when the caller saves", async () => {
 	const db = tempDb();
 	const reader = native.open(db, { watcherPollIntervalMs: INTERVAL });
-	const bus = new Bus(db, INTERVAL);
+	const bus = new HonkerBus(db, INTERVAL);
 
 	let delivered = -1;
 	let cursorAtDelivery = -1;
@@ -105,7 +105,7 @@ test("the cursor advances only when the caller saves", async () => {
 
 test("two consumers advance independently", async () => {
 	const db = tempDb();
-	const bus = new Bus(db, INTERVAL);
+	const bus = new HonkerBus(db, INTERVAL);
 	const a: string[] = [];
 	const b: string[] = [];
 
@@ -147,7 +147,7 @@ test("a single record can be read at a known offset without consuming", () => {
 	const later = publish(db, "group/a", "later");
 	assert.notEqual(later, first + 1, "the offsets in this fixture must be sparse");
 
-	const bus = new Bus(db, INTERVAL);
+	const bus = new HonkerBus(db, INTERVAL);
 	const sub = bus.subscribe(
 		"group/a",
 		"c1",
@@ -180,7 +180,7 @@ test("a single record can be read at a known offset without consuming", () => {
 test("resumes from the saved cursor after reopening", async () => {
 	const db = tempDb();
 
-	const bus1 = new Bus(db, INTERVAL);
+	const bus1 = new HonkerBus(db, INTERVAL);
 	const first: string[] = [];
 	let lastOffset = 0;
 	const sub1 = bus1.subscribe(
@@ -204,7 +204,7 @@ test("resumes from the saved cursor after reopening", async () => {
 
 	publish(db, "group/a", "while-away");
 
-	const bus2 = new Bus(db, INTERVAL);
+	const bus2 = new HonkerBus(db, INTERVAL);
 	const second: string[] = [];
 	const sub2 = bus2.subscribe(
 		"group/a",
@@ -223,7 +223,7 @@ test("resumes from the saved cursor after reopening", async () => {
 test("an unsaved record is redelivered after reopening", async () => {
 	const db = tempDb();
 
-	const bus1 = new Bus(db, INTERVAL);
+	const bus1 = new HonkerBus(db, INTERVAL);
 	const seen: string[] = [];
 	const sub1 = bus1.subscribe(
 		"group/a",
@@ -241,7 +241,7 @@ test("an unsaved record is redelivered after reopening", async () => {
 	sub1.close();
 	bus1.close();
 
-	const bus2 = new Bus(db, INTERVAL);
+	const bus2 = new HonkerBus(db, INTERVAL);
 	const again: string[] = [];
 	const sub2 = bus2.subscribe(
 		"group/a",
@@ -259,7 +259,7 @@ test("an unsaved record is redelivered after reopening", async () => {
 
 test("close is idempotent", () => {
 	const db = tempDb();
-	const bus = new Bus(db, INTERVAL);
+	const bus = new HonkerBus(db, INTERVAL);
 	const sub = bus.subscribe(
 		"group/a",
 		"c1",
@@ -281,7 +281,7 @@ test("the log is emptied on the way out, with another handle still open", () => 
 	const before = walSize(db);
 	assert.ok(before > 1_000_000, `expected a grown log, got ${before}`);
 
-	const bus = new Bus(db, INTERVAL);
+	const bus = new HonkerBus(db, INTERVAL);
 	bus.truncateWal();
 
 	assert.ok(walSize(db) < before, `expected the log to shrink from ${before}`);
@@ -294,7 +294,7 @@ test("the log is emptied on the way out, with another handle still open", () => 
 });
 
 test("emptying the log after close does nothing", () => {
-	const bus = new Bus(tempDb(), INTERVAL);
+	const bus = new HonkerBus(tempDb(), INTERVAL);
 	bus.close();
 	bus.truncateWal();
 });

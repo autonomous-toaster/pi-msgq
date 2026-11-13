@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "note": "Behaviour the bus promises, independent of which engine stores it. A runner must execute every case; an engine that cannot execute a case is reported, never skipped silently.",
+  "cases": [
+    {
+      "name": "ordering",
+      "why": "records come back in the order the stream assigned"
+    },
+    {
+      "name": "cursor-monotonic",
+      "why": "a cursor never goes backwards"
+    },
+    {
+      "name": "read-is-not-destructive",
+      "why": "reading twice yields the same records and advances nothing"
+    },
+    {
+      "name": "retention-window",
+      "why": "records older than the window are removed"
+    },
+    {
+      "name": "gap-reporting",
+      "why": "a consumer behind the window is told what it lost"
+    },
+    {
+      "name": "address-round-trip",
+      "why": "an address keeps its exact spelling through the engine"
+    }
+  ]
+}

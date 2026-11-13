@@ -99,6 +99,33 @@ pub fn validate(rec: &Record) -> Result<(), Error> {
     Ok(())
 }
 
+/// The key identifier of a body this build cannot interpret, when the record declares one.
+///
+/// A record whose body is encoded declares it in `meta.enc`. Presence and acknowledgement bodies are
+/// never opaque: the roster and the lifecycle read them, and `PROTOCOL.md` calls both public
+/// metadata. A declaration on those bodies is therefore ignored rather than obeyed.
+pub fn opaque_body(value: &Value) -> Option<String> {
+    if !body_may_be_opaque(value) {
+        return None;
+    }
+    let enc = value.get("meta")?.get("enc")?;
+    // A declaration without an algorithm is not a declaration.
+    enc.get("alg").and_then(Value::as_str)?;
+    enc.get("kid").and_then(Value::as_str).map(str::to_string)
+}
+
+/// Whether the record's body belongs to the kind that may be opaque at all.
+fn body_may_be_opaque(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("event") {
+        return true;
+    }
+    let kind = value
+        .get("event")
+        .and_then(|e| e.get("kind"))
+        .and_then(Value::as_str);
+    !matches!(kind, Some("presence") | Some("ack"))
+}
+
 /// Serialize a record to a JSON value.
 pub fn to_value(rec: &Record) -> Result<Value, Error> {
     Ok(serde_json::to_value(rec)?)
@@ -208,6 +235,43 @@ mod tests {
     fn empty_type_is_rejected() {
         let value = json!({"v": 1, "type": "", "from": "a", "to": "b", "message": "hi"});
         assert!(parse_and_validate(&value).is_err());
+    }
+
+    #[test]
+    fn a_declared_encoding_makes_the_body_opaque() {
+        let value = json!({
+            "v": 1, "type": "note", "from": "a", "to": "b", "message": "x",
+            "meta": { "enc": { "alg": "age", "kid": "acme-1" } }
+        });
+        assert_eq!(opaque_body(&value).as_deref(), Some("acme-1"));
+    }
+
+    #[test]
+    fn a_plain_body_is_not_opaque() {
+        let value = json!({"v": 1, "type": "note", "from": "a", "to": "b", "message": "x"});
+        assert_eq!(opaque_body(&value), None);
+    }
+
+    #[test]
+    fn a_declaration_without_a_key_identifier_is_not_opaque() {
+        // A malformed declaration never costs the reader a body it could have read.
+        let value = json!({
+            "v": 1, "type": "note", "from": "a", "to": "b", "message": "x",
+            "meta": { "enc": { "alg": "age" } }
+        });
+        assert_eq!(opaque_body(&value), None);
+    }
+
+    #[test]
+    fn presence_and_acknowledgement_bodies_are_never_opaque() {
+        for kind in ["presence", "ack"] {
+            let value = json!({
+                "v": 1, "type": "event", "from": "a", "to": "b",
+                "event": { "kind": kind },
+                "meta": { "enc": { "alg": "age", "kid": "acme-1" } }
+            });
+            assert_eq!(opaque_body(&value), None, "{kind} must stay readable");
+        }
     }
 }
 

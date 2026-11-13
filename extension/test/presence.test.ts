@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Bus, openRaw } from "../src/consumer.ts";
+import { HonkerBus, openRaw, type Bus } from "../src/consumer.ts";
 import { PRESENCE_ADDRESS, Presence, PRESENCE_TTL_S } from "../src/presence.ts";
 import type { MsgqRecord } from "../src/record.ts";
 
@@ -39,7 +39,7 @@ function makePresence(
 		card: Record<string, string>;
 	}> = {},
 ) {
-	const bus = new Bus(db, INTERVAL);
+	const bus = new HonkerBus(db, INTERVAL);
 	const presence = new Presence(bus, {
 		address: over.address ?? "session/api-worker",
 		participant: over.participant ?? "01a127d9",
@@ -179,7 +179,7 @@ test("stop retracts presence, and nothing is published afterwards", () => {
 
 test("the default lifetime is used when none is given", () => {
 	const db = tempDb();
-	const bus = new Bus(db, INTERVAL);
+	const bus = new HonkerBus(db, INTERVAL);
 	const presence = new Presence(bus, {
 		address: "session/x",
 		participant: "01a127d9",

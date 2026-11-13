@@ -73,6 +73,24 @@
       "publish": "reject",
       "read": "reject",
       "why": "to is required: it names the stream the record belongs to"
+    },
+    {
+      "file": "13-meta-enc.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "meta.enc is an additive declaration: both sides accept it and preserve the key"
+    },
+    {
+      "file": "14-meta-reply.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "meta.reply marks a question without changing the envelope"
+    },
+    {
+      "file": "15-opaque-body.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "a record may be accepted while its body stays uninterpretable to a reader"
     }
   ]
 }

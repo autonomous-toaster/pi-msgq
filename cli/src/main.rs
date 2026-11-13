@@ -85,9 +85,9 @@ enum Command {
     },
     /// Wait for acknowledgements of a published message.
     Await {
-        /// The offset printed when the message was published.
-        offset: i64,
-        /// Address the acknowledgements arrive on (default: cli/<user>@<host>).
+        /// A record id (address#offset), or a bare offset together with --on.
+        target: String,
+        /// Address the acknowledgements arrive on; required with a bare offset.
         #[arg(long, value_name = "ADDRESS")]
         on: Option<String>,
         /// Seconds to wait; 0 waits without a limit.
@@ -116,6 +116,9 @@ enum Command {
         /// Wrap each JSON line as {topic, offset, created_at, record}.
         #[arg(long, requires = "json")]
         with_offset: bool,
+        /// Exit non-zero when retention removed records the caller asked for.
+        #[arg(long)]
+        strict: bool,
     },
     /// Follow addresses, advancing a durable consumer cursor.
     Follow {
@@ -186,7 +189,10 @@ enum Command {
     Prune {
         /// Age: a number and one of d, h, m, s. Records older than it are removable.
         #[arg(long, value_name = "AGE")]
-        older_than: String,
+        older_than: Option<String>,
+        /// Retention window to apply instead of the configured one.
+        #[arg(long, value_name = "AGE")]
+        retention: Option<String>,
         /// Remove what would be removed, instead of reporting it.
         #[arg(long)]
         apply: bool,
@@ -242,7 +248,17 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Error> {
-    let db = msgq::config::resolve(cli.db.as_ref());
+    let db = match msgq::config::resolve_target(cli.db.as_ref())? {
+        msgq::config::Target::Local(path) => path,
+        msgq::config::Target::Shared(dsn) => {
+            // The shared engine is the next group's work; refusing by name beats silently writing
+            // a file whose name looks like a connection string.
+            let _ = dsn;
+            return Err(msgq::error::Error::usage(
+                "this build has no shared engine yet; point --db or MSGQ_DB at a filesystem path",
+            ));
+        }
+    };
     match cli.command {
         Command::Publish {
             address,
@@ -291,11 +307,11 @@ fn run(cli: Cli) -> Result<(), Error> {
             },
         ),
         Command::Await {
-            offset,
+            target,
             on,
             timeout,
             json,
-        } => commands::await_ack(&db, offset, on.as_deref(), timeout, json),
+        } => commands::await_ack(&db, &target, on.as_deref(), timeout, json),
         Command::Read {
             addresses,
             from,
@@ -303,6 +319,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             limit,
             json,
             with_offset,
+            strict,
         } => commands::read(
             &db,
             &addresses,
@@ -310,6 +327,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             limit,
             json,
             with_offset,
+            strict,
         ),
         Command::Follow {
             addresses,
@@ -357,8 +375,13 @@ fn run(cli: Cli) -> Result<(), Error> {
             }
             Ok(())
         }
-        Command::Prune { older_than, apply } => {
-            commands::prune(&db, commands::PruneArgs { older_than, apply })
+        Command::Prune {
+            older_than,
+            retention,
+            apply,
+        } => {
+            let window = older_than.or(retention);
+            commands::prune(&db, commands::PruneArgs { window, apply })
         }
         Command::Consumers {
             topic,
