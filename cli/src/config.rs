@@ -114,6 +114,38 @@ pub fn display(path: &Path) -> String {
     path.display().to_string()
 }
 
+impl Target {
+    /// The file backing a local bus, or nothing when the bus is shared.
+    pub fn local_path(&self) -> Option<&Path> {
+        match self {
+            Target::Local(path) => Some(path),
+            Target::Shared(_) => None,
+        }
+    }
+
+    /// How to name the bus in output. A connection string is never printed: it may carry a
+    /// password, and a printed password cannot be unprinted.
+    pub fn display(&self) -> String {
+        match self {
+            Target::Local(path) => crate::config::display(path),
+            Target::Shared(dsn) => {
+                let after_scheme = dsn.split_once("://").map(|(_, rest)| rest).unwrap_or(dsn);
+                let authority = after_scheme.split(['/', '?']).next().unwrap_or("");
+                let host = authority.rsplit('@').next().unwrap_or(authority);
+                let database = after_scheme
+                    .split_once('/')
+                    .map(|(_, rest)| rest.split('?').next().unwrap_or(rest))
+                    .unwrap_or("");
+                if database.is_empty() {
+                    format!("postgres://{host}")
+                } else {
+                    format!("postgres://{host}/{database}")
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

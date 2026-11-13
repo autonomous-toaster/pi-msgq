@@ -67,7 +67,14 @@ test:
     fi
     rm -f {{crate}}/target/lcov-*.info
     mkdir -p {{crate}}/target
-    output=$(cd {{crate}} && cargo llvm-cov nextest --lib --bins --tests \
+    # The shared engine's tests need a database. Without one they measure nothing, and `crap` then
+    # scores the whole shared engine as untested, which is true. Say so rather than hide it.
+    if [ -z "${MSGQ_TEST_DATABASE_URI:-}" ]; then
+        echo "MSGQ_TEST_DATABASE_URI is unset: the shared engine's tests will not run and"
+        echo "`just crap` will refuse the result. Point it at a database with pgmq installed,"
+        echo "for example: export MSGQ_TEST_DATABASE_URI=postgres://msgq@127.0.0.1:55432/msgq"
+    fi
+    output=$(cd {{crate}} && MSGQ_TEST_DATABASE_URI="${MSGQ_TEST_DATABASE_URI:-}" cargo llvm-cov nextest --lib --bins --tests \
         --lcov --output-path "$LCOV_FILE" 2>&1)
     code=$?
     if [ $code -eq 0 ]; then

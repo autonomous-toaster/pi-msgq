@@ -9,6 +9,7 @@ pub mod card;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod pg;
 pub mod presence;
 pub mod record;
 pub mod store;

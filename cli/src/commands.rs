@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -91,10 +90,10 @@ pub enum CursorAction {
 }
 
 /// Publish one message to an address.
-pub fn publish(db_path: &Path, args: PublishArgs) -> Result<(), Error> {
+pub fn publish(db: &crate::config::Target, args: PublishArgs) -> Result<(), Error> {
     let canonical = address::canonicalize(&args.address)?;
     let value = build_record(&canonical, &args)?;
-    let (store, _) = Store::open(db_path)?;
+    let (store, _) = Store::open(db)?;
 
     // When awaiting, record where the reply stream ends *before* publishing, so an
     // acknowledgement that arrives immediately is still reported.
@@ -131,13 +130,13 @@ pub fn publish(db_path: &Path, args: PublishArgs) -> Result<(), Error> {
 /// which stream to watch. Offsets are unique only within a stream, so a bare offset names no
 /// record: the caller gives a record id of the form address#offset, or an offset plus --on.
 pub fn await_ack(
-    db_path: &Path,
+    db: &crate::config::Target,
     target: &str,
     on: Option<&str>,
     timeout_s: u64,
     json_out: bool,
 ) -> Result<(), Error> {
-    let (store, _) = Store::open(db_path)?;
+    let (store, _) = Store::open(db)?;
     let (stream, offset) = resolve_await_target(&store, target, on)?;
     // Re-attaching has no snapshot to take, so the reply stream is read from its start.
     await_terminal(&store, &stream, 0, offset, timeout_s, json_out)
@@ -191,7 +190,7 @@ fn resolve_await_target(
     }
 }
 
-pub fn ask(db_path: &Path, args: AskArgs) -> Result<(), Error> {
+pub fn ask(db: &crate::config::Target, args: AskArgs) -> Result<(), Error> {
     let canonical = address::canonicalize(&args.address)?;
     let message = match args.message.as_deref() {
         Some("-") => read_stdin()?,
@@ -210,7 +209,7 @@ pub fn ask(db_path: &Path, args: AskArgs) -> Result<(), Error> {
     record::validate(&rec)?;
     let value = record::to_value(&rec)?;
 
-    let (store, _) = Store::open(db_path)?;
+    let (store, _) = Store::open(db)?;
     // The answer comes back to the sender, so record where that stream ends before asking.
     let stream = match args.on.as_deref() {
         Some(value) => address::canonicalize(value)?,
@@ -244,7 +243,7 @@ fn await_reply(
     timeout_s: u64,
     json_out: bool,
 ) -> Result<(), Error> {
-    let updates = store.wake();
+    let updates = store.wake(&[stream]);
     let started = Instant::now();
     let mut cursor = from_offset;
 
@@ -323,7 +322,7 @@ fn await_terminal(
     timeout_s: u64,
     json_out: bool,
 ) -> Result<(), Error> {
-    let updates = store.wake();
+    let updates = store.wake(&[stream]);
     let started = Instant::now();
     let mut cursor = from_offset;
 
@@ -482,7 +481,7 @@ fn resolve_reply_to(raw: &str, from: &str) -> Result<i64, Error> {
 
 /// Stateless read: never creates or advances a consumer cursor.
 pub fn read(
-    db_path: &Path,
+    db: &crate::config::Target,
     addresses: &[String],
     from: FromSpec,
     limit: i64,
@@ -491,7 +490,7 @@ pub fn read(
     strict: bool,
 ) -> Result<(), Error> {
     let targets = address::canonicalize_all(addresses)?;
-    let (store, _) = Store::open(db_path)?;
+    let (store, _) = Store::open(db)?;
     let limit = limit.max(1);
 
     let mut events: Vec<StoredRecord> = Vec::new();
@@ -606,7 +605,7 @@ fn renew_all(locks: &[Box<dyn crate::store::FollowLock>]) {
 
 /// Cursor-based follow: resumes a consumer and advances its offsets.
 pub fn follow(
-    db_path: &Path,
+    db: &crate::config::Target,
     addresses: &[String],
     consumer: &str,
     from: FromSpec,
@@ -614,7 +613,7 @@ pub fn follow(
     with_offset: bool,
 ) -> Result<(), Error> {
     let targets = address::canonicalize_all(addresses)?;
-    let (store, _) = Store::open(db_path)?;
+    let (store, _) = Store::open(db)?;
     let owner = format!("msgq:{}:{}", std::process::id(), nanos());
 
     let locks = take_follow_locks(&store, &targets, consumer, &owner)?;
@@ -626,7 +625,8 @@ pub fn follow(
         let _ = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst));
     }
 
-    let updates = store.wake();
+    let watched: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let updates = store.wake(&watched);
     let mut last_renew = Instant::now();
 
     while !interrupted.load(Ordering::SeqCst) {
@@ -657,8 +657,8 @@ pub fn follow(
 }
 
 /// List distinct topics with message counts and highest offsets.
-pub fn topics(db_path: &Path, json_out: bool) -> Result<(), Error> {
-    let (store, _) = Store::open(db_path)?;
+pub fn topics(db: &crate::config::Target, json_out: bool) -> Result<(), Error> {
+    let (store, _) = Store::open(db)?;
     let rows = store.list_topics()?;
     if json_out {
         let array: Vec<Value> = rows
@@ -678,7 +678,7 @@ pub fn topics(db_path: &Path, json_out: bool) -> Result<(), Error> {
 
 /// List or remove consumer cursors.
 pub fn consumers(
-    db_path: &Path,
+    db: &crate::config::Target,
     topic: Option<&str>,
     action: ConsumersAction,
     json_out: bool,
@@ -687,7 +687,7 @@ pub fn consumers(
         Some(t) => Some(address::canonicalize(t)?),
         None => None,
     };
-    let (store, _) = Store::open(db_path)?;
+    let (store, _) = Store::open(db)?;
 
     match action {
         ConsumersAction::List => {
@@ -767,8 +767,8 @@ fn live_participants(store: &dyn Bus) -> Result<BTreeSet<String>, Error> {
 ///
 /// Text columns are address, kind, state, alias and remaining lifetime; `--wide` adds one locator
 /// column built by [`card::summary`]. `--json` carries the card as an object, unchanged.
-pub fn sessions(db_path: &Path, json_out: bool, wide: bool) -> Result<(), Error> {
-    let (store, _) = Store::open(db_path)?;
+pub fn sessions(db: &crate::config::Target, json_out: bool, wide: bool) -> Result<(), Error> {
+    let (store, _) = Store::open(db)?;
     let now = unix_now();
 
     // One entry per participant. Stream order is the truth: the last record for a participant is
@@ -856,9 +856,9 @@ pub struct PruneArgs {
 const PRUNE_BATCH: usize = 500;
 
 /// Remove records older than an age, never removing one a consumer has not passed.
-pub fn prune(db_path: &Path, args: PruneArgs) -> Result<(), Error> {
+pub fn prune(db: &crate::config::Target, args: PruneArgs) -> Result<(), Error> {
     let age = resolve_retention(args.window.as_deref())?;
-    let (store, _) = Store::open(db_path)?;
+    let (store, _) = Store::open(db)?;
     let threshold = unix_now() - age;
 
     // Presence is a window, not a history: the newest record of every participant is what the
@@ -976,8 +976,8 @@ fn is_session_id(value: &str) -> bool {
 ///
 /// Only session-shaped consumer names are considered: a cursor named by a script is that script's
 /// business, and collecting it would move its position without anybody asking.
-pub fn consumers_gc(db_path: &Path, apply: bool) -> Result<(), Error> {
-    let (store, _) = Store::open(db_path)?;
+pub fn consumers_gc(db: &crate::config::Target, apply: bool) -> Result<(), Error> {
+    let (store, _) = Store::open(db)?;
     let live = live_participants(&store)?;
 
     let mut candidates: Vec<(String, String)> = Vec::new();
@@ -1013,8 +1013,8 @@ fn unix_now() -> i64 {
 }
 
 /// Read, set, or reset one consumer cursor.
-pub fn cursor(db_path: &Path, action: CursorAction) -> Result<(), Error> {
-    let (store, _) = Store::open(db_path)?;
+pub fn cursor(db: &crate::config::Target, action: CursorAction) -> Result<(), Error> {
+    let (store, _) = Store::open(db)?;
     match action {
         CursorAction::Get { consumer, topic } => {
             let topic = address::canonicalize(&topic)?;
@@ -1040,12 +1040,17 @@ pub fn cursor(db_path: &Path, action: CursorAction) -> Result<(), Error> {
 }
 
 /// Report database path, size, contents, and protocol version.
-pub fn db_info(db_path: &Path) -> Result<(), Error> {
-    let existed_before = db_path.exists();
-    let (store, created) = Store::open(db_path)?;
+pub fn db_info(db: &crate::config::Target) -> Result<(), Error> {
+    let local = db.local_path().map(|path| path.to_path_buf());
+    let existed_before = local.as_ref().is_some_and(|path| path.exists());
+    let (store, created) = Store::open(db)?;
     let now = unix_now();
 
-    let size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+    let size = local
+        .as_ref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
     let version = store
         .meta("protocol_version")?
         .unwrap_or_else(|| "unknown".to_string());
@@ -1056,7 +1061,7 @@ pub fn db_info(db_path: &Path) -> Result<(), Error> {
     let consumers = store.list_consumers(None)?;
     let messages: i64 = streams.iter().map(|stream| stream.records).sum();
 
-    println!("path:             {}", crate::config::display(db_path));
+    println!("path:             {}", db.display());
     println!(
         "existed_before:   {}",
         if existed_before { "yes" } else { "no" }
@@ -1064,13 +1069,16 @@ pub fn db_info(db_path: &Path) -> Result<(), Error> {
     println!("created:          {}", if created { "yes" } else { "no" });
     println!("size_bytes:       {size}");
     // The log carries the recent writes while the bus is open, so the file alone under-reports it.
-    let wal_size = {
-        let mut path = db_path.as_os_str().to_os_string();
-        path.push("-wal");
-        std::fs::metadata(std::path::PathBuf::from(path))
-            .map(|m| m.len())
-            .unwrap_or(0)
-    };
+    let wal_size = local
+        .as_ref()
+        .map(|path| {
+            let mut path = path.as_os_str().to_os_string();
+            path.push("-wal");
+            std::fs::metadata(std::path::PathBuf::from(path))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
     println!("wal_bytes:        {wal_size}");
     println!("protocol_version: {version}");
     println!("created_by:       {created_by}");

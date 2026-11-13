@@ -248,17 +248,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Error> {
-    let db = match msgq::config::resolve_target(cli.db.as_ref())? {
-        msgq::config::Target::Local(path) => path,
-        msgq::config::Target::Shared(dsn) => {
-            // The shared engine is the next group's work; refusing by name beats silently writing
-            // a file whose name looks like a connection string.
-            let _ = dsn;
-            return Err(msgq::error::Error::usage(
-                "this build has no shared engine yet; point --db or MSGQ_DB at a filesystem path",
-            ));
-        }
-    };
+    let db = msgq::config::resolve_target(cli.db.as_ref())?;
     match cli.command {
         Command::Publish {
             address,

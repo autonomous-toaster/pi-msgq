@@ -351,23 +351,28 @@ fn await_derives_the_reply_address_from_the_message() {
 }
 
 #[test]
-fn a_connection_string_is_refused_and_creates_nothing() {
+fn a_connection_string_selects_the_shared_engine_and_creates_no_file() {
     let db = temp_db();
     let dir = db.parent().unwrap();
-    let dsn = "postgres://bus@host/db";
+    // Port 1 refuses immediately, so the test proves the engine was selected, not that a host
+    // happened to answer.
+    let dsn = "postgres://bus@127.0.0.1:1/db";
 
     let out = Command::new(bin())
         .current_dir(dir)
         .args(["--db", dsn, "publish", "group/a", "hi"])
         .output()
         .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "an unimplemented engine is a usage error"
+    assert!(
+        !out.status.success(),
+        "an unreachable server is an error, not a silent local write"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("shared engine"), "{stderr}");
+    assert!(stderr.contains("cannot connect to the bus"), "{stderr}");
+    assert!(
+        !stderr.contains(dsn),
+        "the connection string is never printed: {stderr}"
+    );
 
     // The location is a connection string, so it must not become a file on disk.
     let created: Vec<String> = std::fs::read_dir(dir)

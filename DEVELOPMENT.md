@@ -72,6 +72,50 @@ records, per address, the last offset pruned and the running total removed, and 
 subtracts the total at the consumer's position from the latest one. A cursor inside the last pruned
 batch therefore over-reports, which is the honest direction to be wrong in.
 
+## Two engines, one product
+
+The bus is one product with two engines, and a deployment runs **one** of them:
+
+- **local** — SQLite through honker, one file, created on first use.
+- **shared** — PostgreSQL through pgmq, several machines and users on one server.
+
+There is no relay, no bridge, no dual write, and no sync. A deployment picks an engine by what
+`--db` / `MSGQ_DB` names: a connection string (`postgres://…`) selects the shared engine, anything
+else is a path to a file. Nothing may read both, and no feature may require the other engine to be
+present.
+
+The seam is `Bus` in `cli/src/store.rs`, mirrored by the `Bus` interface in
+`extension/src/consumer.ts`. Above that seam the code sees records, offsets and cursors; it may not
+name a table, a driver type or a queue. Adding an engine means implementing the trait, not branching
+above it — a `match` on the engine name anywhere else is the bug this boundary exists to prevent.
+
+Inside the seam, the two engines divide work differently while promising the same thing:
+
+| | local | shared |
+| --- | --- | --- |
+| storage | one SQLite file | pgmq queues in PostgreSQL |
+| offsets | a stream's own counter | `msg_id`, which is per queue |
+| retention | time window, prefix delete | time window, prefix delete |
+| wake | honker's update events | the engine's insert notification, else polling |
+| trust | file permissions | a credential the server checks |
+
+Because offsets are per queue on the shared engine, a record's identity is `(address, offset)` and
+the address is stamped into each record's `headers` as well as the `msgq.address` registry. Queue
+names are derived from the address (a slug plus a digest), never passed through: pgmq lowercases and
+shortens table names, so a passed-through name would merge `session/Api` with `session/api`.
+
+The contract that keeps them honest is the behavioural fixture family in
+`protocol/fixtures/behaviour/`. It runs against whichever engine is named, and nothing is skipped:
+
+```bash
+cargo test --manifest-path cli/Cargo.toml --test behaviour              # local
+MSGQ_BEHAVIOUR_ENGINE=shared MSGQ_TEST_DATABASE_URI=postgres://… \
+  cargo test --manifest-path cli/Cargo.toml --test behaviour            # shared
+```
+
+A case with no runner fails the suite rather than passing quietly, and `cargo test --test pg` runs
+the shared engine's own tests when `MSGQ_TEST_DATABASE_URI` is set.
+
 ## Tests
 
 ```bash

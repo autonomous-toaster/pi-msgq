@@ -39,7 +39,9 @@ pub trait FollowLock: Send {
 /// Every method here is engine-neutral: the CLI above this boundary sees records, offsets and
 /// cursors, never a table or a driver type. Two implementations exist by design (design.md,
 /// decision 1) and both must satisfy the behavioural fixtures.
-pub trait Bus: Send + Sync {
+pub trait Bus: Send {
+    /// Which engine serves this bus, for reporting.
+    fn engine(&self) -> &'static str;
     fn ensure_address(&self, topic: &str) -> Result<(), Error>;
     fn publish(&self, to: &str, record: &serde_json::Value) -> Result<i64, Error>;
     fn read_since(&self, topic: &str, offset: i64, limit: i64) -> Result<Vec<StoredRecord>, Error>;
@@ -57,7 +59,8 @@ pub trait Bus: Send + Sync {
     fn list_addresses(&self) -> Result<Vec<(String, i64, i64)>, Error>;
     fn list_consumers(&self, topic: Option<&str>) -> Result<Vec<(String, String, i64)>, Error>;
     fn delete_consumers(&self, name: &str, topic: Option<&str>) -> Result<usize, Error>;
-    fn wake(&self) -> Box<dyn Wake>;
+    /// A wake source for the named topics. An engine that cannot subscribe falls back to polling.
+    fn wake(&self, topics: &[&str]) -> Box<dyn Wake>;
     fn try_lock(
         &self,
         name: &str,
@@ -95,11 +98,11 @@ pub struct Removal {
 }
 
 /// An open message bus.
-pub struct Store {
+pub struct LocalStore {
     db: Database,
 }
 
-impl Store {
+impl LocalStore {
     /// Open (creating if needed) the bus and ensure owned metadata exists.
     ///
     /// Returns the store and whether the database file was created here.
@@ -115,7 +118,7 @@ impl Store {
 
         let db = Database::open(path)
             .map_err(|e| Error::runtime(format!("cannot open {}: {e}", path.display())))?;
-        let store = Store { db };
+        let store = LocalStore { db };
         store.init_meta()?;
 
         if created {
@@ -649,27 +652,33 @@ impl Wake for HonkerWake {
     }
 }
 
-impl Bus for Store {
+impl Bus for LocalStore {
+    fn engine(&self) -> &'static str {
+        "local"
+    }
+    fn wake(&self, _topics: &[&str]) -> Box<dyn Wake> {
+        LocalStore::wake(self)
+    }
     fn ensure_address(&self, topic: &str) -> Result<(), Error> {
-        Store::ensure_address(self, topic)
+        LocalStore::ensure_address(self, topic)
     }
     fn publish(&self, to: &str, record: &serde_json::Value) -> Result<i64, Error> {
-        Store::publish(self, to, record)
+        LocalStore::publish(self, to, record)
     }
     fn read_since(&self, topic: &str, offset: i64, limit: i64) -> Result<Vec<StoredRecord>, Error> {
-        Store::read_since(self, topic, offset, limit)
+        LocalStore::read_since(self, topic, offset, limit)
     }
     fn head(&self, topic: &str) -> Result<i64, Error> {
-        Store::max_offset(self, topic)
+        LocalStore::max_offset(self, topic)
     }
     fn cursor_get(&self, consumer: &str, topic: &str) -> Result<Option<i64>, Error> {
-        Store::cursor_get(self, consumer, topic)
+        LocalStore::cursor_get(self, consumer, topic)
     }
     fn cursor_set(&self, consumer: &str, topic: &str, offset: i64) -> Result<bool, Error> {
-        Store::cursor_set(self, consumer, topic, offset)
+        LocalStore::cursor_set(self, consumer, topic, offset)
     }
     fn cursor_reset(&self, consumer: &str, topic: &str) -> Result<usize, Error> {
-        Store::cursor_reset(self, consumer, topic)
+        LocalStore::cursor_reset(self, consumer, topic)
     }
     fn prune_before(
         &self,
@@ -678,19 +687,168 @@ impl Bus for Store {
         keep: &[i64],
         batch: usize,
     ) -> Result<Removal, Error> {
-        Store::delete_stream_prefix(self, topic, cut, keep, batch)
+        LocalStore::delete_stream_prefix(self, topic, cut, keep, batch)
     }
     fn list_addresses(&self) -> Result<Vec<(String, i64, i64)>, Error> {
-        Store::list_topics(self)
+        LocalStore::list_topics(self)
     }
     fn list_consumers(&self, topic: Option<&str>) -> Result<Vec<(String, String, i64)>, Error> {
-        Store::list_consumers(self, topic)
+        LocalStore::list_consumers(self, topic)
     }
     fn delete_consumers(&self, name: &str, topic: Option<&str>) -> Result<usize, Error> {
-        Store::delete_consumers(self, name, topic)
+        LocalStore::delete_consumers(self, name, topic)
     }
-    fn wake(&self) -> Box<dyn Wake> {
-        Store::wake(self)
+
+    fn try_lock(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_s: i64,
+    ) -> Result<Option<Box<dyn FollowLock>>, Error> {
+        LocalStore::try_lock(self, name, owner, ttl_s)
+    }
+    fn meta(&self, key: &str) -> Result<Option<String>, Error> {
+        LocalStore::meta(self, key)
+    }
+    fn compact(&self) -> Result<(), Error> {
+        LocalStore::compact(self)
+    }
+    fn stream_summaries(&self) -> Result<Vec<StreamSummary>, Error> {
+        LocalStore::stream_summaries(self)
+    }
+    fn prefix_end(&self, topic: &str, threshold: i64) -> Result<Option<i64>, Error> {
+        LocalStore::prefix_end(self, topic, threshold)
+    }
+    fn count_stream_prefix(&self, topic: &str, cut: i64, keep: &[i64]) -> Result<i64, Error> {
+        LocalStore::count_stream_prefix(self, topic, cut, keep)
+    }
+    fn newest_presence_offsets(&self, topic: &str) -> Result<Vec<i64>, Error> {
+        LocalStore::newest_presence_offsets(self, topic)
+    }
+    fn oldest_offset(&self, topic: &str) -> Result<Option<i64>, Error> {
+        LocalStore::oldest_offset(self, topic)
+    }
+    fn retention_record(&self, topic: &str, cut: i64, removed_total: i64) -> Result<(), Error> {
+        LocalStore::retention_record(self, topic, cut, removed_total)
+    }
+    fn retention_watermark(&self, topic: &str) -> Result<Option<(i64, i64)>, Error> {
+        LocalStore::retention_watermark(self, topic)
+    }
+    fn retention_dropped(&self, topic: &str, cursor: i64) -> Result<i64, Error> {
+        LocalStore::retention_dropped(self, topic, cursor)
+    }
+    fn record_at(&self, offset: i64) -> Result<Option<(String, String)>, Error> {
+        LocalStore::record_at(self, offset)
+    }
+}
+
+/// An open message bus: whichever engine the resolved location selects.
+///
+/// Everything above this type is engine-neutral, so a command never learns which storage it is
+/// talking to.
+pub struct Store {
+    inner: Box<dyn Bus>,
+}
+
+impl Store {
+    /// Open the bus named by the location, creating a local file when it does not exist.
+    ///
+    /// Returns the store and whether the location was created here.
+    pub fn open(target: &crate::config::Target) -> Result<(Self, bool), Error> {
+        match target {
+            crate::config::Target::Local(path) => {
+                let (local, created) = LocalStore::open(path)?;
+                Ok((
+                    Store {
+                        inner: Box::new(local),
+                    },
+                    created,
+                ))
+            }
+            crate::config::Target::Shared(dsn) => {
+                let pg = crate::pg::PgStore::connect(dsn)?;
+                Ok((
+                    Store {
+                        inner: Box::new(pg),
+                    },
+                    false,
+                ))
+            }
+        }
+    }
+
+    /// Which engine serves this bus, for reporting.
+    pub fn engine(&self) -> &'static str {
+        self.inner.engine()
+    }
+
+    /// The newest offset in a stream. Named for what callers ask for; the trait calls it head.
+    pub fn max_offset(&self, topic: &str) -> Result<i64, Error> {
+        self.inner.head(topic)
+    }
+
+    /// Every address with its record count and newest offset.
+    pub fn list_topics(&self) -> Result<Vec<(String, i64, i64)>, Error> {
+        self.inner.list_addresses()
+    }
+
+    /// Remove a prefix in bounded batches.
+    pub fn delete_stream_prefix(
+        &self,
+        topic: &str,
+        cut: i64,
+        keep: &[i64],
+        batch: usize,
+    ) -> Result<Removal, Error> {
+        self.inner.prune_before(topic, cut, keep, batch)
+    }
+}
+
+impl Bus for Store {
+    fn engine(&self) -> &'static str {
+        self.inner.engine()
+    }
+    fn ensure_address(&self, topic: &str) -> Result<(), Error> {
+        self.inner.ensure_address(topic)
+    }
+    fn publish(&self, to: &str, record: &serde_json::Value) -> Result<i64, Error> {
+        self.inner.publish(to, record)
+    }
+    fn read_since(&self, topic: &str, offset: i64, limit: i64) -> Result<Vec<StoredRecord>, Error> {
+        self.inner.read_since(topic, offset, limit)
+    }
+    fn head(&self, topic: &str) -> Result<i64, Error> {
+        self.inner.head(topic)
+    }
+    fn cursor_get(&self, consumer: &str, topic: &str) -> Result<Option<i64>, Error> {
+        self.inner.cursor_get(consumer, topic)
+    }
+    fn cursor_set(&self, consumer: &str, topic: &str, offset: i64) -> Result<bool, Error> {
+        self.inner.cursor_set(consumer, topic, offset)
+    }
+    fn cursor_reset(&self, consumer: &str, topic: &str) -> Result<usize, Error> {
+        self.inner.cursor_reset(consumer, topic)
+    }
+    fn prune_before(
+        &self,
+        topic: &str,
+        cut: i64,
+        keep: &[i64],
+        batch: usize,
+    ) -> Result<Removal, Error> {
+        self.inner.prune_before(topic, cut, keep, batch)
+    }
+    fn list_addresses(&self) -> Result<Vec<(String, i64, i64)>, Error> {
+        self.inner.list_addresses()
+    }
+    fn list_consumers(&self, topic: Option<&str>) -> Result<Vec<(String, String, i64)>, Error> {
+        self.inner.list_consumers(topic)
+    }
+    fn delete_consumers(&self, name: &str, topic: Option<&str>) -> Result<usize, Error> {
+        self.inner.delete_consumers(name, topic)
+    }
+    fn wake(&self, topics: &[&str]) -> Box<dyn Wake> {
+        self.inner.wake(topics)
     }
     fn try_lock(
         &self,
@@ -698,40 +856,40 @@ impl Bus for Store {
         owner: &str,
         ttl_s: i64,
     ) -> Result<Option<Box<dyn FollowLock>>, Error> {
-        Store::try_lock(self, name, owner, ttl_s)
+        self.inner.try_lock(name, owner, ttl_s)
     }
     fn meta(&self, key: &str) -> Result<Option<String>, Error> {
-        Store::meta(self, key)
+        self.inner.meta(key)
     }
     fn compact(&self) -> Result<(), Error> {
-        Store::compact(self)
+        self.inner.compact()
     }
     fn stream_summaries(&self) -> Result<Vec<StreamSummary>, Error> {
-        Store::stream_summaries(self)
+        self.inner.stream_summaries()
     }
     fn prefix_end(&self, topic: &str, threshold: i64) -> Result<Option<i64>, Error> {
-        Store::prefix_end(self, topic, threshold)
+        self.inner.prefix_end(topic, threshold)
     }
     fn count_stream_prefix(&self, topic: &str, cut: i64, keep: &[i64]) -> Result<i64, Error> {
-        Store::count_stream_prefix(self, topic, cut, keep)
+        self.inner.count_stream_prefix(topic, cut, keep)
     }
     fn newest_presence_offsets(&self, topic: &str) -> Result<Vec<i64>, Error> {
-        Store::newest_presence_offsets(self, topic)
+        self.inner.newest_presence_offsets(topic)
     }
     fn oldest_offset(&self, topic: &str) -> Result<Option<i64>, Error> {
-        Store::oldest_offset(self, topic)
+        self.inner.oldest_offset(topic)
     }
     fn retention_record(&self, topic: &str, cut: i64, removed_total: i64) -> Result<(), Error> {
-        Store::retention_record(self, topic, cut, removed_total)
+        self.inner.retention_record(topic, cut, removed_total)
     }
     fn retention_watermark(&self, topic: &str) -> Result<Option<(i64, i64)>, Error> {
-        Store::retention_watermark(self, topic)
+        self.inner.retention_watermark(topic)
     }
     fn retention_dropped(&self, topic: &str, cursor: i64) -> Result<i64, Error> {
-        Store::retention_dropped(self, topic, cursor)
+        self.inner.retention_dropped(topic, cursor)
     }
     fn record_at(&self, offset: i64) -> Result<Option<(String, String)>, Error> {
-        Store::record_at(self, offset)
+        self.inner.record_at(offset)
     }
 }
 
@@ -756,7 +914,7 @@ mod tests {
         dir.join("msgq.db")
     }
 
-    fn publish(store: &Store, topic: &str, body: &str) {
+    fn publish(store: &dyn Bus, topic: &str, body: &str) {
         store
             .publish(
                 topic,
@@ -768,7 +926,7 @@ mod tests {
     #[test]
     fn removal_runs_in_bounded_batches() {
         let path = temp_db();
-        let (store, _) = Store::open(&path).unwrap();
+        let (store, _) = LocalStore::open(&path).unwrap();
         for i in 0..1_200 {
             publish(&store, "group/a", &format!("m{i}"));
         }
@@ -784,7 +942,7 @@ mod tests {
     #[test]
     fn the_watermark_counts_what_was_removed_after_a_cursor() {
         let path = temp_db();
-        let (store, _) = Store::open(&path).unwrap();
+        let (store, _) = LocalStore::open(&path).unwrap();
         for i in 0..10 {
             publish(&store, "group/a", &format!("m{i}"));
         }
@@ -812,7 +970,7 @@ mod tests {
     #[test]
     fn the_watermark_is_cumulative_across_prunes() {
         let path = temp_db();
-        let (store, _) = Store::open(&path).unwrap();
+        let (store, _) = LocalStore::open(&path).unwrap();
         for i in 0..6 {
             publish(&store, "group/a", &format!("m{i}"));
         }

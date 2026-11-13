@@ -1,0 +1,625 @@
+//! Tests for the shared engine (pgmq on PostgreSQL).
+//!
+//! These need a live server with the pgmq schema installed. They are gated on
+//! `MSGQ_TEST_DATABASE_URI` and say so when the variable is absent, rather than passing quietly:
+//! a shared-engine test that never ran is not evidence.
+
+use msgq::config::Target;
+use msgq::pg::queue_name;
+use msgq::store::{Bus, Store};
+use postgres::{Client, NoTls};
+use serde_json::json;
+
+/// The test database, when one was named.
+fn dsn() -> Option<String> {
+    match std::env::var("MSGQ_TEST_DATABASE_URI") {
+        Ok(value) if !value.trim().is_empty() => Some(value),
+        _ => {
+            eprintln!(
+                "shared engine tests not run: set MSGQ_TEST_DATABASE_URI to a database with pgmq"
+            );
+            None
+        }
+    }
+}
+
+/// Serialise these tests: they read and compare global engine state, so overlapping runs measure
+/// each other. The lock is session-scoped and released when the returned client drops.
+fn exclusive(dsn: &str) -> Client {
+    let mut guard = client(dsn);
+    guard
+        .execute("SELECT pg_advisory_lock(1702453617)", &[])
+        .unwrap();
+    guard
+}
+
+fn client(dsn: &str) -> Client {
+    Client::connect(dsn, NoTls).expect("the named test database must accept connections")
+}
+
+/// How many queues the server holds, and how many rows the pgmq registry has.
+fn pgmq_footprint(client: &mut Client) -> (i64, i64) {
+    let queues: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'pgmq' AND tablename LIKE 'q\\_%'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let registry: i64 = client
+        .query_one("SELECT COUNT(*) FROM pgmq.meta", &[])
+        .unwrap()
+        .get(0);
+    (queues, registry)
+}
+
+#[test]
+fn a_fresh_connection_bootstraps_only_the_bus_tables() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let before = pgmq_footprint(&mut raw);
+
+    let target = Target::Shared(dsn.clone());
+    let (store, created) = Store::open(&target).expect("the shared engine must open");
+    assert!(!created, "opening a shared bus creates no file");
+
+    assert_eq!(store.engine(), "shared");
+
+    // The bus's own tables are the whole of what it adds.
+    for table in ["msgq.address", "msgq.cursor", "msgq.meta", "msgq.retention"] {
+        let present: bool = raw
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&table])
+            .unwrap()
+            .get(0);
+        assert!(present, "{table} must exist after opening");
+    }
+
+    // What it records about itself.
+    assert_eq!(
+        store.meta("protocol_version").unwrap().as_deref(),
+        Some(msgq::version())
+    );
+    assert!(store.meta("created_by").unwrap().is_some());
+    assert!(
+        store.meta("pgmq_version").unwrap().is_some(),
+        "the engine version is recorded, so a later migration can tell what it talks to"
+    );
+
+    // And nothing else: no queue was created and the engine's registry is untouched.
+    let after = pgmq_footprint(&mut raw);
+    assert_eq!(
+        before, after,
+        "a fresh connection creates no queue and adds no registry row"
+    );
+}
+
+#[test]
+fn opening_twice_records_one_set_of_facts() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let target = Target::Shared(dsn.clone());
+    let (first, _) = Store::open(&target).expect("open");
+    drop(first);
+    let (second, _) = Store::open(&target).expect("reopen");
+
+    let mut raw = client(&dsn);
+    let versions: i64 = raw
+        .query_one(
+            "SELECT COUNT(*) FROM msgq.meta WHERE key = 'protocol_version'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        versions, 1,
+        "the facts are recorded once, not per connection"
+    );
+    assert!(second.meta("protocol_version").unwrap().is_some());
+}
+
+/// A suffix that keeps each run's addresses apart without colliding across runs.
+fn unique() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{}-{nanos}", std::process::id())
+}
+
+/// The queue a registered address maps to.
+fn queue_for(raw: &mut Client, address: &str) -> Option<String> {
+    raw.query_opt(
+        "SELECT queue_name FROM msgq.address WHERE address = $1",
+        &[&address],
+    )
+    .unwrap()
+    .map(|row| row.get(0))
+}
+
+/// The headers of the record the engine stored.
+fn headers_of(raw: &mut Client, queue: &str, offset: i64) -> serde_json::Value {
+    let row = raw
+        .query_one(
+            &format!("SELECT headers::text FROM pgmq.\"q_{queue}\" WHERE msg_id = $1"),
+            &[&offset],
+        )
+        .unwrap();
+    let text: Option<String> = row.get(0);
+    serde_json::from_str(&text.expect("a stored record carries headers")).unwrap()
+}
+
+/// Publish one record and return the queue it landed in and the record's headers.
+fn publish_and_stamp(dsn: &str, address: &str) -> (String, serde_json::Value) {
+    let target = Target::Shared(dsn.to_string());
+    let (store, _) = Store::open(&target).unwrap();
+    let offset = store
+        .publish(
+            address,
+            &json!({"v": 1, "type": "note", "from": "cli/t@h", "to": address, "message": "hi"}),
+        )
+        .unwrap();
+    let mut raw = client(dsn);
+    let queue = queue_for(&mut raw, address).expect("publishing registers the address");
+    let headers = headers_of(&mut raw, &queue, offset);
+    (queue, headers)
+}
+
+#[test]
+fn the_address_survives_a_long_path_and_a_case_pair() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let unique = unique();
+
+    // A long cwd address is the case that names cannot simply pass through: pgmq lowercases and
+    // caps the table name, and a cwd address is neither lower nor short.
+    let long = format!("cwd/Users/Somebody/src/{unique}/very-long-segment-name-here/deeper/still");
+    let (queue, headers) = publish_and_stamp(&dsn, &long);
+    assert!(queue.len() <= 47, "{queue} exceeds the engine's limit");
+    assert_eq!(headers["msgq"]["address"], json!(long));
+
+    // Two addresses that differ only by case must not share a queue.
+    let (upper_queue, upper_headers) = publish_and_stamp(&dsn, &format!("session/Api{unique}"));
+    let (lower_queue, lower_headers) = publish_and_stamp(&dsn, &format!("session/api{unique}"));
+    assert_ne!(
+        upper_queue, lower_queue,
+        "a case-differing pair stays distinct"
+    );
+    assert_eq!(
+        upper_headers["msgq"]["address"],
+        json!(format!("session/Api{unique}"))
+    );
+    assert_eq!(
+        lower_headers["msgq"]["address"],
+        json!(format!("session/api{unique}"))
+    );
+}
+
+#[test]
+fn addresses_whose_slugs_collide_still_get_their_own_queue() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let unique = unique();
+    // The slug maps every non-alphanumeric character to a dot, so these two addresses read the same
+    // and only the digest can separate them.
+    let dotted = format!("group/a.b{unique}");
+    let dashed = format!("group/a-b{unique}");
+    assert_eq!(
+        queue_name(&dotted).len(),
+        queue_name(&dashed).len(),
+        "same shape, so the readability of the name is identical"
+    );
+    let (dotted_queue, dotted_headers) = publish_and_stamp(&dsn, &dotted);
+    let (dashed_queue, dashed_headers) = publish_and_stamp(&dsn, &dashed);
+    assert_ne!(
+        dotted_queue, dashed_queue,
+        "the digest, not the readable part, is the identity"
+    );
+    assert_eq!(dotted_headers["msgq"]["address"], json!(dotted));
+    assert_eq!(dashed_headers["msgq"]["address"], json!(dashed));
+}
+
+/// A queue's identity, so a test can prove no DDL ran.
+fn queue_oid(raw: &mut Client, queue: &str) -> Option<u32> {
+    raw.query_opt(
+        &format!("SELECT oid FROM pg_class WHERE oid = to_regclass(\'pgmq.\"q_{queue}\"\')"),
+        &[],
+    )
+    .unwrap()
+    .map(|row| row.get(0))
+}
+
+/// A checksum over the whole queue, including the columns a lease would touch.
+fn queue_checksum(raw: &mut Client, queue: &str) -> String {
+    raw.query_one(
+        &format!(
+            "SELECT COALESCE(md5(string_agg(msg_id::text || \':\' || vt::text || \':\' ||
+                    enqueued_at::text || \':\' || read_ct::text, \',\' ORDER BY msg_id)), \'empty\')
+             FROM pgmq.\"q_{queue}\""
+        ),
+        &[],
+    )
+    .unwrap()
+    .get(0)
+}
+
+#[test]
+fn reading_an_unpublished_address_creates_nothing() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+    let address = format!("group/never-published-{}", unique());
+    let mut raw = client(&dsn);
+    let queues_before: i64 = raw
+        .query_one(
+            "SELECT COUNT(*) FROM pg_tables WHERE schemaname = \'pgmq\'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+
+    assert!(store.read_since(&address, 0, 10).unwrap().is_empty());
+    assert_eq!(store.head(&address).unwrap(), 0);
+    assert_eq!(store.oldest_offset(&address).unwrap(), None);
+
+    assert_eq!(
+        queue_for(&mut raw, &address),
+        None,
+        "a read registers no address"
+    );
+    let queues_after: i64 = raw
+        .query_one(
+            "SELECT COUNT(*) FROM pg_tables WHERE schemaname = \'pgmq\'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(queues_before, queues_after, "a read creates no queue");
+}
+
+#[test]
+fn two_first_publishers_both_succeed() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/race-{}", unique());
+
+    let mut workers = Vec::new();
+    for index in 0..2 {
+        let dsn = dsn.clone();
+        let address = address.clone();
+        workers.push(std::thread::spawn(move || {
+            let target = Target::Shared(dsn);
+            let (store, _) = Store::open(&target).unwrap();
+            store
+                .publish(
+                    &address,
+                    &json!({"v": 1, "type": "note", "from": format!("cli/w{index}@h"),
+                            "to": address, "message": "hi"}),
+                )
+                .unwrap();
+        }));
+    }
+    for worker in workers {
+        worker
+            .join()
+            .expect("a first publish must not fail because another was first");
+    }
+
+    let mut raw = client(&dsn);
+    let queue = queue_for(&mut raw, &address).expect("both publishes name one address");
+    let count: i64 = raw
+        .query_one(&format!("SELECT COUNT(*) FROM pgmq.\"q_{queue}\""), &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 2, "both records are in the one queue");
+    let registrations: i64 = raw
+        .query_one(
+            "SELECT COUNT(*) FROM msgq.address WHERE address = $1",
+            &[&address],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(registrations, 1, "one address, one registration");
+}
+
+#[test]
+fn a_second_publish_runs_no_ddl() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/steady-{}", unique());
+    let (queue, _) = publish_and_stamp(&dsn, &address);
+
+    let mut raw = client(&dsn);
+    let oid_before = queue_oid(&mut raw, &queue).expect("the queue exists");
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+    for _ in 0..3 {
+        store
+            .publish(
+                &address,
+                &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address, "message": "again"}),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        queue_oid(&mut raw, &queue),
+        Some(oid_before),
+        "a known address reuses its queue rather than recreating it"
+    );
+}
+
+#[test]
+fn reading_twice_changes_nothing() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/readonly-{}", unique());
+    let (queue, _) = publish_and_stamp(&dsn, &address);
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+    store
+        .publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address, "message": "two"}),
+        )
+        .unwrap();
+
+    let mut raw = client(&dsn);
+    let before = queue_checksum(&mut raw, &queue);
+    let first = store.read_since(&address, 0, 10).unwrap();
+    let second = store.read_since(&address, 0, 10).unwrap();
+    let after = queue_checksum(&mut raw, &queue);
+
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first.iter().map(|r| r.offset).collect::<Vec<_>>(),
+        second.iter().map(|r| r.offset).collect::<Vec<_>>(),
+        "the same read returns the same records"
+    );
+    assert_eq!(
+        before, after,
+        "a read leaves no trace: no lease, no counter"
+    );
+    assert_eq!(store.head(&address).unwrap(), 2);
+}
+
+#[test]
+fn a_cursor_never_moves_backwards_and_reading_never_moves_it() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/cursor-{}", unique());
+    let (_, _) = publish_and_stamp(&dsn, &address);
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+    let consumer = format!("cli/cursor-{}", unique());
+
+    assert!(store.cursor_set(&consumer, &address, 5).unwrap());
+    assert!(
+        !store.cursor_set(&consumer, &address, 3).unwrap(),
+        "a lower value is refused"
+    );
+    assert_eq!(store.cursor_get(&consumer, &address).unwrap(), Some(5));
+
+    let _ = store.read_since(&address, 0, 10).unwrap();
+    assert_eq!(
+        store.cursor_get(&consumer, &address).unwrap(),
+        Some(5),
+        "a read is not a delivery, so it advances nothing"
+    );
+    assert_eq!(store.cursor_reset(&consumer, &address).unwrap(), 1);
+    assert_eq!(store.cursor_get(&consumer, &address).unwrap(), None);
+}
+
+#[test]
+fn a_publish_wakes_a_watcher_under_a_second() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/wake-{}", unique());
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+    store.ensure_address(&address).unwrap();
+
+    let watching = store.wake(&[&address]);
+    let publisher = {
+        let dsn = dsn.clone();
+        let address = address.clone();
+        std::thread::spawn(move || {
+            // Give the watcher time to subscribe before the record exists.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let target = Target::Shared(dsn);
+            let (store, _) = Store::open(&target).unwrap();
+            store
+                .publish(
+                    &address,
+                    &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address,
+                            "message": "wake up"}),
+                )
+                .unwrap();
+        })
+    };
+
+    let started = std::time::Instant::now();
+    watching
+        .wait(std::time::Duration::from_secs(5))
+        .expect("a watcher wakes or times out, never fails");
+    let elapsed = started.elapsed();
+    publisher.join().unwrap();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "a notification wakes the watcher instead of waiting out the slice: {elapsed:?}"
+    );
+}
+
+#[test]
+fn a_wake_with_no_publication_returns_after_one_slice() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/quiet-{}", unique());
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+    store.ensure_address(&address).unwrap();
+
+    // This is the polling path in disguise: nothing will ever notify, so the slice is the bound.
+    let watching = store.wake(&[&address]);
+    let started = std::time::Instant::now();
+    watching
+        .wait(std::time::Duration::from_millis(120))
+        .expect("a quiet bus is not an error");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+}
+
+#[test]
+fn a_prune_reports_its_total_and_keeps_the_presence_pin() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/prune-{}", unique());
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+
+    // Presence records for three participants, interleaved with ordinary ones.
+    let mut presence = Vec::new();
+    for index in 0..60 {
+        let participant = format!("cli/p{}@h", index % 3);
+        let record = json!({"v": 1, "type": "event",
+                            "event": {"kind": "presence", "state": "online",
+                                      "participant": participant},
+                            "from": "cli/a@h", "to": address});
+        let offset = store.publish(&address, &record).unwrap();
+        if index % 3 == 0 {
+            presence.push(offset);
+        }
+    }
+    let head = store.head(&address).unwrap();
+    let keep: Vec<i64> = store.newest_presence_offsets(&address).unwrap();
+    assert_eq!(keep.len(), 3, "one pin per participant");
+
+    // A batch smaller than the prefix, so the removal cannot happen in one statement.
+    let removal = store.prune_before(&address, head, &keep, 25).unwrap();
+    assert!(
+        removal.batches > 1,
+        "a large prefix is removed in bounded batches: {removal:?}"
+    );
+    assert_eq!(
+        removal.removed + keep.len() as usize,
+        60,
+        "everything but the pins is removed, and the total is reported"
+    );
+
+    let left = store.read_since(&address, 0, 100).unwrap();
+    let surviving: Vec<i64> = left.iter().map(|r| r.offset).collect();
+    for offset in &keep {
+        assert!(
+            surviving.contains(offset),
+            "a pin survives the prune: {offset}"
+        );
+    }
+    assert_eq!(surviving.len(), keep.len());
+
+    // And the watermark records what happened, so a lagging consumer can be told.
+    store.retention_record(&address, head, 0).unwrap();
+    let dropped = store
+        .retention_record(&address, head, removal.removed as i64)
+        .and(store.retention_watermark(&address))
+        .unwrap()
+        .expect("a prune leaves a watermark");
+    assert_eq!(dropped, (head, removal.removed as i64));
+}
+
+#[test]
+fn an_address_whose_records_aged_out_is_still_listed() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/aged-{}", unique());
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+    let offset = store
+        .publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address, "message": "x"}),
+        )
+        .unwrap();
+
+    // A consumer that has read nothing yet is the reason the loss must be visible.
+    let consumer = format!("cli/aged-{}", unique());
+    store.cursor_set(&consumer, &address, 0).unwrap();
+    let removal = store.prune_before(&address, offset, &[], 100).unwrap();
+    assert_eq!(removal.removed, 1);
+    store.retention_record(&address, offset, 1).unwrap();
+
+    let listed = store.list_addresses().unwrap();
+    let found = listed
+        .iter()
+        .find(|(name, _, _)| name == &address)
+        .expect("an address with no records is still an address");
+    assert_eq!(found.1, 0, "the count is the records left, so zero");
+    assert_eq!(found.2, offset, "the newest offset is remembered");
+
+    let consumers = store.list_consumers(Some(&address)).unwrap();
+    let (name, _, last) = consumers
+        .iter()
+        .find(|(name, _, _)| name == &consumer)
+        .expect("the lagging consumer is listed");
+    assert_eq!(name, &consumer);
+    assert_eq!(*last, 0, "the consumer never read anything");
+    assert_eq!(
+        store.retention_dropped(&address, *last).unwrap(),
+        1,
+        "the consumer is told what it lost"
+    );
+}
+
+#[test]
+fn a_summary_reports_records_and_the_age_of_the_oldest() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/summary-{}", unique());
+    let (_, _) = publish_and_stamp(&dsn, &address);
+    let target = Target::Shared(dsn.clone());
+    let (store, _) = Store::open(&target).unwrap();
+    store
+        .publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": "cli/a@h", "to": address, "message": "two"}),
+        )
+        .unwrap();
+
+    let summaries = store.stream_summaries().unwrap();
+    let summary = summaries
+        .iter()
+        .find(|summary| summary.topic == address)
+        .expect("the address is summarised");
+    assert_eq!(summary.records, 2);
+    assert_eq!(summary.newest_offset, 2);
+    assert!(
+        summary.oldest_at > 0,
+        "the summary carries a real timestamp, not zero"
+    );
+}
