@@ -1413,16 +1413,17 @@ async function scenarioNotifyWakes() {
 	);
 }
 
-/** The text the peers tool returned, from the session's own transcript. */
+/**
+ * The text the session's tools returned, from its own transcript.
+ *
+ * Every tool result, not only `peers`: a host may expose the tool through another one (this
+ * checkout's own environment reaches it through a code-mode tool), and what matters here is what
+ * the model was told, not which wrapper carried it.
+ */
 async function peersToolText(session) {
 	const { data } = await session.send({ id: "e", type: "get_entries" });
 	return data.entries
-		.filter(
-			(entry) =>
-				entry.type === "message" &&
-				entry.message?.role === "toolResult" &&
-				entry.message?.toolName === "peers",
-		)
+		.filter((entry) => entry.type === "message" && entry.message?.role === "toolResult")
 		.flatMap((entry) => entry.message.content ?? [])
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
@@ -1579,6 +1580,228 @@ async function scenarioDispatchCommand() {
 	);
 }
 
+/**
+ * Two sessions that ask each other, with one of them stubbed.
+ *
+ * A turn that waits holds the only execution slot the session has, so a question arriving from the
+ * peer being waited on can never be answered: the mutual wait is a deadlock, not a slow exchange.
+ * What this asserts is the mechanism — the wait is abandoned and the peer's question is delivered —
+ * not the model's compliance.
+ */
+async function scenarioAskCycle() {
+	// The only scenario that needs the tool: what is being tested is a tool call that is blocked.
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-ask-cycle-")), "msgq.db");
+	const session = startPi(["--msgq-policy", "honor"], { MSGQ_DB: own }, { noTools: false });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+	const peer = "session/stub";
+	console.log("session:", address, "policy: honor (asking a peer that asks back)");
+
+	const began = Date.now();
+	await session.send({
+		id: "p",
+		type: "prompt",
+		message:
+			`Call the peers tool exactly once with these exact arguments: {"action":"ask",` +
+			`"to":"${peer}","message":"2+2?","wait":true,"timeoutSeconds":120}. Then stop.`,
+	});
+
+	// The question reaching the peer is what says the turn is now inside the wait.
+	const asked = await waitForRecord(own, peer, (record) => record.meta?.reply === true, 90_000);
+	if (!asked) {
+		shutdown(session.child);
+		report("ask-cycle", false, "the model never called the peers tool");
+		return;
+	}
+
+	// The peer turns out to be waiting too: what it sends back is a question, not an answer.
+	const question = JSON.stringify({
+		v: 1,
+		type: "prompt",
+		from: peer,
+		to: address,
+		message: "and what do you mean by that?",
+		meta: { reply: true },
+	});
+	execFileSync(CLI, ["--db", own, "publish", address, "--json", question]);
+
+	const settled = await session.waitForEvent("agent_settled", 60_000);
+	const waited = Date.now() - began;
+	await wait(2000);
+
+	const tool = await peersToolText(session);
+	const all = (await session.send({ id: "e", type: "get_entries" })).data.entries;
+	shutdown(session.child);
+	const abandoned = /is asking you a question/.test(tool);
+	const delivered = all.some(
+		(entry) =>
+			entry.type === "custom_message" && String(entry.content).includes("what do you mean by that?"),
+	);
+	report(
+		"ask-cycle",
+		settled && abandoned && delivered && waited < 60_000,
+		`waited=${waited}ms abandoned=${abandoned} delivered=${delivered} tool=${JSON.stringify(tool.slice(0, 120))}`,
+	);
+}
+
+/** Poll a stream until a record matches, so a scenario never guesses how long a turn takes. */
+async function waitForRecord(db, address, matches, timeoutMs) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		let records = [];
+		try {
+			records = readStream(address, db);
+		} catch {
+			// A stream nobody has written to yet does not exist.
+		}
+		if (records.some(matches)) return true;
+		await wait(250);
+	}
+	return false;
+}
+
+/**
+ * A waiting ask returns the answer, and the record that carried it must not be delivered again.
+ *
+ * Both halves are needed: the tool result is one copy, and the same record is still on the
+ * session's own stream, where the ordinary delivery path would hand over a second one.
+ */
+async function scenarioAskAnsweredOnce() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-ask-once-")), "msgq.db");
+	const session = startPi(["--msgq-policy", "honor"], { MSGQ_DB: own }, { noTools: false });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+	const peer = "session/stub";
+	const answer = "ZZTOP-UNIQUE-ANSWER";
+	console.log("session:", address, "policy: honor (a waiting ask is answered)");
+
+	await session.send({
+		id: "p",
+		type: "prompt",
+		message:
+			`Call the peers tool exactly once with these exact arguments: {"action":"ask",` +
+			`"to":"${peer}","message":"what is the word?","wait":true,"timeoutSeconds":120}. Then stop.`,
+	});
+
+	const asked = await waitForRecord(own, peer, (record) => record.meta?.reply === true, 90_000);
+	if (!asked) {
+		shutdown(session.child);
+		report("ask-answered-once", false, "the model never called the peers tool");
+		return;
+	}
+	// Answering is what ends the wait, so the offset comes from the question itself.
+	const question = readStream(peer, own).find((record) => record.meta?.reply === true);
+	const offset = execFileSync(
+		CLI,
+		["--db", own, "read", peer, "--from-start", "--json", "--with-offset"],
+		{ encoding: "utf8" },
+	)
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line))
+		.find((entry) => entry.record?.message === question?.message)?.offset;
+	const reply = JSON.stringify({
+		v: 1,
+		type: "prompt",
+		from: peer,
+		to: address,
+		message: answer,
+		reply_to: offset,
+	});
+	execFileSync(CLI, ["--db", own, "publish", address, "--json", reply]);
+
+	// A second answer, later, must arrive normally: only the one the wait returned is consumed.
+	await session.waitForEvent("agent_settled", 60_000);
+	await wait(3000);
+
+	const all = (await session.send({ id: "e", type: "get_entries" })).data.entries;
+	shutdown(session.child);
+
+	const inTool = all.some(
+		(entry) =>
+			entry.type === "message" &&
+			entry.message?.role === "toolResult" &&
+			JSON.stringify(entry.message.content ?? []).includes(answer),
+	);
+	const duplicates = all.filter(
+		(entry) => entry.type === "custom_message" && String(entry.content).includes(answer),
+	).length;
+	report(
+		"ask-answered-once",
+		inTool && duplicates === 0,
+		`inTool=${inTool} duplicates=${duplicates}`,
+	);
+}
+
+/**
+ * The default ask does not wait: the question goes out, the turn ends, the answer arrives as a
+ * message. That is the shape two sessions can use on each other without either holding its slot.
+ */
+async function scenarioAskWakes() {
+	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-ask-wakes-")), "msgq.db");
+	const session = startPi(["--msgq-policy", "honor"], { MSGQ_DB: own }, { noTools: false });
+	const state = await session.send({ id: "s", type: "get_state" });
+	const address = `session/${state.data.sessionId}`;
+	const peer = "session/stub";
+	const answer = "WAKE-UNIQUE-ANSWER";
+	console.log("session:", address, "policy: honor (ask without waiting)");
+
+	const began = Date.now();
+	await session.send({
+		id: "p",
+		type: "prompt",
+		message:
+			`Call the peers tool exactly once with these exact arguments: {"action":"ask",` +
+			`"to":"${peer}","message":"what is the word?"}. Then stop.`,
+	});
+
+	// The question reaching the peer, with the hints that make it one, is the whole of the send.
+	const asked = await waitForRecord(own, peer, (record) => record.meta?.reply === true, 90_000);
+	if (!asked) {
+		shutdown(session.child);
+		report("ask-wakes", false, "the model never called the peers tool");
+		return;
+	}
+	const offset = execFileSync(
+		CLI,
+		["--db", own, "read", peer, "--from-start", "--json", "--with-offset"],
+		{ encoding: "utf8" },
+	)
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line))
+		.find((entry) => entry.record?.meta?.reply === true)?.offset;
+	const sentIn = Date.now() - began;
+
+	await session.waitForEvent("agent_settled", 60_000);
+	// Nothing is waiting on the answer, so it is an ordinary inbound record.
+	execFileSync(CLI, [
+		"--db", own, "publish", address, "--json",
+		JSON.stringify({ v: 1, type: "prompt", from: peer, to: address, message: answer, reply_to: offset }),
+	]);
+	await session.waitForEvent("agent_settled", 60_000);
+	await wait(2000);
+
+	const all = (await session.send({ id: "e", type: "get_entries" })).data.entries;
+	shutdown(session.child);
+
+	const inTool = all.some(
+		(entry) =>
+			entry.type === "message" &&
+			entry.message?.role === "toolResult" &&
+			JSON.stringify(entry.message.content ?? []).includes(answer),
+	);
+	// Exactly one copy, and it is the delivered message rather than a returned answer.
+	const delivered = all.filter(
+		(entry) => entry.type === "custom_message" && String(entry.content).includes(answer),
+	).length;
+	report(
+		"ask-wakes",
+		!inTool && delivered === 1 && sentIn < 30_000,
+		`inTool=${inTool} delivered=${delivered} sentIn=${sentIn}ms`,
+	);
+}
+
 const scenario = process.argv[2];
 if (scenario === "default-note") await scenarioDefaultNote();
 else if (scenario === "honor-prompt") await scenarioHonorPrompt();
@@ -1621,9 +1844,12 @@ else if (scenario === "notify-wakes") await scenarioNotifyWakes();
 else if (scenario === "completion-owed") await scenarioCompletionOwed();
 else if (scenario === "completion-reported") await scenarioCompletionReported();
 else if (scenario === "dispatch-command") await scenarioDispatchCommand();
+else if (scenario === "ask-cycle") await scenarioAskCycle();
+else if (scenario === "ask-answered-once") await scenarioAskAnsweredOnce();
+else if (scenario === "ask-wakes") await scenarioAskWakes();
 else {
 	console.error(
-		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|peer-locator|maki-card|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog>",
+		"usage: node scripts/e2e.mjs <default-note|honor-prompt|coalesce|note-idle|note-busy|self-guard|steer-mid-run|extra-topic|presence|peer-locator|maki-card|ack-display|ack-honor|ack-batch|ack-quiet|scoped-write|crash-expiry|rename|squat|presence-off|blocked|bad-bus|skip-version|command-surface|command-no-peers|command-pick-and-send|command-peer-direct|command-peer-compose|command-peer-pick|command-reply|command-absent-recipient|command-me|command-identity|command-no-dialog|ask-cycle|ask-answered-once|ask-wakes>",
 	);
 	process.exit(2);
 }

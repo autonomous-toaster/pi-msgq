@@ -39,6 +39,8 @@ export interface PeerParams {
 	to?: string;
 	message?: string;
 	timeoutSeconds?: number;
+	/** Hold this turn open for the answer, instead of being woken by it. */
+	wait?: boolean;
 	/** Send a command for the peer to run, instead of a message for it to read. */
 	command?: boolean;
 }
@@ -55,8 +57,24 @@ export interface PeerContext {
 	expectCompletion?: boolean;
 }
 
-/** Default window for ask, in seconds. */
-export const DEFAULT_ASK_TIMEOUT_S = 600;
+/** How long a waiting ask holds the turn, by default. */
+export const DEFAULT_ASK_TIMEOUT_S = 60;
+
+/**
+ * The longest wait the model may ask for.
+ *
+ * A session has one execution slot, and a wait holds it: two sessions waiting on each other
+ * cannot answer, so a wait with no limit is a deadlock with no way out. The CLI keeps
+ * `--timeout 0` for scripts, which can afford to block; the model cannot, so its wait is capped
+ * here where the request is made.
+ */
+export const MAX_ASK_TIMEOUT_S = 120;
+
+/** The wait a request actually gets: finite, at least a second, never more than the cap. */
+export function askWaitSeconds(requested?: number): number {
+	if (requested === undefined || !Number.isFinite(requested)) return DEFAULT_ASK_TIMEOUT_S;
+	return Math.min(MAX_ASK_TIMEOUT_S, Math.max(1, Math.floor(requested)));
+}
 
 /**
  * Refuse to build a command without an identity. Sending as nobody produces a record
@@ -113,10 +131,37 @@ export function planPeerAction(params: PeerParams, context: PeerContext): Comman
 		if (!params.to) return { error: "no recipient: pass 'to'" };
 		if (!params.message) return { error: "no question to ask" };
 		const to = params.to;
-		const timeout = params.timeoutSeconds ?? DEFAULT_ASK_TIMEOUT_S;
+		// A question is delivered by the receiving session's extension, and a record this
+		// session sent itself is never allowed to start one of its turns. So a question to
+		// this address could only ever wait out its window.
+		if (to === context.self || to === "me") {
+			return {
+				error:
+					"a question cannot be asked of this session itself: nothing delivers a record back to its sender, so it could only wait out its window",
+			};
+		}
+		if (params.wait !== true) {
+			// Publish and return. The answer is an ordinary inbound message, which is what
+			// lets two sessions ask each other without either holding its turn.
+			return {
+				command: context.msgqBin,
+				args: ["ask", to, params.message, "--from", context.self, "--no-wait"],
+			};
+		}
 		return {
 			command: context.msgqBin,
-			args: ["ask", to, params.message, "--timeout", String(timeout), "--from", context.self],
+			args: [
+				"ask",
+				to,
+				params.message,
+				"--timeout",
+				String(askWaitSeconds(params.timeoutSeconds)),
+				"--from",
+				context.self,
+				// The record when there is one, an outcome object when there is not: a shape
+				// check rather than a match on the CLI's prose.
+				"--json",
+			],
 		};
 	}
 
@@ -141,4 +186,49 @@ export function planPeerAction(params: PeerParams, context: PeerContext): Comman
 	}
 
 	return { error: "unknown action: " + action };
+}
+
+/** What a waiting ask came back with: the answer, or a reason there is none yet. */
+export interface AskReport {
+	/** Whether the answer was returned in this turn, and is therefore already delivered. */
+	answered: boolean;
+	/** What to show the model. */
+	text: string;
+}
+
+/**
+ * Read what `msgq ask --json` printed.
+ *
+ * Two shapes, never prose: the answer is the peer's raw record, and an ending without one is an
+ * `outcome` object. That is what tells the caller whether the answer it is about to show has also
+ * been left on the stream for the ordinary delivery path to find.
+ */
+export function interpretAsk(report: { ok: boolean; text: string }, to: string): AskReport {
+	if (!report.ok) return { answered: false, text: report.text };
+	const line = report.text
+		.split("\n")
+		.map((entry) => entry.trim())
+		.filter(Boolean)
+		.pop();
+	if (line === undefined) return { answered: false, text: `no answer from ${to} yet` };
+
+	let parsed: { outcome?: unknown; phase?: unknown; message?: unknown };
+	try {
+		parsed = JSON.parse(line) as { outcome?: unknown; phase?: unknown; message?: unknown };
+	} catch {
+		// Not the shape this expects: report it as it came rather than inventing one.
+		return { answered: false, text: report.text };
+	}
+	if (typeof parsed.outcome === "string") {
+		const phase = typeof parsed.phase === "string" ? ` (${parsed.phase})` : "";
+		return {
+			answered: false,
+			text:
+				parsed.outcome === "running"
+					? `${to} has not answered yet; its answer will arrive as a message`
+					: `${to} finished without answering${phase}`,
+		};
+	}
+	if (typeof parsed.message === "string") return { answered: true, text: parsed.message };
+	return { answered: false, text: report.text };
 }

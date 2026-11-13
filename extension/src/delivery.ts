@@ -93,6 +93,28 @@ export function wantsReply(record: MsgqRecord): boolean {
 	);
 }
 
+/**
+ * Whether an inbound record is the answer a waiting ask already handed to the model.
+ *
+ * A wait returns the reply inside the tool's own result, and the record carrying it is still on
+ * this session's stream, where the ordinary path would deliver it a second time. Consuming it is
+ * the extension's job because it is the only component that knows both facts.
+ *
+ * Nothing is suppressed unless the wait actually returned an answer: a peer that answered after
+ * the window closed has said something new, and it must be delivered as a message.
+ */
+export function answersConsumedAsk(
+	record: MsgqRecord,
+	self: string,
+	answered: readonly string[],
+	reference?: ReferencedRecord,
+): boolean {
+	if (typeof record.reply_to !== "number") return false;
+	if (!answered.includes(record.from)) return false;
+	const referent = reference?.record;
+	return referent !== undefined && referent.from === self;
+}
+
 /** A record another record refers to, and the id it was resolved from. */
 export interface ReferencedRecord {
 	/** `<address>#<offset>` of the record being referred to. */

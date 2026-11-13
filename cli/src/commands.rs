@@ -63,6 +63,8 @@ pub struct AskArgs {
     pub on: Option<String>,
     pub timeout: u64,
     pub json: bool,
+    /// Publish the question and return, without waiting for the answer.
+    pub no_wait: bool,
 }
 
 /// Action for `consumers`.
@@ -149,6 +151,10 @@ pub fn await_ack(
 ///
 /// Ends on a reply, on a terminal acknowledgement, or on the wait window. None of
 /// the three is an error: in all of them the peer is fine.
+///
+/// With `no_wait` it ends as soon as the question is published: the record is the
+/// same, so the wire cannot tell the two apart, and the answer arrives by the path
+/// every other message takes.
 pub fn ask(db_path: &Path, args: AskArgs) -> Result<(), Error> {
     let canonical = address::canonicalize(&args.address)?;
     let message = match args.message.as_deref() {
@@ -178,6 +184,10 @@ pub fn ask(db_path: &Path, args: AskArgs) -> Result<(), Error> {
 
     let offset = store.publish(&canonical, &value)?;
     println!("{offset}");
+
+    if args.no_wait {
+        return Ok(());
+    }
 
     await_reply(
         &store,

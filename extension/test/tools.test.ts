@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+	askWaitSeconds,
 	type Command,
 	DEFAULT_ASK_TIMEOUT_S,
+	interpretAsk,
 	isError,
+	MAX_ASK_TIMEOUT_S,
 	PLAIN_LIST,
 	planPeerAction,
 	shouldRetryPlainList,
@@ -95,17 +98,85 @@ test("send without a recipient or a message is refused", () => {
 	assert.ok(isError(planPeerAction({ action: "send", to: "session/x" }, peers)));
 });
 
-test("ask carries a wait window, defaulting generously", () => {
-	assert.deepEqual(
-		cmd(planPeerAction({ action: "ask", to: "session/x", message: "?" }, peers)).args,
-		["ask", "session/x", "?", "--timeout", String(DEFAULT_ASK_TIMEOUT_S), "--from", "session/planner"],
-	);
+test("ask publishes and returns, so no turn is held open", () => {
+	assert.deepEqual(cmd(planPeerAction({ action: "ask", to: "session/x", message: "?" }, peers)).args, [
+		"ask",
+		"session/x",
+		"?",
+		"--from",
+		"session/planner",
+		"--no-wait",
+	]);
+	assert.ok(isError(planPeerAction({ action: "ask", message: "?" }, peers)));
+	// A wait window is meaningless without a wait, and must not sneak one in.
 	assert.deepEqual(
 		cmd(planPeerAction({ action: "ask", to: "session/x", message: "?", timeoutSeconds: 30 }, peers))
 			.args,
-		["ask", "session/x", "?", "--timeout", "30", "--from", "session/planner"],
+		["ask", "session/x", "?", "--from", "session/planner", "--no-wait"],
 	);
-	assert.ok(isError(planPeerAction({ action: "ask", message: "?" }, peers)));
+});
+
+test("a waiting ask is bounded and machine-readable", () => {
+	assert.deepEqual(
+		cmd(planPeerAction({ action: "ask", to: "session/x", message: "?", wait: true }, peers)).args,
+		[
+			"ask",
+			"session/x",
+			"?",
+			"--timeout",
+			String(DEFAULT_ASK_TIMEOUT_S),
+			"--from",
+			"session/planner",
+			"--json",
+		],
+	);
+});
+
+test("the model cannot ask for a wait without a limit", () => {
+	// The CLI keeps --timeout 0 for scripts; the tool must never hand it over.
+	assert.equal(askWaitSeconds(0), 1);
+	assert.equal(askWaitSeconds(-5), 1);
+	assert.equal(askWaitSeconds(30), 30);
+	assert.equal(askWaitSeconds(5000), MAX_ASK_TIMEOUT_S);
+	assert.equal(askWaitSeconds(Number.NaN), DEFAULT_ASK_TIMEOUT_S);
+	assert.equal(askWaitSeconds(undefined), DEFAULT_ASK_TIMEOUT_S);
+	assert.deepEqual(
+		cmd(planPeerAction({ action: "ask", to: "session/x", message: "?", wait: true, timeoutSeconds: 0 }, peers))
+			.args,
+		["ask", "session/x", "?", "--timeout", "1", "--from", "session/planner", "--json"],
+	);
+});
+
+test("a question to this session is refused", () => {
+	// Nothing delivers a record back to its sender as a turn, so it could only time out.
+	for (const to of ["session/planner", "me"]) {
+		assert.ok(isError(planPeerAction({ action: "ask", to, message: "?" }, peers)), to);
+	}
+});
+
+test("a wait's two endings are told apart by shape, not by prose", () => {
+	const answer = interpretAsk(
+		{ ok: true, text: '{"v":1,"type":"prompt","from":"session/x","to":"session/planner","message":"four"}' },
+		"session/x",
+	);
+	assert.equal(answer.answered, true);
+	assert.equal(answer.text, "four");
+
+	const running = interpretAsk({ ok: true, text: '{"outcome":"running","reply_to":7}' }, "session/x");
+	assert.equal(running.answered, false);
+	assert.match(running.text, /has not answered yet/);
+
+	const finished = interpretAsk(
+		{ ok: true, text: '{"outcome":"finished","phase":"completed","reply_to":7}' },
+		"session/x",
+	);
+	assert.equal(finished.answered, false);
+	assert.match(finished.text, /finished without answering \(completed\)/);
+
+	// Anything unexpected is reported as it came rather than dressed up as an answer.
+	const noise = interpretAsk({ ok: false, text: "could not run msgq: nope" }, "session/x");
+	assert.equal(noise.answered, false);
+	assert.equal(noise.text, "could not run msgq: nope");
 });
 
 test("reply targets the sender of the last received message", () => {

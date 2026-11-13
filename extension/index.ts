@@ -51,6 +51,7 @@ import {
 	publishSafely,
 } from "./src/ack.ts";
 import {
+	answersConsumedAsk,
 	Coalescer,
 	formatBatch,
 	formatCommandNote,
@@ -79,8 +80,10 @@ import { Presence, PRESENCE_TTL_S } from "./src/presence.ts";
 import type { PresenceState } from "./src/presence-text.ts";
 import { decodeRecord, type MsgqRecord, recordBody } from "./src/record.ts";
 import {
-	DEFAULT_ASK_TIMEOUT_S,
+	askWaitSeconds,
+	interpretAsk,
 	isError,
+	MAX_ASK_TIMEOUT_S,
 	PLAIN_LIST,
 	planPeerAction,
 	shouldRetryPlainList,
@@ -159,6 +162,22 @@ export default function (pi: ExtensionAPI) {
 	/** The most recently received message, so a reply can target it. */
 	let lastInbound: { from: string; offset: number } | undefined;
 	/**
+	 * The peers this session is currently holding its turn open for.
+	 *
+	 * A wait holds the one execution slot the session has, so a question arriving from the peer
+	 * being waited on can never be answered while it lasts. Knowing which peer that is, is what
+	 * turns a mutual wait into a sentence the model can act on.
+	 */
+	let waitedOn = new Map<string, { controller: AbortController; abandoned: boolean }>();
+	/**
+	 * Peers whose answer was already returned inside a tool result during this turn.
+	 *
+	 * The record is still on the stream afterwards, so this is what keeps the answer from being
+	 * delivered a second time. Cleared when a turn starts: it can suppress one turn's worth of
+	 * duplication, and nothing later.
+	 */
+	let answeredPeers: string[] = [];
+	/**
 	 * The question this session was asked and may still owe an answer to.
 	 *
 	 * One slot on purpose: the delivery path remembers as little as it can, so a session asked two
@@ -173,6 +192,20 @@ export default function (pi: ExtensionAPI) {
 
 	function report(message: string, level: "info" | "warning" | "error" = "info"): void {
 		if (context?.hasUI) context.ui.notify(message, level);
+	}
+
+	/**
+	 * One signal that aborts when either the caller's does or the extension decides to give up.
+	 *
+	 * A waiting ask is abandoned when the peer asks this session something, and cancelled when the
+	 * human interrupts — the two reasons are indistinguishable to the process, so the caller keeps
+	 * a flag to tell them apart.
+	 */
+	function linkSignal(controller: AbortController, signal: AbortSignal | undefined): AbortSignal {
+		if (!signal) return controller.signal;
+		if (signal.aborted) controller.abort();
+		else signal.addEventListener("abort", () => controller.abort(), { once: true });
+		return controller.signal;
 	}
 
 	function setStatus(text: string | undefined): void {
@@ -317,6 +350,9 @@ export default function (pi: ExtensionAPI) {
 		refreshingCard = false;
 		cardRefreshQueued = false;
 		identity = undefined;
+		for (const waiting of waitedOn.values()) waiting.controller.abort();
+		waitedOn = new Map();
+		answeredPeers = [];
 		inFlight = [];
 		lastStopReason = undefined;
 		lastInbound = undefined;
@@ -433,6 +469,23 @@ export default function (pi: ExtensionAPI) {
 		const busy = context ? !context.isIdle() : false;
 		const plan = planDelivery(record, policy, self, busy, trusted);
 		const reference = referenceFor(record);
+
+		// The peer being waited on is asking something. Answering needs the turn the wait is
+		// holding, so the wait has to end for either side to make progress: this is the shape
+		// two sessions asking each other would otherwise sit in until both windows close.
+		const waiting = isAckRecord(record) ? undefined : waitedOn.get(record.from);
+		if (waiting && wantsReply(record)) {
+			waiting.abandoned = true;
+			waiting.controller.abort();
+		}
+
+		// A wait already returned this answer inside the tool result. The record it was carried
+		// in is still on the stream, and delivering it again is the whole answer twice.
+		if (answersConsumedAsk(record, self, answeredPeers, reference)) {
+			report(`msgq: the answer from ${record.from} was already returned by the ask that waited for it`);
+			subscription.save(offset);
+			return;
+		}
 
 		// A question the session will actually be asked starts an obligation it may still owe. A
 		// display-only record is not one: nothing was asked of the agent, and asking it to answer
@@ -574,7 +627,8 @@ export default function (pi: ExtensionAPI) {
 		label: "peers",
 		description:
 			"Work with other agents on the message bus. 'list' the addresses that are reachable, " +
-			"'send' a message to one, 'ask' a question and wait for the answer, or 'reply' to the " +
+			"'send' a message to one, 'ask' a question (by default the answer arrives later as a " +
+			"message; add wait to have it returned in this turn), or 'reply' to the " +
 			"message you most recently received. 'card' reports or changes this session's locator " +
 			"(project, branch, worktree, path); omit the card to read it. To have a peer *run* " +
 			"something rather than be told about it, send a command: the body is the command line, " +
@@ -601,8 +655,16 @@ export default function (pi: ExtensionAPI) {
 						"send a command for the peer to run instead of a message for it to read: the body must be the command line and nothing else",
 				}),
 			),
+			wait: Type.Optional(
+				Type.Boolean({
+					description:
+						"for 'ask': hold this turn open for the answer instead of being woken by it. Bounded, because two sessions waiting on each other cannot answer",
+				}),
+			),
 			timeoutSeconds: Type.Optional(
-				Type.Number({ description: "how long 'ask' waits; 0 waits without a limit" }),
+				Type.Number({
+					description: `for 'ask' with wait: how long to wait, in seconds, at most ${MAX_ASK_TIMEOUT_S}`,
+				}),
 			),
 			card: Type.Optional(
 				Type.Object(
@@ -627,6 +689,7 @@ export default function (pi: ExtensionAPI) {
 				to?: string;
 				message?: string;
 				timeoutSeconds?: number;
+				wait?: boolean;
 				command?: boolean;
 				card?: unknown;
 			},
@@ -641,9 +704,38 @@ export default function (pi: ExtensionAPI) {
 				expectCompletion: true,
 			});
 			if (isError(plan)) return toolText(plan.error);
-			const seconds = params.action === "ask" ? (params.timeoutSeconds ?? DEFAULT_ASK_TIMEOUT_S) : 0;
-			const timeoutMs = seconds > 0 ? seconds * 1000 + 30_000 : undefined;
-			let report = await runPlanned(pi, plan, { signal, timeoutMs, binEnv: "MSGQ_BIN" });
+
+			// Only a waiting ask holds the turn open, so only it can need abandoning or leave an
+			// answer behind on the stream.
+			const waiting = params.action === "ask" && params.wait === true;
+			const to = params.to ?? "";
+			const entry = waiting ? { controller: new AbortController(), abandoned: false } : undefined;
+			const seconds = waiting ? askWaitSeconds(params.timeoutSeconds) : 0;
+			const timeoutMs = waiting ? seconds * 1000 + 30_000 : undefined;
+			if (entry) waitedOn.set(to, entry);
+			let report: { ok: boolean; text: string };
+			try {
+				report = await runPlanned(pi, plan, {
+					signal: entry ? linkSignal(entry.controller, signal) : signal,
+					timeoutMs,
+					binEnv: "MSGQ_BIN",
+				});
+			} finally {
+				if (entry) waitedOn.delete(to);
+			}
+			if (entry?.abandoned) {
+				// Its question is buffered behind this turn and arrives as soon as the turn ends.
+				// The question this session sent is published and unanswered, not lost.
+				return toolText(
+					`${to} is asking you a question and cannot answer until you do, so this session stopped waiting. Its question arrives as your next message: answer it with peers({action:"reply"}), then ask again — the question you sent is not lost.`,
+				);
+			}
+			if (waiting) {
+				const ask = interpretAsk(report, to);
+				// Consumed already: the record must not be delivered a second time later in this turn.
+				if (ask.answered) answeredPeers.push(to);
+				report = { ok: report.ok, text: ask.text };
+			}
 			// Older CLIs do not know --wide. The locator is an enhancement, so fall back to the
 			// plain roster rather than failing the list action — but only when the CLI rejected
 			// the flag, not when it could not read the bus.
@@ -844,6 +936,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", async (_event, ctx) => {
 		lastStopReason = undefined;
+		// Duplicate suppression lasts one turn: nothing a previous turn answered can be consumed now.
+		answeredPeers = [];
 		currentCwd = ctx.cwd;
 		void refreshCard(currentCwd);
 		setPresenceState("busy");

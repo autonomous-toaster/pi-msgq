@@ -211,7 +211,7 @@ One tool puts the bus in the agent's hands.
 
 | Tool | Actions | Needs |
 |---|---|---|
-| `peers` | `list` who is reachable · `send` a message · `ask` a question and wait for the answer · `reply` to the message you last received · `card` read or change this session's locator | the bus only |
+| `peers` | `list` who is reachable · `send` a message · `ask` a question · `reply` to the message you last received · `card` read or change this session's locator | the bus only |
 
 A peer is any other participant on the bus: another pi session, a maki session, a script, a CI job.
 Nothing here starts one. Starting a process is the job of whatever you use to run sessions — a
@@ -221,6 +221,9 @@ running.
 ```
 peers({action:"list"})                               ->  who is reachable (with their locator), and who you are
 peers({action:"ask", to:"session/reviewer", message:"Review this diff"})
+                                                     ->  sent; the answer arrives as a message
+peers({action:"ask", to:"session/reviewer", message:"2+2?", wait:true, timeoutSeconds:30})
+                                                     ->  returns the answer, if it comes in 30s
 peers({action:"reply", message:"done"})              ->  answers whoever last asked
 peers({action:"card"})                               ->  this session's locator
 peers({action:"card", card:{branch:"review"}})       ->  override one locator field
@@ -241,6 +244,24 @@ Two things make that safe to use:
 - A message that **asks a question** is delivered with an instruction telling the model to answer
   with the `peers` tool. Without it a peer answers into its own transcript and the asker waits in
   vain.
+
+### Asking does not stop the session
+
+`ask` publishes the question and returns. The answer arrives as an ordinary inbound message that
+starts a turn, exactly as `send` already works, and it names the message it answers.
+
+That is not a matter of taste. A session has one execution slot, and a turn that waits holds it:
+while it waits, an arriving message is buffered until the turn ends. So two sessions that ask each
+other can never answer — each one's question sits in the other's buffer, waiting for a turn that is
+waiting for it. Verified, not assumed: with a wait that has no limit, neither side ever returns; with
+a bounded one, each returns only when its own window closes.
+
+`wait:true` keeps the one-turn exchange for a peer that plainly answers at once. Three things make it
+safe: it is **bounded** (at most 120 seconds, and there is no way to ask for forever); it is
+**abandoned** the moment the peer you are waiting on asks you something, because that answer needs
+the turn the wait is holding; and the answer it returns is **not delivered again** when the same
+record reaches this session by the ordinary path. A question addressed to this session itself is
+refused, because nothing delivers a record back to its own sender.
 
 ### An exchange always ends
 

@@ -542,6 +542,77 @@ fn ask_reports_finished_without_replying() {
 }
 
 #[test]
+fn ask_no_wait_returns_as_soon_as_the_question_is_published() {
+    let db = temp_db();
+    let began = std::time::Instant::now();
+    let out = run(
+        &db,
+        &[
+            "ask",
+            "session/w",
+            "what is 2+2?",
+            "--from",
+            "cli/asker",
+            "--no-wait",
+        ],
+    );
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    // The question is the only record, so the offset is the first one, and printing it is
+    // what lets the caller name the record it just asked.
+    assert_eq!(out.stdout.trim(), "1");
+    // Nothing waited: no reply exists, and there was nothing to wait for.
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        began.elapsed()
+    );
+    let read = run(&db, &["read", "session/w", "--from-start", "--json"]);
+    assert!(read.stdout.contains("\"reply\":true"), "{}", read.stdout);
+    assert!(read.stdout.contains("\"ack\":true"), "{}", read.stdout);
+}
+
+#[test]
+fn ask_no_wait_publishes_the_same_record_as_a_blocking_ask() {
+    let db = temp_db();
+    assert_eq!(
+        run(
+            &db,
+            &["ask", "session/w", "q", "--from", "cli/asker", "--no-wait"]
+        )
+        .code,
+        0
+    );
+    // A one-second window, so the blocking ask ends without an answer.
+    assert_eq!(
+        run(
+            &db,
+            &[
+                "ask",
+                "session/w",
+                "q",
+                "--from",
+                "cli/asker",
+                "--timeout",
+                "1",
+            ]
+        )
+        .code,
+        0
+    );
+
+    let out = run(&db, &["read", "session/w", "--from-start", "--json"]);
+    let records: Vec<&str> = out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(records.len(), 2, "{}", out.stdout);
+    // Whether the sender waits is the sender's business: the wire cannot tell the two apart.
+    assert_eq!(records[0], records[1]);
+}
+
+#[test]
 fn ask_reports_still_running_without_erroring() {
     let db = temp_db();
     let out = run(

@@ -451,6 +451,11 @@ command's output; or the peer finishes without answering, which is reported; or 
 closes first, which is reported as "still running" (the peer is fine, it is just slow).
 `--timeout <seconds>` defaults to 600, and `0` waits without a limit.
 
+`--no-wait` publishes the same record and returns as soon as it is published, printing its offset.
+The answer then arrives as an ordinary record on the sender's own stream, which is what a session
+does with it: a session cannot afford to hold its turn open, because two sessions waiting on each
+other could then never answer. A script can.
+
 Replies are ordinary records carrying `reply_to`, so `msgq publish --reply-to <offset>` will craft
 one by hand, and `--reply-to <address>#<offset>` names one exactly. In practice you rarely do: a
 peer that is asked a question is told, in the message it receives, to answer with the `peers` tool.

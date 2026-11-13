@@ -57,18 +57,25 @@ peers({action:"send", command:true, to:"session/reviewer",
 - You cannot `ask` a command: asking wraps a question in a reply instruction, and a command must be
   the whole message. The tool refuses, and says so.
 
-## Block, or be woken
+## Send, or wait inside the turn
 
-`ask` waits for the answer inside your turn. `send` returns at once and the answer wakes you later,
-as a new turn — and the answer says which message it answers, so you still know what it is about.
+`ask` publishes the question and returns; the answer wakes you later, as a new turn, and it says
+which message it answers, so you still know what it is about. `send` is the same without the
+instruction to answer.
 
 ```
-   you have other work to do        send   -> carry on; the answer arrives on its own
-   you are blocked on the answer    ask    -> one turn, one answer, or a timeout
-   several delegates at once        send   -> replies land as turns, coalesced into one run
+   you have other work to do        send           -> carry on; the answer arrives on its own
+   the peer answers at once         ask wait:true   -> one turn, one answer, or a timeout
+   several delegates at once        send           -> replies land as turns, coalesced into one run
 ```
 
-A timeout from `ask` is not a failure: it means the peer is still working. Ask again, or send.
+`wait:true` is the exception, and it is bounded: a turn that waits cannot act on anything arriving
+behind it, so never wait on a peer that may itself be waiting on you — two sessions asking each
+other would only stop when a window closed. The wait is capped at 120 seconds, no limit can be
+requested, and it is abandoned the moment the peer asks you something.
+
+A timeout from a waiting `ask` is not a failure: it means the peer is still working. Ask again, or
+send.
 
 **An exchange ends in a signal.** If a peer asks you something, answer it — including to say that
 nothing needed reporting, which is a real answer and not a failure to find one. And you are not left

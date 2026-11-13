@@ -152,18 +152,20 @@ an ordinary message, and the transcript shows how to answer each one. See the
 
 | Tool | Actions |
 |---|---|
-| `peers` | `list` who is reachable · `send` a message · `ask` a question and wait · `reply` to the message you last received |
+| `peers` | `list` who is reachable · `send` a message · `ask` a question · `reply` to the message you last received |
 
 A peer is any other participant: another pi session, a maki session, a script, a CI job. The tool
 does not start one — that is the job of whatever runs your sessions. It finds them, talks to them,
-and waits for the answer:
+and hands work over:
 
 ```text
 ask session/reviewer to review the parser, and tell me what it said
 ```
 
-Under the hood that is `peers({action:"ask",to:"session/reviewer",...})`, then one sentence back to
-you.
+Under the hood that is `peers({action:"ask",to:"session/reviewer",...})`: the question is published
+and the turn ends, and the answer arrives as a message that starts the next one. `wait:true` takes
+the answer inside the same turn instead — bounded, because a turn that waits cannot answer anything
+arriving behind it, and two sessions waiting on each other would then never finish.
 
 ## The same bus, from maki
 

@@ -124,6 +124,7 @@ done
 | presence | `presence`, `presence-off`, `rename`, `squat`, `crash-expiry`, `blocked` |
 | locator card | `peer-locator` (a real pi session publishes one and the row carries one locator column), `maki-card` (the maki plugin, loaded against a stubbed host, derives, overrides and publishes its own) |
 | acknowledgements | `ack-display`, `ack-honor`, `ack-batch`, `ack-quiet` |
+| the peer tool | `ask-wakes` (an ask does not wait: the answer arrives as a message), `ask-cycle` (a waiting ask is abandoned when the peer asks back, and the question is still delivered), `ask-answered-once` (a wait's answer is not delivered a second time) — the three scenarios that run with tools enabled |
 | the commands | `command-surface`, `command-no-peers`, `command-pick-and-send`, `command-peer-direct`, `command-peer-compose`, `command-peer-pick`, `command-reply`, `command-absent-recipient`, `command-me`, `command-identity`, `command-no-dialog` |
 
 `maki-card` is the one scenario that is not a pi session: `extension/scripts/maki-card.lua` loads

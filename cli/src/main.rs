@@ -79,6 +79,9 @@ enum Command {
         /// Emit the reply as its raw record, and outcomes as JSON.
         #[arg(long)]
         json: bool,
+        /// Publish the question and return without waiting for the answer.
+        #[arg(long = "no-wait")]
+        no_wait: bool,
     },
     /// Wait for acknowledgements of a published message.
     Await {
@@ -274,6 +277,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             on,
             timeout,
             json,
+            no_wait,
         } => commands::ask(
             &db,
             AskArgs {
@@ -283,6 +287,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 on,
                 timeout,
                 json,
+                no_wait,
             },
         ),
         Command::Await {

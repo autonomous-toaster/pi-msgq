@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+	answersConsumedAsk,
 	Coalescer,
 	formatBatch,
 	formatCommandNote,
@@ -204,4 +205,32 @@ test("the note before a command carries a reference too", () => {
 		record: record({ from: "session/reviewer", message: "run this" }),
 	});
 	assert.match(text, /\[about session\/planner#4 from session\/reviewer: "run this"\]/);
+});
+
+test("an answer a wait already returned is not delivered twice", () => {
+	const SELF_ADDRESS = "session/planner";
+	const asker = "session/reviewer";
+	const answer = record({ from: asker, to: SELF_ADDRESS, reply_to: 7, message: "four" });
+	const reference = {
+		id: `${asker}#7`,
+		record: record({ from: SELF_ADDRESS, to: asker, message: "what is 2+2?" }),
+	};
+
+	// The wait returned it, and it refers to the question this session asked.
+	assert.equal(answersConsumedAsk(answer, SELF_ADDRESS, [asker], reference), true);
+
+	// A peer whose answer was never returned in this turn.
+	assert.equal(answersConsumedAsk(answer, SELF_ADDRESS, [], reference), false);
+	// Not a reply at all: something the peer said on its own.
+	assert.equal(answersConsumedAsk(record({ from: asker }), SELF_ADDRESS, [asker], reference), false);
+	// A reply to somebody else's message.
+	assert.equal(
+		answersConsumedAsk(answer, SELF_ADDRESS, [asker], {
+			id: "session/other#7",
+			record: record({ from: "session/other", message: "theirs" }),
+		}),
+		false,
+	);
+	// A reference that could not be read says nothing, so nothing is consumed.
+	assert.equal(answersConsumedAsk(answer, SELF_ADDRESS, [asker], { id: "session/reviewer#7" }), false);
 });
