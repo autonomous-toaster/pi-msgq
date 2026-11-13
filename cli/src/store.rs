@@ -78,6 +78,10 @@ pub trait Bus: Send {
     fn retention_watermark(&self, topic: &str) -> Result<Option<(i64, i64)>, Error>;
     fn retention_dropped(&self, topic: &str, cursor: i64) -> Result<i64, Error>;
     fn record_at(&self, offset: i64) -> Result<Option<(String, String)>, Error>;
+    /// The principal this bus writes as, with the scopes that principal reaches.
+    fn identity(&self) -> Result<Option<(String, Vec<String>)>, Error> {
+        Ok(None)
+    }
     /// What this bus will accept as proof of who is writing, for reporting.
     fn credential(&self) -> Result<String, Error> {
         Ok("none (the local bus trusts file permissions; the sender is a claim)".to_string())
@@ -905,6 +909,9 @@ impl Bus for Store {
     }
     fn credential(&self) -> Result<String, Error> {
         self.inner.credential()
+    }
+    fn identity(&self) -> Result<Option<(String, Vec<String>)>, Error> {
+        self.inner.identity()
     }
 }
 

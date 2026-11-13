@@ -1139,6 +1139,12 @@ pub fn db_info(db: &crate::config::Target) -> Result<(), Error> {
     );
     println!("credential:       {}", store.credential()?);
     println!("encryption:       {}", crate::seal::describe()?);
+    if let Some((principal, scopes)) = store.identity()? {
+        println!(
+            "identity:         {principal} (scopes: {})",
+            scopes.join(", ")
+        );
+    }
 
     let presence_age = streams
         .iter()

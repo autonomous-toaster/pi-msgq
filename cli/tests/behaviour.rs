@@ -75,7 +75,7 @@ fn credential(dsn: &str) -> String {
         postgres::Client::connect(dsn, postgres::NoTls).expect("the test database must accept");
     client
         .query_one(
-            "SELECT msgq.register_identity('cli/behaviour', ARRAY['group','session','cwd','cli'])",
+            "SELECT msgq.register_identity('behaviour', ARRAY['group','session','cwd','cli'])",
             &[],
         )
         .expect("an identity must be mintable")

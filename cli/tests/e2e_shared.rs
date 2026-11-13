@@ -93,12 +93,12 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     let bob_address = format!("session/bob-{unique}");
     let alice = Session {
         dsn: dsn.clone(),
-        token: credential(&dsn, &alice_address),
+        token: credential(&dsn, &format!("alice-{unique}")),
         scope: scope.clone(),
     };
     let bob = Session {
         dsn: dsn.clone(),
-        token: credential(&dsn, &bob_address),
+        token: credential(&dsn, &format!("bob-{unique}")),
         scope: scope.clone(),
     };
 
@@ -111,12 +111,25 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     );
 
     // A note, with the sender stamped by the server rather than claimed by the writer.
-    alice.ok(&[
+    let refused = alice.run(&[
         "publish",
         &bob_address,
         "the suite is green",
         "--from",
         "cwd/somewhere-else",
+    ]);
+    assert_eq!(refused.code, 1, "a claim outside the scopes is refused");
+    assert!(
+        refused.stderr.contains("outside the scopes"),
+        "{}",
+        refused.stderr
+    );
+    alice.ok(&[
+        "publish",
+        &bob_address,
+        "the suite is green",
+        "--from",
+        &alice_address,
     ]);
     let read = bob.ok(&["read", &bob_address, "--from-start"]);
     assert!(read.contains("the suite is green"), "{read}");
@@ -127,7 +140,7 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     );
     assert!(
         !stored.contains("cwd/somewhere-else"),
-        "a claim outside the identity's scopes is gone: {stored}"
+        "a refused claim stores nothing: {stored}"
     );
 
     // An ask, and an acknowledgement written by the other session while the ask waits. The record
@@ -206,7 +219,7 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     // Another scope sees neither, because the address is the separation.
     let elsewhere = Session {
         dsn: dsn.clone(),
-        token: credential(&dsn, &format!("cli/out-{unique}")),
+        token: credential(&dsn, &format!("out-{unique}")),
         scope: format!("other{unique}"),
     };
     let other = elsewhere.ok(&["sessions", "--json"]);

@@ -2,8 +2,8 @@
 
 ## 1. Principal-keyed identity
 
-- [ ] 1.1 Re-key `msgq.identity` to a principal. The row names a user. `scopes` holds the namespace of the user. Drop the address-shaped validation on registration. Verify a registration of `alice` succeeds with scopes `session/alice` and `group/alice`.
-- [ ] 1.2 Refuse a sender claim outside the scopes. Keep a claim inside the scopes. Refuse the write outside the scopes. Store nothing on a refusal. Verify the error names the refused address.
+- [x] 1.1 Re-key `msgq.identity` to a principal. The row names a user. `scopes` holds the namespace of the user. Drop the address-shaped validation on registration. Verify a registration of `alice` succeeds with scopes `session/alice` and `group/alice`.
+- [x] 1.2 Refuse a sender claim outside the scopes. Keep a claim inside the scopes. Refuse the write outside the scopes. Store nothing on a refusal. Verify the error names the refused address.
 
 ## 2. Scoped reads
 
@@ -22,8 +22,8 @@
 
 ## 4. Owner stamp
 
-- [ ] 4.1 Stamp the writing principal in the headers of every authorized record. Place the value next to the address. Expose the value to readers. Verify a forged `meta` field is not the source.
-- [ ] 4.2 Report the caller in `db info`. Name the principal and the scopes. Keep the credential line. Keep the local trust statement unchanged. Verify the shared report names the principal.
+- [x] 4.1 Stamp the writing principal in the headers of every authorized record. Place the value next to the address. Expose the value to readers. Verify a forged `meta` field is not the source.
+- [x] 4.2 Report the caller in `db info`. Name the principal and the scopes. Keep the credential line. Keep the local trust statement unchanged. Verify the shared report names the principal.
 
 ## 5. Credential lease
 

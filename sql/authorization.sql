@@ -148,10 +148,18 @@ AS $$
 DECLARE
     claimed TEXT := msgq.canonical_address(coalesce(record ->> 'from', ''));
 BEGIN
-    IF claimed ~ '^(session|cwd|group|cli)/[^/]' AND msgq.in_scope(claimed, ident.scopes) THEN
-        RETURN claimed;
+    IF claimed = '' THEN
+        RAISE EXCEPTION 'msgq: the record names no sender' USING ERRCODE = '22023';
     END IF;
-    RETURN ident.name;
+    IF NOT msgq.in_scope(claimed, ident.scopes) THEN
+        RAISE EXCEPTION 'msgq: % is outside the scopes of %', claimed, ident.name
+            USING ERRCODE = '42501';
+    END IF;
+    -- A room is not a sender: a participant speaks as itself, never as the place it speaks in.
+    IF claimed !~ '^(session|cwd|cli)/[^/]' THEN
+        RAISE EXCEPTION 'msgq: % is not a participant address', claimed USING ERRCODE = '22023';
+    END IF;
+    RETURN claimed;
 END;
 $$;
 
@@ -190,7 +198,9 @@ BEGIN
 
     name := msgq.ensure_queue(addr);
     SELECT sent INTO new_offset
-    FROM pgmq.send(name, payload, jsonb_build_object('msgq', jsonb_build_object('address', addr)))
+    FROM pgmq.send(
+        name, payload,
+        jsonb_build_object('msgq', jsonb_build_object('address', addr, 'identity', ident.name)))
         AS sent;
     UPDATE msgq.address SET newest_offset = GREATEST(msgq.address.newest_offset, new_offset)
         WHERE msgq.address.address = addr;
@@ -215,8 +225,8 @@ DECLARE
 BEGIN
     -- The identity is the sender the bus stamps, so it has to be an address a peer can answer:
     -- one of the reserved schemes and a non-empty name.
-    IF canonical !~ '^(session|cwd|group|cli)/[^/]' THEN
-        RAISE EXCEPTION 'msgq: an identity must be an address such as session/planner, not %',
+    IF position('/' IN canonical) > 0 THEN
+        RAISE EXCEPTION 'msgq: an identity is a principal name, not an address: %',
             identity_name USING ERRCODE = '22023';
     END IF;
     INSERT INTO msgq.identity (name, digest, scopes, expires_at)

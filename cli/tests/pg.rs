@@ -36,7 +36,7 @@ fn fixture_token(dsn: &str) -> String {
     let mut client = client(dsn);
     client
         .query_one(
-            "SELECT msgq.register_identity('cli/fixture', ARRAY['group','session','cwd'])",
+            "SELECT msgq.register_identity('fixture', ARRAY['group','session','cwd','cli'])",
             &[],
         )
         .unwrap()
@@ -766,8 +766,8 @@ fn a_write_outside_the_scopes_is_refused_and_changes_nothing() {
     let mut raw = client(&dsn);
     let token: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group/red'])",
-            &[&format!("cli/red-{}", unique()).as_str()],
+            "SELECT msgq.register_identity($1, ARRAY['group/red','cli'])",
+            &[&format!("red-{}", unique()).as_str()],
         )
         .unwrap()
         .get(0);
@@ -818,7 +818,7 @@ fn a_missing_or_expired_credential_is_named() {
     // Ensure the bus has an identity, so it is a bus that can authorize.
     raw.execute(
         "SELECT msgq.register_identity($1, ARRAY['group'])",
-        &[&format!("cli/keeper-{}", unique()).as_str()],
+        &[&format!("keeper-{}", unique()).as_str()],
     )
     .unwrap();
     let anonymous = Store::open_with(&Target::Shared(dsn.clone()), None)
@@ -835,7 +835,7 @@ fn a_missing_or_expired_credential_is_named() {
     let expired: String = raw
         .query_one(
             "SELECT msgq.register_identity($1, ARRAY['group'], now() - interval '1 hour')",
-            &[&format!("cli/expired-{}", unique()).as_str()],
+            &[&format!("expired-{}", unique()).as_str()],
         )
         .unwrap()
         .get(0);
@@ -872,8 +872,8 @@ fn a_runtime_role_cannot_write_a_stream_directly() {
     let address = format!("group/runtime-{}", unique());
     let token: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group'])",
-            &[&format!("cli/runtime-{}", unique()).as_str()],
+            "SELECT msgq.register_identity($1, ARRAY['group','cli'])",
+            &[&format!("runtime-{}", unique()).as_str()],
         )
         .unwrap()
         .get(0);
@@ -911,7 +911,10 @@ fn a_runtime_role_cannot_write_a_stream_directly() {
             &[
                 &token.as_str(),
                 &address,
-                &r#"{"v":1,"type":"note","message":"hi"}"#,
+                &format!(
+                    r#"{{"v":1,"type":"note","from":"cli/runtime@{}","to":"{address}","message":"hi"}}"#,
+                    unique()
+                ),
             ],
         )
         .unwrap()
@@ -953,7 +956,13 @@ fn the_reported_credential_state_distinguishes_the_four_cases() {
     let known = Store::open_with(&Target::Shared(dsn.clone()), Some(token))
         .expect("open")
         .0;
-    assert_eq!(known.credential().unwrap(), "accepted as cli/fixture");
+    assert_eq!(known.credential().unwrap(), "accepted as fixture");
+    let (principal, scopes) = known
+        .identity()
+        .unwrap()
+        .expect("the bus names its principal");
+    assert_eq!(principal, "fixture");
+    assert!(scopes.contains(&"session".to_string()), "{scopes:?}");
 
     let unknown = Store::open_with(&Target::Shared(dsn.clone()), Some("nope".to_string()))
         .expect("open")
@@ -985,10 +994,10 @@ fn a_sender_may_speak_as_itself_and_no_further() {
     };
     let _serialised = exclusive(&dsn);
     let mut raw = client(&dsn);
-    let identity = format!("session/owner-{}", unique());
+    let identity = format!("owner-{}", unique());
     let token: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['session', 'group'])",
+            "SELECT msgq.register_identity($1, ARRAY['session', 'group', 'cli'])",
             &[&identity.as_str()],
         )
         .unwrap()
@@ -1001,8 +1010,8 @@ fn a_sender_may_speak_as_itself_and_no_further() {
         store
             .publish(
                 &address,
-                &json!({"v": 1, "type": "note", "from": identity, "to": address,
-                        "message": "first"}),
+                &json!({"v": 1, "type": "note", "from": format!("session/opener-{}", unique()),
+                        "to": address, "message": "first"}),
             )
             .unwrap();
         queue_for(&mut raw, &address).expect("registered")
@@ -1011,27 +1020,42 @@ fn a_sender_may_speak_as_itself_and_no_further() {
     let own = format!("session/worker-{}", unique());
     for (claimed, expected) in [
         // Inside the credential's scopes: one credential, several sessions.
-        (own.clone(), own.clone()),
-        // Another user's namespace: replaced by the identity.
-        ("cwd/elsewhere".to_string(), identity.clone()),
-        // Not an address at all: replaced by the identity.
-        ("not an address".to_string(), identity.clone()),
+        (own.clone(), Some(own.clone())),
+        // Another user's namespace: refused, nothing stored.
+        ("cwd/elsewhere".to_string(), None),
+        // A room is not a sender: refused.
+        ("group/standup".to_string(), None),
+        // Not an address at all: refused.
+        ("not an address".to_string(), None),
     ] {
-        let offset = store
-            .publish(
-                &address,
-                &json!({"v": 1, "type": "note", "from": claimed, "to": address,
-                        "message": "hi"}),
-            )
-            .unwrap();
-        let stored: String = raw
-            .query_one(
-                &format!("SELECT message->>'from' FROM pgmq.\"q_{queue}\" WHERE msg_id = $1"),
-                &[&offset],
-            )
-            .unwrap()
-            .get(0);
-        assert_eq!(stored, expected, "the record claimed {claimed}");
+        let published = store.publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": claimed.clone(), "to": address,
+                    "message": "hi"}),
+        );
+        match expected {
+            None => {
+                let error = published.expect_err("a claim outside the scopes is refused");
+                assert!(
+                    error.to_string().contains("outside the scopes")
+                        || error.to_string().contains("not a participant address"),
+                    "{error}"
+                );
+            }
+            Some(expected) => {
+                let offset = published.unwrap();
+                let stored: String = raw
+                    .query_one(
+                        &format!(
+                            "SELECT message->>'from' FROM pgmq.\"q_{queue}\" WHERE msg_id = $1"
+                        ),
+                        &[&offset],
+                    )
+                    .unwrap()
+                    .get(0);
+                assert_eq!(stored, expected, "the record claimed {claimed}");
+            }
+        }
     }
 }
 

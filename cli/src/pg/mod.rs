@@ -124,6 +124,20 @@ impl Bus for PgStore {
         }
     }
 
+    fn identity(&self) -> Result<Option<(String, Vec<String>)>, Error> {
+        let Some(token) = &self.credential else {
+            return Ok(None);
+        };
+        let mut client = self.conn()?;
+        let row = client
+            .query_opt(
+                "SELECT name, scopes FROM msgq.identity WHERE digest = msgq.token_digest($1)",
+                &[token],
+            )
+            .map_err(pg)?;
+        Ok(row.map(|row| (row.get(0), row.get::<_, Vec<String>>(1))))
+    }
+
     fn credential(&self) -> Result<String, Error> {
         let mut client = self.conn()?;
         let registered = scalar_i64(&mut client, "SELECT COUNT(*) FROM msgq.identity", &[])?;
