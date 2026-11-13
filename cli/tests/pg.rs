@@ -1214,7 +1214,7 @@ fn a_prune_outside_ownership_is_refused_and_removes_nothing() {
     // A principal that may read the room still may not erase its history.
     let other: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group'])",
+            "SELECT msgq.register_identity($1, ARRAY['group','cli'])",
             &[&format!("guest-{}", unique()).as_str()],
         )
         .unwrap()
@@ -1222,6 +1222,16 @@ fn a_prune_outside_ownership_is_refused_and_removes_nothing() {
     let guest = Store::open_with(&Target::Shared(dsn.clone()), Some(other))
         .expect("open")
         .0;
+    // A member of the room writes as itself...
+    guest
+        .publish(
+            &address,
+            &json!({"v": 1, "type": "note", "from": format!("cli/guest@{}", unique()),
+                    "to": address, "message": "may I join"}),
+        )
+        .expect("a member of the room writes");
+
+    // ...and cannot erase another member's history.
     let refused = guest.prune_before(&address, i64::MAX, &[], 100);
     let error = refused.expect_err("a prune outside ownership is refused");
     assert!(format!("{error:?}").contains("belongs to"), "{error:?}");
@@ -1233,7 +1243,7 @@ fn a_prune_outside_ownership_is_refused_and_removes_nothing() {
         )
         .unwrap()
         .get(0);
-    assert_eq!(left, 2, "a refused prune removes no record");
+    assert_eq!(left, 3, "a refused prune removes no record");
 }
 
 #[test]

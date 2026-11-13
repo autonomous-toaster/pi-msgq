@@ -74,7 +74,15 @@ shared room from becoming a place where one member erases another's history. Tod
 to one principal, so the rule is satisfied by construction; it is written down now because the teams case
 would otherwise break it silently.
 
-### 6. A lease renews, it never re-mints
+### 6. The room rule, and the guest door
+
+A room is an address that appears in more than one principal's scopes. Two decisions follow from that
+definition, and both are already implemented: a member writes into the room as itself, and prune
+authority follows ownership of the address rather than access to it. A guest door is therefore the
+later addition — adding a second principal's scope to an address grants reading and writing, and
+grants erasing nothing.
+
+### 7. A lease renews, it never re-mints
 
 Extending a credential by registering the principal again replaces the digest, which logs out every
 other session of that principal — the sharpest edge in the current model for one user with several

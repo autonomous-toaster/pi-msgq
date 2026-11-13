@@ -31,4 +31,4 @@
 
 ## 6. The teams door
 
-- [ ] 6.1 Record the room rule. A room is an address listed in more than one principal's scopes. Prune authority follows ownership rather than access. Name read scopes as the later addition for a guest. Verify a shared-room member can write and cannot prune.
+- [x] 6.1 Record the room rule. A room is an address listed in more than one principal's scopes. Prune authority follows ownership rather than access. Name read scopes as the later addition for a guest. Verify a shared-room member can write and cannot prune.
