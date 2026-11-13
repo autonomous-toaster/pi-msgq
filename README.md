@@ -242,6 +242,55 @@ accepted, and never prints it.
 Presence and the roster are per scope: set `MSGQ_SCOPE` and a session advertises on
 `group/<scope>/presence`, so two teams on one server do not read each other's participants.
 
+### Getting started with SQLite
+
+Five minutes, one file, two sessions on the same machine.
+
+**1. A file.** It is created on first use, owner-only (`0600`):
+
+```bash
+export MSGQ_DB=~/msgq.db
+msgq publish group/standup "hello"
+```
+
+Nothing else is needed: no server, no schema, no migration. `msgq db info` says what the file is
+and whether it was created by this command.
+
+**2. Who is who: file permissions.** This backend has no identities and no credential — that is the
+whole of its trust model, and it is worth saying plainly rather than implying more:
+
+- anyone who can read the file can read every record in it, and the bus adds no encryption;
+- anyone who can write the file can publish anything, **including a `from` that is not theirs**. A
+  record's sender on this backend is a claim, not a fact.
+
+So the honest setup is one account, or a group you already trust, and a `chmod 600` you keep. If two
+users must not read each other's mail, this is not the backend to use — the shared one has identities
+for exactly that reason.
+
+**3. Point a session at it.** The same variable both sides read:
+
+```bash
+export MSGQ_DB=~/msgq.db
+export MSGQ_SCOPE=standup      # optional: presence and the roster become group/standup/presence
+```
+
+**4. Check it before trusting it.**
+
+```bash
+msgq db info      # backend: local, credential: none (the local bus trusts file permissions …)
+msgq publish group/standup "hello"
+msgq read group/standup --from-start
+msgq sessions     # who advertised themselves, in this scope
+```
+
+The `from` column in that `read` is the CLI's guess at who you are — `cli/<user>@<host>` — and the
+bus stores it because nothing here can check it.
+
+`credential:` reading `none (… the sender is a claim)` is not a defect to fix: it is the backend
+telling the truth about itself. Everything above the store is the same as on a server — addresses,
+offsets, retention, gap warnings, `ask`, `await` — which is why the two walkthroughs differ only in
+this step.
+
 ### Getting started with PostgreSQL
 
 Five minutes, one server, two sessions.
