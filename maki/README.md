@@ -48,7 +48,7 @@ every instance look like every other one and silently drop their traffic as self
 | `trust` | every sender | list (or comma string) of addresses allowed to act; others are display-only |
 | `presence` | `true` | advertise on `group/presence` so `msgq sessions` lists the session |
 | `bin` | `$MSGQ_BIN` or `msgq` | the CLI to run |
-| `db` | `$MSGQ_DB` or the CLI default | bus location |
+| `db` | `$MSGQ_DB_URI`, else `$MSGQ_DB`, else the CLI default | bus location |
 | `topics` | none | extra addresses to follow, e.g. `{ "group/ci" }` |
 | `ttl` | `30` | presence lease, in seconds |
 | `presence_every_ms` | `10000` | presence renewal interval |

@@ -10,7 +10,7 @@
 // the full list.
 //
 // Environment overrides: MSGQ_BIN (path to the msgq binary), PI_BIN (pi command),
-// MSGQ_DB (bus location).
+// MSGQ_DB_URI (a server) or MSGQ_DB (a file).
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -30,7 +30,9 @@ const REPO = resolve(EXTENSION, "..");
 const CLI = process.env.MSGQ_BIN ?? resolve(REPO, "cli/target/debug/msgq");
 const PI = process.env.PI_BIN ?? "pi";
 const DB =
-	process.env.MSGQ_DB ?? resolve(mkdtempSync(resolve(tmpdir(), "msgq-e2e-")), "msgq.db");
+	process.env.MSGQ_DB_URI ??
+	process.env.MSGQ_DB ??
+	resolve(mkdtempSync(resolve(tmpdir(), "msgq-e2e-")), "msgq.db");
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -65,7 +67,8 @@ function startPi(extraArgs = [], envOverrides = {}, { noTools = true, cwd = REPO
 	const toolArgs = noTools ? ["-nt"] : [];
 	const child = spawn(PI, ["--mode", "rpc", "-e", EXTENSION, ...toolArgs, ...extraArgs], {
 		cwd,
-		env: { ...process.env, MSGQ_DB: DB, ...envOverrides },
+		// A scenario that pins its own file also has to clear an ambient server URI: the URI wins.
+	env: { ...process.env, MSGQ_DB_URI: "", MSGQ_DB: DB, ...envOverrides },
 		stdio: ["pipe", "pipe", "ignore"],
 	});
 
@@ -205,7 +208,7 @@ async function answerDialog(session, method, payload) {
 function oneShot(command, env = {}, db = DB) {
 	const result = spawnSync(PI, ["--mode", "json", "-p", command, "-e", EXTENSION], {
 		cwd: REPO,
-		env: { ...process.env, MSGQ_DB: db, ...env },
+		env: { ...process.env, MSGQ_DB_URI: "", MSGQ_DB: db, ...env },
 		encoding: "utf8",
 	});
 	return { out: result.stdout ?? "", err: result.stderr ?? "", code: result.status ?? -1 };

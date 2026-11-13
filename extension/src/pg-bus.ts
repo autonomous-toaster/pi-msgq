@@ -37,7 +37,7 @@ interface PgModule {
  * Connection settings for the shared engine.
  *
  * The same names the CLI reads, with the same precedence: what the location string says wins, and
- * the `PI_MSGQ_PG*` variables supply what it does not.
+ * the `MSGQ_PG*` variables supply what it does not.
  */
 export function pgSettings(
 	location: string,
@@ -46,11 +46,11 @@ export function pgSettings(
 	const settings: Record<string, unknown> = {};
 	if (location.includes("://")) settings.connectionString = location;
 	const map: Array<[string, string]> = [
-		["PI_MSGQ_PGHOST", "host"],
-		["PI_MSGQ_PGPORT", "port"],
-		["PI_MSGQ_PGUSER", "user"],
-		["PI_MSGQ_PGPASSWORD", "password"],
-		["PI_MSGQ_PGDATABASE", "database"],
+		["MSGQ_PGHOST", "host"],
+		["MSGQ_PGPORT", "port"],
+		["MSGQ_PGUSER", "user"],
+		["MSGQ_PGPASSWORD", "password"],
+		["MSGQ_PGDATABASE", "database"],
 	];
 	for (const [variable, key] of map) {
 		const value = env[variable]?.trim();

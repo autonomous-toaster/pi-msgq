@@ -398,7 +398,7 @@ this session answers you both.
 | Locator context | `--msgq-context` | `MSGQ_CONTEXT` | `auto` |
 | Locator path | `--msgq-card-paths` | `MSGQ_CARD_PATHS` | `relative` |
 | Lease lifetime | — | `MSGQ_PRESENCE_TTL` | `30` seconds |
-| Bus location | — | `MSGQ_DB` | `~/.pi/agent/msgq/msgq.db` |
+| Bus location | — | `MSGQ_DB_URI` (a server), else `MSGQ_DB` (a file) | `~/.pi/agent/msgq/msgq.db` |
 
 Flags win over environment variables. Extra addresses are comma-separated and use the same
 address grammar as the CLI (bare names become `group/<name>`).
@@ -448,7 +448,7 @@ msgq publish session/api-worker --json '{"v":1,"type":"note","from":"ci/bot","to
 |---|---|
 | Nothing is delivered | wrong address; run `msgq consumers` to see what the session follows |
 | A message appears but the agent ignores it | `display` policy (the default); use `--msgq-policy honor` |
-| `msgq: disabled` notice | the bus could not be opened — check `MSGQ_DB` |
+| `msgq: disabled` notice | the bus could not be opened — check `MSGQ_DB_URI` / `MSGQ_DB` |
 | A `skipped a record` notice | the record was malformed or its `v` is unsupported; consumption continues |
 | Old messages do not appear on start | by design; use the CLI's `read` to inspect history |
 

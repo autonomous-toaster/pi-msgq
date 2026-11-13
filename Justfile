@@ -34,12 +34,12 @@ pg-image:
     podman build -t {{PG_IMAGE}} ci/pgmq
 
 # Print a connection string for a PostgreSQL with pgmq, starting a throwaway one when needed.
-# A caller-supplied MSGQ_TEST_DATABASE_URI wins, so a real server can be used instead.
+# A caller-supplied MSGQ_TEST_DB_URI wins, so a real server can be used instead.
 pg-url:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -n "${MSGQ_TEST_DATABASE_URI:-}" ]; then
-        printf '%s\n' "$MSGQ_TEST_DATABASE_URI"
+    if [ -n "${MSGQ_TEST_DB_URI:-}" ]; then
+        printf '%s\n' "$MSGQ_TEST_DB_URI"
         exit 0
     fi
     if ! command -v podman >/dev/null; then
@@ -72,7 +72,7 @@ pg-down:
 # only one of them honours is exactly what this catches.
 behaviour-shared:
     #!/usr/bin/env bash
-    export MSGQ_TEST_DATABASE_URI="$(just pg-url)"
+    export MSGQ_TEST_DB_URI="$(just pg-url)"
     export MSGQ_BEHAVIOUR_ENGINE=shared
     if output=$(cd {{crate}} && cargo test --test behaviour 2>&1); then
         echo "✓ behavioural fixtures passed on both engines"
@@ -128,7 +128,7 @@ test:
     mkdir -p {{crate}}/target
     # The shared engine's tests need a database with pgmq. Provide one so that a run without any
     # setup still exercises both engines, instead of scoring the shared engine as untested.
-    export MSGQ_TEST_DATABASE_URI="$(just pg-url)"
+    export MSGQ_TEST_DB_URI="$(just pg-url)"
     output=$(cd {{crate}} && cargo llvm-cov nextest --lib --bins --tests \
         --lcov --output-path "$LCOV_FILE" 2>&1)
     code=$?
@@ -294,7 +294,7 @@ extension-test:
             exit 1
         }
     fi
-    export MSGQ_TEST_DATABASE_URI="$(just pg-url)"
+    export MSGQ_TEST_DB_URI="$(just pg-url)"
     if output=$(cd {{ext}} && node --test test/ 2>&1); then
         echo "✓ extension tests passed"
     else

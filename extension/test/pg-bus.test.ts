@@ -1,6 +1,6 @@
 // The shared engine's bus, against a real PostgreSQL with pgmq.
 //
-// These run when MSGQ_TEST_DATABASE_URI names a database, which `just test` provides. Without one
+// These run when MSGQ_TEST_DB_URI names a database, which `just test` provides. Without one
 // they say so and return: a shared-engine test that never ran is not evidence, and the suite says
 // which it was.
 
@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import { PgBus, pgSettings } from "../src/pg-bus.ts";
 
-const DSN = process.env.MSGQ_TEST_DATABASE_URI?.trim();
+const DSN = process.env.MSGQ_TEST_DB_URI?.trim();
 
 function unique(): string {
 	return `${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
@@ -50,18 +50,18 @@ test("the settings supply what the location does not", () => {
 	});
 	assert.deepEqual(
 		pgSettings("postgres://a@h/db", {
-			PI_MSGQ_PGPASSWORD: "secret",
-			PI_MSGQ_PGPORT: "55433",
-			PI_MSGQ_PGUSER: "ignored",
+			MSGQ_PGPASSWORD: "secret",
+			MSGQ_PGPORT: "55433",
+			MSGQ_PGUSER: "ignored",
 		}),
 		{ connectionString: "postgres://a@h/db", password: "secret", port: 55433, user: "ignored" },
 	);
 	// A location that names nothing takes everything from the environment, as the CLI does.
 	assert.deepEqual(
 		pgSettings("", {
-			PI_MSGQ_PGHOST: "127.0.0.1",
-			PI_MSGQ_PGDATABASE: "msgq",
-			PI_MSGQ_PGSSLMODE: "disable",
+			MSGQ_PGHOST: "127.0.0.1",
+			MSGQ_PGDATABASE: "msgq",
+			MSGQ_PGSSLMODE: "disable",
 		}),
 		{ host: "127.0.0.1", database: "msgq" },
 	);
@@ -69,7 +69,7 @@ test("the settings supply what the location does not", () => {
 
 test("a subscription receives what another client publishes", async (t) => {
 	if (!DSN) {
-		t.diagnostic("MSGQ_TEST_DATABASE_URI is unset: the shared bus was not exercised");
+		t.diagnostic("MSGQ_TEST_DB_URI is unset: the shared bus was not exercised");
 		return;
 	}
 	const address = `group/ext-${unique()}`;
@@ -106,7 +106,7 @@ test("a subscription receives what another client publishes", async (t) => {
 
 test("a cursor moves forward and never back", async (t) => {
 	if (!DSN) {
-		t.diagnostic("MSGQ_TEST_DATABASE_URI is unset: the cursor was not exercised");
+		t.diagnostic("MSGQ_TEST_DB_URI is unset: the cursor was not exercised");
 		return;
 	}
 	const address = `group/ext-cursor-${unique()}`;
@@ -138,7 +138,7 @@ test("a cursor moves forward and never back", async (t) => {
 
 test("lost records are reported, not hidden", async (t) => {
 	if (!DSN) {
-		t.diagnostic("MSGQ_TEST_DATABASE_URI is unset: the gap report was not exercised");
+		t.diagnostic("MSGQ_TEST_DB_URI is unset: the gap report was not exercised");
 		return;
 	}
 	const address = `group/ext-gap-${unique()}`;

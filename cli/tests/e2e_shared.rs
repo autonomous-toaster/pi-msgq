@@ -11,10 +11,10 @@ fn bin() -> &'static str {
 }
 
 fn dsn() -> Option<String> {
-    match std::env::var("MSGQ_TEST_DATABASE_URI") {
+    match std::env::var("MSGQ_TEST_DB_URI") {
         Ok(value) if !value.trim().is_empty() => Some(value),
         _ => {
-            eprintln!("shared end-to-end not run: set MSGQ_TEST_DATABASE_URI");
+            eprintln!("shared end-to-end not run: set MSGQ_TEST_DB_URI");
             None
         }
     }

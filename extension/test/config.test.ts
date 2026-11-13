@@ -110,3 +110,12 @@ test("subscriptionAddresses always includes self and de-duplicates extras", () =
 		["session/w", "group/a"],
 	);
 });
+
+test("a server uri wins over a file path", () => {
+	const uri = "postgres://bus@db/msgq";
+	assert.equal(resolveDbPath({ MSGQ_DB_URI: uri, MSGQ_DB: "/tmp/x.db" }, "/home/me"), uri);
+	assert.equal(resolveDbPath({ MSGQ_DB_URI: " ", MSGQ_DB: "/tmp/x.db" }, "/home/me"), "/tmp/x.db");
+	// The older form keeps working: a connection string in MSGQ_DB is a location too.
+	assert.equal(resolveDbPath({ MSGQ_DB: uri }, "/home/me"), uri);
+	assert.equal(resolveDbPath({}, "/home/me"), "/home/me/.pi/agent/msgq/msgq.db");
+});

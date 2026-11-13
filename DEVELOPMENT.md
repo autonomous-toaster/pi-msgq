@@ -80,8 +80,10 @@ The bus is one product with two engines, and a deployment runs **one** of them:
 - **shared** — PostgreSQL through pgmq, several machines and users on one server.
 
 There is no relay, no bridge, no dual write, and no sync. A deployment picks an engine by what
-`--db` / `MSGQ_DB` names: a connection string (`postgres://…`) selects the shared engine, anything
-else is a path to a file. Nothing may read both, and no feature may require the other engine to be
+`--db` / `MSGQ_DB_URI` / `MSGQ_DB` names: a connection string (`postgres://…`) selects the shared
+engine, a path selects the local one, and `MSGQ_PGHOST` / `MSGQ_PGDATABASE` select the shared engine
+when no location is named at all. `MSGQ_DB_URI` wins over `MSGQ_DB`; a connection string in
+`MSGQ_DB` still works. Nothing may read both, and no feature may require the other engine to be
 present.
 
 The seam is `Bus` in `cli/src/store.rs`, mirrored by the `Bus` interface in
@@ -109,12 +111,12 @@ The contract that keeps them honest is the behavioural fixture family in
 
 ```bash
 cargo test --manifest-path cli/Cargo.toml --test behaviour              # local
-MSGQ_BEHAVIOUR_ENGINE=shared MSGQ_TEST_DATABASE_URI=$(just pg-url) \
+MSGQ_BEHAVIOUR_ENGINE=shared MSGQ_TEST_DB_URI=$(just pg-url) \
   cargo test --manifest-path cli/Cargo.toml --test behaviour            # shared
 ```
 
 A case with no runner fails the suite rather than passing quietly, and `cargo test --test pg` runs
-the shared engine's own tests when `MSGQ_TEST_DATABASE_URI` is set.
+the shared engine's own tests when `MSGQ_TEST_DB_URI` is set.
 
 ## Tests
 
@@ -142,7 +144,7 @@ just ci           # does this for you, then covers both engines
 
 The image is built from `ci/pgmq/Dockerfile` — the upstream `postgres` image plus pgmq's SQL at a
 version pinned in the image tag — so CI needs podman and nothing else. A real server can be used
-instead by exporting `MSGQ_TEST_DATABASE_URI`; `just pg-url` returns that value untouched when it is
+instead by exporting `MSGQ_TEST_DB_URI`; `just pg-url` returns that value untouched when it is
 set. A run without a database is not a quiet pass: the tests say so, and the CRAP gate refuses
 functions it could not measure.
 

@@ -209,7 +209,7 @@ One product, two engines, and a deployment runs exactly one of them:
 
 | | local | shared |
 |---|---|---|
-| location | a filesystem path (`MSGQ_DB`, `--db`) | a connection string or `PI_MSGQ_PG*` variables |
+| location | a filesystem path: `MSGQ_DB`, `--db` | a connection string: `MSGQ_DB_URI`, or `MSGQ_PG*` settings |
 | storage | one SQLite file | PostgreSQL, through [pgmq](https://github.com/pgmq/pgmq) |
 | reach | the machine that holds the file | every machine that can reach the server |
 | identity | file permissions; the sender is a claim | a credential the server checks |
@@ -219,18 +219,75 @@ Nothing synchronises the two: there is no relay, no bridge and no dual write. Pi
 every session at it.
 
 ```bash
-msgq --db ./msgq.db publish group/standup "hi"                    # local
-msgq --db postgres://bus@db.internal/msgq publish group/standup "hi"   # shared
+export MSGQ_DB=./msgq.db                                  # local: one file
+msgq publish group/standup "hi"
+
+export MSGQ_DB_URI=postgres://bus@db.internal/msgq        # shared: one server
+msgq publish group/standup "hi"
 ```
 
-The shared engine reads `PI_MSGQ_PGHOST`, `PI_MSGQ_PGPORT`, `PI_MSGQ_PGUSER`, `PI_MSGQ_PGPASSWORD`,
-`PI_MSGQ_PGDATABASE` and `PI_MSGQ_PGSSLMODE` — the libpq names under a prefix of their own, so a
-shell's global `PG*` settings are never picked up by accident. They supply what the connection
-string does not, which is how a password stays out of a URI. The credential is `MSGQ_TOKEN` or
-`~/.config/msgq/token`; `msgq db info` says whether it was accepted, and never prints it.
+`--db` still takes either form when one command needs to say so explicitly. `MSGQ_DB_URI` wins over
+`MSGQ_DB` when both are set, and `MSGQ_DB` still accepts a connection string so an older
+configuration keeps working.
+
+The shared engine also reads `MSGQ_PGHOST`, `MSGQ_PGPORT`, `MSGQ_PGUSER`, `MSGQ_PGPASSWORD`,
+`MSGQ_PGDATABASE` and `MSGQ_PGSSLMODE`: libpq's names, under this bus's own prefix. They supply what
+the connection string does not, which is how a password stays out of a URI. Naming them `MSGQ_PG*`
+rather than reading `PG*` is deliberate — msgq is the client, and a shell's global PostgreSQL
+settings belong to whatever else is running.
+
+The credential is `MSGQ_TOKEN` or `~/.config/msgq/token`; `msgq db info` says whether it was
+accepted, and never prints it.
 
 Presence and the roster are per scope: set `MSGQ_SCOPE` and a session advertises on
 `group/<scope>/presence`, so two teams on one server do not read each other's participants.
+
+### Getting started with PostgreSQL
+
+Five minutes, one server, two sessions.
+
+**1. A PostgreSQL with pgmq.** Any server you already run, with pgmq installed:
+
+```bash
+psql "$MSGQ_DB_URI" -f https://raw.githubusercontent.com/pgmq/pgmq/v1.13.1/pgmq-extension/sql/pgmq.sql
+```
+
+The bus creates its own tables (`msgq.address`, `msgq.cursor`, `msgq.identity`, …) on first
+connection and creates no queue until an address is used. To try it locally without touching a real
+server, `just pg-url` builds and starts one in podman and prints its URI.
+
+**2. An identity per user.** A credential is minted once and handed out; the server keeps only its
+hash. The identity name is the sender the bus stamps, so it has to be an address:
+
+```bash
+psql "$MSGQ_DB_URI" -tAc "SELECT msgq.register_identity('session/alice', ARRAY['session/alice', 'group/standup'])"
+# → the token, printed once. Put it in ~/.config/msgq/token, chmod 600.
+```
+
+The scopes are the addresses this identity may write: `group/standup` covers everything beneath it,
+and nothing outside it. A record claiming a sender outside those scopes is stored under the
+identity's own name instead.
+
+**3. Point a session at it.** Three settings, once, in the shell that starts pi:
+
+```bash
+export MSGQ_DB_URI=postgres://bus@db.internal/msgq
+export MSGQ_TOKEN=$(cat ~/.config/msgq/token)
+export MSGQ_SCOPE=standup
+```
+
+**4. Check it before trusting it.**
+
+```bash
+msgq db info        # backend: shared, credential: accepted as session/alice, retention_s: 3600
+msgq publish group/standup "hello"
+msgq read group/standup --from-start
+```
+
+`credential: none (no identity is registered …)` means the server has no identities yet, so it
+cannot authorize anything and accepts writes unauthenticated. `missing (this bus has N identities
+…)` means it can, and this session did not present one. That is the whole of the trust model: once
+an identity exists, an unauthenticated write is refused rather than downgraded.
 
 ## What it will not do
 

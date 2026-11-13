@@ -1,7 +1,7 @@
 //! Tests for the shared engine (pgmq on PostgreSQL).
 //!
 //! These need a live server with the pgmq schema installed. They are gated on
-//! `MSGQ_TEST_DATABASE_URI` and say so when the variable is absent, rather than passing quietly:
+//! `MSGQ_TEST_DB_URI` and say so when the variable is absent, rather than passing quietly:
 //! a shared-engine test that never ran is not evidence.
 
 use msgq::config::Target;
@@ -12,12 +12,10 @@ use serde_json::json;
 
 /// The test database, when one was named.
 fn dsn() -> Option<String> {
-    match std::env::var("MSGQ_TEST_DATABASE_URI") {
+    match std::env::var("MSGQ_TEST_DB_URI") {
         Ok(value) if !value.trim().is_empty() => Some(value),
         _ => {
-            eprintln!(
-                "shared engine tests not run: set MSGQ_TEST_DATABASE_URI to a database with pgmq"
-            );
+            eprintln!("shared engine tests not run: set MSGQ_TEST_DB_URI to a database with pgmq");
             None
         }
     }

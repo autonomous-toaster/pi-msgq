@@ -264,13 +264,15 @@ flag the output is unchanged.
 
 ## Storage
 
-The database path is resolved in this order:
+The bus location is resolved in this order:
 
-1. `--db <PATH>`
-2. `MSGQ_DB`
-3. `~/.pi/agent/msgq/msgq.db`
+1. `--db <PATH-OR-URI>`
+2. `MSGQ_DB_URI` — a connection string, selecting the shared engine
+3. `MSGQ_DB` — a path; a connection string here is still honoured
+4. `MSGQ_PGHOST` / `MSGQ_PGDATABASE`, which name a server by its settings
+5. `~/.pi/agent/msgq/msgq.db`
 
-The file is created and initialized on first use. When `msgq` creates it, it is restricted to
+A local file is created and initialized on first use. When `msgq` creates it, it is restricted to
 owner-only permissions (`0600`); a pre-existing file is left untouched.
 
 The bus is built on [honker](https://github.com/russellromney/honker)'s durable streams: an

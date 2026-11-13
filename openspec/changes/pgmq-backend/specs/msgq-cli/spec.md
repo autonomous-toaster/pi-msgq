@@ -4,8 +4,11 @@
 
 ### Requirement: Storage location and resolution
 
-T3.2 ALWAYS, the CLI SHALL prefer the `--db` argument over `MSGQ_DB`.
+T3.2 ALWAYS, the CLI SHALL prefer the `--db` argument over every environment variable.
+T3.2 ALWAYS, the CLI SHALL prefer `MSGQ_DB_URI` over `MSGQ_DB`.
 T3.2 ALWAYS, the CLI SHALL prefer `MSGQ_DB` over the default path.
+T3.2 ALWAYS, the CLI SHALL keep a connection string in `MSGQ_DB` working.
+T3.2 ALWAYS, the CLI SHALL read the server settings `MSGQ_PGHOST`, `MSGQ_PGPORT`, `MSGQ_PGUSER`, `MSGQ_PGPASSWORD`, `MSGQ_PGDATABASE` and `MSGQ_PGSSLMODE`.
 T3.2 ALWAYS, the CLI SHALL use `~/.pi/agent/msgq/msgq.db` as the default location.
 T3.2 ALWAYS, a server connection string SHALL select the shared backend.
 T3.2 ALWAYS, a filesystem path SHALL select the local backend.
@@ -14,16 +17,20 @@ T3.2 ALWAYS, the CLI SHALL create a missing local bus file.
 T7.2 ALWAYS, the documentation SHALL name the location form of each backend.
 
 #### Scenario: Default path
-- **WHEN** neither `--db` nor `MSGQ_DB` is provided
+- **WHEN** `--db`, `MSGQ_DB_URI`, `MSGQ_DB` and the server settings are absent
 - **THEN** the CLI SHALL use `~/.pi/agent/msgq/msgq.db`
 
 #### Scenario: Environment override
-- **WHEN** `MSGQ_DB` is set and `--db` is not provided
+- **WHEN** `MSGQ_DB` is set and `--db` is absent
 - **THEN** the CLI SHALL use the `MSGQ_DB` path
 
+#### Scenario: Server wins over file
+- **WHEN** `MSGQ_DB_URI` and `MSGQ_DB` are set and `--db` is absent
+- **THEN** the CLI SHALL use the `MSGQ_DB_URI` connection string
+
 #### Scenario: Flag precedence
-- **WHEN** both `--db` and `MSGQ_DB` are provided
-- **THEN** the CLI SHALL use the `--db` path
+- **WHEN** `--db` and `MSGQ_DB` are provided
+- **THEN** the CLI SHALL use the `--db` location
 
 #### Scenario: First use creates the database
 - **WHEN** the resolved database file does not exist
@@ -44,7 +51,7 @@ T1.1 ALWAYS, offsets SHALL be unique within a stream.
 T1.1 ALWAYS, the CLI SHALL include the address in every record name.
 T1.1 ALWAYS, the CLI SHALL derive the id from the record.
 T1.1 ALWAYS, the CLI SHALL store no id field in the record.
-T1.1 ALWAYS, `reply_to` SHALL name an offset in the stream of the answering record's `from`.
+T1.1 ALWAYS, `reply_to` SHALL hold an offset that the `from` field of the answering record addresses.
 T7.2 ALWAYS, the documentation SHALL state that an offset alone does not name a record.
 T2.7 ALWAYS, a record id SHALL name the record being awaited.
 T2.7 ALWAYS, the CLI SHALL refuse a bare offset for a wait.
@@ -364,3 +371,23 @@ T5.4 IF the active backend cannot authorize, THEN the CLI SHALL require no crede
 ### Requirement: Retention
 **Reason**: T2.1 ALWAYS, a record older than the retention window SHALL leave the bus. The previous rule held history indefinitely whenever one consumer lagged.
 **Migration**: T2.1 ALWAYS, `msgq prune --older-than` SHALL apply the window. `msgq consumers` SHALL report how many records a consumer can no longer read.
+
+### Requirement: Server settings complete the location
+
+T3.2 IF no location variable names a bus and `MSGQ_PGHOST` is set, THEN the CLI SHALL select the shared backend.
+T3.2 IF no location variable names a bus and `MSGQ_PGDATABASE` is set, THEN the CLI SHALL select the shared backend.
+T3.2 IF the location does not name a host, THEN the CLI SHALL take the host from `MSGQ_PGHOST`.
+T3.2 IF the location does not name a password, THEN the CLI SHALL take the password from `MSGQ_PGPASSWORD`.
+T3.2 IF `MSGQ_PGSSLMODE` demands TLS, THEN the CLI SHALL refuse the setting with a usage error.
+
+#### Scenario: Settings name a server
+- **WHEN** `MSGQ_PGHOST` is set and every location variable is absent
+- **THEN** the CLI SHALL select the shared backend
+
+#### Scenario: A secret stays out of the location
+- **WHEN** the location names a host and `MSGQ_PGPASSWORD` is set
+- **THEN** the CLI SHALL connect with that password
+
+#### Scenario: TLS is refused rather than ignored
+- **WHEN** `MSGQ_PGSSLMODE` is `require`
+- **THEN** the CLI SHALL exit with a usage error

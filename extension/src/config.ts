@@ -13,15 +13,20 @@ export const RESERVED_SCHEMES = ["session", "cwd", "group", "cli"] as const;
 export class ConfigError extends Error {}
 
 /**
- * Resolve the bus path: `MSGQ_DB` when set and non-empty, otherwise the
+ * Resolve the bus location: `MSGQ_DB_URI` for a server, `MSGQ_DB` for a file, otherwise the
  * default under the user's home directory.
+ *
+ * The server comes first because a deployment that sets both has said where its bus is. A
+ * connection string in `MSGQ_DB` is still honoured, so an older configuration keeps working.
  */
 export function resolveDbPath(
 	env: Record<string, string | undefined>,
 	homeDir: string,
 ): string {
-	const override = env.MSGQ_DB?.trim();
-	if (override) return override;
+	const uri = env.MSGQ_DB_URI?.trim();
+	if (uri) return uri;
+	const file = env.MSGQ_DB?.trim();
+	if (file) return file;
 	return `${homeDir}/.pi/agent/msgq/msgq.db`;
 }
 

@@ -5,7 +5,14 @@ use std::path::{Path, PathBuf};
 use crate::error::Error;
 
 /// Environment variable that overrides the default database path.
+/// The location of a local bus: a filesystem path.
+///
+/// A connection string is still accepted here, so a script that already points `MSGQ_DB` at a
+/// server keeps working, but a deployment should name the two apart: a path here, a URI below.
 pub const ENV_VAR: &str = "MSGQ_DB";
+
+/// The location of a shared bus: a connection string.
+pub const URI_ENV: &str = "MSGQ_DB_URI";
 
 /// The credential for a shared bus: the environment first, then the identity file.
 pub const TOKEN_ENV: &str = "MSGQ_TOKEN";
@@ -47,21 +54,24 @@ pub fn credential() -> Option<String> {
     }
 }
 
-/// The PostgreSQL settings this bus reads, in libpq's spelling under a prefix of our own.
+/// The PostgreSQL settings this bus reads: libpq's names, under this bus's own prefix.
 ///
-/// The prefix is deliberate: a shell's global `PG*` settings belong to whatever else the operator
-/// runs, and a message bus that silently connects to the wrong database is worse than one that
-/// asks. Each entry maps a `PI_MSGQ_PG*` variable to the libpq keyword it stands for.
+/// `msgq` is the client here, so the settings belong to it and are named for it. The suffix is
+/// libpq's spelling, because that is the spelling an operator already knows. A shell's global
+/// `PG*` settings are deliberately not read: they belong to whatever else is running, and a message
+/// bus that silently connected to the wrong database would be worse than one that asks.
+///
+/// Each entry maps a variable to the libpq keyword it stands for.
 pub const PG_ENV: [(&str, &str); 6] = [
-    ("PI_MSGQ_PGHOST", "host"),
-    ("PI_MSGQ_PGPORT", "port"),
-    ("PI_MSGQ_PGUSER", "user"),
-    ("PI_MSGQ_PGPASSWORD", "password"),
-    ("PI_MSGQ_PGDATABASE", "dbname"),
-    ("PI_MSGQ_PGSSLMODE", "sslmode"),
+    ("MSGQ_PGHOST", "host"),
+    ("MSGQ_PGPORT", "port"),
+    ("MSGQ_PGUSER", "user"),
+    ("MSGQ_PGPASSWORD", "password"),
+    ("MSGQ_PGDATABASE", "dbname"),
+    ("MSGQ_PGSSLMODE", "sslmode"),
 ];
 
-/// The `PI_MSGQ_PG*` settings that are present, in libpq keyword order.
+/// The `MSGQ_PG*` settings that are present, in libpq keyword order.
 pub fn pg_settings() -> Vec<(&'static str, String)> {
     PG_ENV
         .iter()
@@ -85,7 +95,7 @@ pub fn pg_env_names_a_server() -> bool {
         .any(|(keyword, _)| matches!(*keyword, "host" | "dbname"))
 }
 
-/// Apply the `PI_MSGQ_PG*` settings to a connection configuration.
+/// Apply the `MSGQ_PG*` settings to a connection configuration.
 ///
 /// They win over anything the connection string said, so a URI can name the server while the
 /// secret stays in the environment and out of the URI.
@@ -108,7 +118,7 @@ pub fn apply_pg_settings(
             }
             "port" if config.get_ports().is_empty() => {
                 let port: u16 = value.parse().map_err(|_| {
-                    Error::usage(format!("PI_MSGQ_PGPORT is not a port number: {value}"))
+                    Error::usage(format!("MSGQ_PGPORT is not a port number: {value}"))
                 })?;
                 config.port(port);
             }
@@ -125,7 +135,7 @@ pub fn apply_pg_settings(
             // so asking for it would be a promise the bus cannot keep.
             "sslmode" if !matches!(value.as_str(), "disable" | "allow" | "prefer") => {
                 return Err(Error::usage(format!(
-                    "PI_MSGQ_PGSSLMODE={value} needs a TLS build of the bus; this build connects without TLS"
+                    "MSGQ_PGSSLMODE={value} needs a TLS build of the bus; this build connects without TLS"
                 )));
             }
             _ => {}
@@ -208,19 +218,36 @@ pub enum Target {
 /// selects the local engine. Exactly one engine serves one invocation, and an unimplemented scheme
 /// is a usage error rather than a filename.
 pub fn resolve_target(cli_db: Option<&PathBuf>) -> Result<Target, Error> {
-    let raw = match cli_db {
-        Some(path) => Some(path.display().to_string()),
-        None => match std::env::var(ENV_VAR) {
-            Ok(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
-            _ => None,
-        },
-    };
-    match raw {
+    let chosen = choose_location(
+        cli_db.map(|path| path.display().to_string()),
+        std::env::var(URI_ENV).ok(),
+        std::env::var(ENV_VAR).ok(),
+    );
+    match chosen {
         Some(raw) => target_from(&raw),
         // Nothing named a location, but the environment names a server: that is a choice too.
         None if pg_env_names_a_server() => Ok(Target::Shared(String::new())),
         None => Ok(Target::Local(default_db_path())),
     }
+}
+
+/// Which location wins: the flag, then the server's URI, then the file.
+///
+/// The server comes first because a deployment that sets both has said where its bus is, and the
+/// file variable is the older of the two.
+fn choose_location(
+    flag: Option<String>,
+    uri: Option<String>,
+    file: Option<String>,
+) -> Option<String> {
+    let non_empty = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    non_empty(flag)
+        .or_else(|| non_empty(uri))
+        .or_else(|| non_empty(file))
 }
 
 /// Classify one location: a connection string or a path.
@@ -262,8 +289,8 @@ impl Target {
             Target::Local(path) => crate::config::display(path),
             Target::Shared(dsn) if dsn.trim().is_empty() => {
                 // Named by the environment: report the parts, never the secret.
-                let host = std::env::var("PI_MSGQ_PGHOST").unwrap_or_else(|_| "localhost".into());
-                let database = std::env::var("PI_MSGQ_PGDATABASE").unwrap_or_default();
+                let host = std::env::var("MSGQ_PGHOST").unwrap_or_else(|_| "localhost".into());
+                let database = std::env::var("MSGQ_PGDATABASE").unwrap_or_default();
                 if database.is_empty() {
                     format!("postgres://{host}")
                 } else {
@@ -406,6 +433,28 @@ mod pg_env_tests {
     }
 
     #[test]
+    fn the_server_uri_wins_over_the_file_and_the_flag_wins_over_both() {
+        let uri = Some("postgres://bus@db/msgq".to_string());
+        let file = Some("/tmp/msgq.db".to_string());
+        assert_eq!(
+            choose_location(Some("/tmp/flag.db".to_string()), uri.clone(), file.clone()),
+            Some("/tmp/flag.db".to_string()),
+            "the flag is the most specific thing an operator can say"
+        );
+        assert_eq!(
+            choose_location(None, uri.clone(), file.clone()),
+            Some("postgres://bus@db/msgq".to_string()),
+            "a deployment that sets both has said where its bus is"
+        );
+        assert_eq!(choose_location(None, None, file.clone()), file);
+        assert_eq!(
+            choose_location(Some("  ".to_string()), Some(String::new()), file.clone()),
+            file,
+            "an empty value is not an answer"
+        );
+    }
+
+    #[test]
     fn the_pg_variables_fill_what_the_location_does_not() {
         let mut config: postgres::Config = "postgres://someone@db.example:6000/other"
             .parse()
@@ -460,7 +509,7 @@ mod pg_env_tests {
         let mut config = postgres::Config::new();
         let failure = apply_pg_settings(&mut config, settings(&[("port", "not-a-port")]))
             .expect_err("a malformed port cannot be guessed");
-        assert!(failure.to_string().contains("PI_MSGQ_PGPORT"));
+        assert!(failure.to_string().contains("MSGQ_PGPORT"));
     }
 
     #[test]

@@ -39,7 +39,7 @@ pub struct PgStore {
 impl PgStore {
     /// Connect and bootstrap the bus's own tables.
     ///
-    /// The location is either a URI or libpq keyword settings; `PI_MSGQ_PG*` variables win over
+    /// The location is either a URI or libpq keyword settings; `MSGQ_PG*` variables win over
     /// whatever it said, so a URI can name the server while the secret stays in the environment.
     pub fn connect(dsn: &str, credential: Option<String>) -> Result<Self, Error> {
         let mut config: postgres::Config = dsn

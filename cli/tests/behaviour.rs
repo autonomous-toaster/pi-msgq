@@ -46,10 +46,10 @@ fn engine() -> String {
 }
 
 fn shared_dsn() -> String {
-    match std::env::var("MSGQ_TEST_DATABASE_URI") {
+    match std::env::var("MSGQ_TEST_DB_URI") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => panic!(
-            "MSGQ_BEHAVIOUR_ENGINE=shared needs MSGQ_TEST_DATABASE_URI; \
+            "MSGQ_BEHAVIOUR_ENGINE=shared needs MSGQ_TEST_DB_URI; \
              the shared engine is not skipped, so the suite fails instead"
         ),
     }

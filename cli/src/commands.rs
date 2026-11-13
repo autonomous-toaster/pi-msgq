@@ -1087,7 +1087,7 @@ pub fn db_info(db: &crate::config::Target) -> Result<(), Error> {
     println!("topics:           {}", streams.len());
     println!("messages:         {messages}");
     println!("consumers:        {}", consumers.len());
-    println!("backend:          local");
+    println!("backend:          {}", store.engine());
     println!(
         "retention_s:      {}",
         resolve_retention(None).unwrap_or(crate::config::DEFAULT_RETENTION_S)

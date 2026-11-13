@@ -5,7 +5,9 @@
 ### Requirement: Bus access
 
 T3.3 ALWAYS, the extension SHALL consume the bus location that the CLI consumes.
+T3.3 ALWAYS, the extension SHALL read `MSGQ_DB_URI` when the variable is set.
 T3.3 ALWAYS, the extension SHALL read `MSGQ_DB` when the variable is set.
+T3.3 ALWAYS, the extension SHALL prefer `MSGQ_DB_URI` over `MSGQ_DB`.
 T6.1 ALWAYS, exactly one backend SHALL serve one session.
 T6.1 ALWAYS, the extension SHALL call the backend API for reads.
 T6.1 ALWAYS, the extension SHALL call the backend API for writes.
@@ -18,6 +20,10 @@ T6.1 ALWAYS, the extension SHALL close the bus handle on shutdown.
 #### Scenario: Environment override
 - **WHEN** `MSGQ_DB` is set
 - **THEN** the extension SHALL use that location for the whole session
+
+#### Scenario: Server override
+- **WHEN** `MSGQ_DB_URI` and `MSGQ_DB` are set
+- **THEN** the extension SHALL use the `MSGQ_DB_URI` location for the whole session
 
 #### Scenario: Bus created on first use
 - **WHEN** the extension starts and the bus file does not exist
