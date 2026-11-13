@@ -8,7 +8,7 @@
 ## 2. Scoped reads
 
 - [ ] 2.1 Add the read function surface. `msgq.read_since` returns records. `msgq.stream_of` returns head, oldest and dropped. `msgq.catalog` returns addresses, cursors and pins. Resolve the credential first in every function. Verify a cross-tenant read is refused.
-- [ ] 2.2 Grant the runtime role the function surface only. Grant execute on the read functions. Revoke select on the engine schema. Verify a direct select as the runtime role is refused.
+- [x] 2.2 Grant the runtime role the function surface only. Grant execute on the read functions. Revoke select on the engine schema. Verify a direct select as the runtime role is refused.
 - [ ] 2.3 Move the extension's shared reads onto the read function. Replace the direct select in the subscription pump. Verify the extension holds no direct select.
 - [ ] 2.4 Report a refused read in the extension. Report the refusal. Stop reading the address. Keep the session running. Verify a refused read delivers nothing.
 

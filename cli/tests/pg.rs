@@ -797,7 +797,8 @@ fn a_write_outside_the_scopes_is_refused_and_changes_nothing() {
         &json!({"v": 1, "type": "note", "from": "cli/lier@h", "to": outside, "message": "hi"}),
     );
     let error = refused.expect_err("a write outside the scopes is refused");
-    assert!(error.to_string().contains("outside the scopes"), "{error}");
+    let detail = format!("{error:?}");
+    assert!(detail.contains("outside the scopes"), "{detail}");
     let after = raw
         .query_one("SELECT COUNT(*) FROM msgq.address", &[])
         .unwrap()
@@ -903,6 +904,15 @@ fn a_runtime_role_cannot_write_a_stream_directly() {
 
     let created = runtime.execute("CREATE TABLE pgmq.sneaky ()", &[]);
     assert!(created.is_err(), "the runtime role must not create in pgmq");
+
+    // The bookkeeping tables are not a side door either.
+    let direct = runtime.query("SELECT address FROM msgq.address LIMIT 1", &[]);
+    assert!(
+        direct.is_err(),
+        "a direct select must be refused: {direct:?}"
+    );
+    let streams = runtime.query("SELECT msg_id FROM pgmq.q_msgq_catalogue LIMIT 1", &[]);
+    assert!(streams.is_err(), "a direct stream select must be refused");
 
     // And the one path it does have works, which is what makes the refusal meaningful.
     let offset: i64 = runtime
@@ -1095,4 +1105,79 @@ fn the_engine_holds_no_plaintext_body() {
     let mut read_back: serde_json::Value = serde_json::from_str(&stored).unwrap();
     msgq::seal::open_body(&mut read_back, &key).expect("the stored body opens");
     assert_eq!(read_back["message"], "the plan is tomorrow");
+}
+
+#[test]
+fn a_cross_tenant_read_is_refused_and_the_owner_reads_its_own() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let red = format!("group/red-read-{}", unique());
+    let token: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['group','cli'])",
+            &[&format!("red-read-{}", unique()).as_str()],
+        )
+        .unwrap()
+        .get(0);
+    let sender = format!("cli/red@{}", unique());
+    let store = Store::open_with(&Target::Shared(dsn.clone()), Some(token.clone()))
+        .expect("the shared engine must open")
+        .0;
+    let offset = store
+        .publish(
+            &red,
+            &json!({"v": 1, "type": "note", "from": sender, "to": red, "message": "red only"}),
+        )
+        .unwrap();
+
+    // The owner reads its own stream, head included, without touching a queue table.
+    let rows = raw
+        .query(
+            "SELECT msg_id, record->>'message' FROM msgq.read_since($1, $2, 0, 10)",
+            &[&token, &red],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, i64>(0), offset);
+    assert_eq!(rows[0].get::<_, String>(1), "red only");
+    let head: i64 = raw
+        .query_one("SELECT head FROM msgq.stream_of($1, $2)", &[&token, &red])
+        .unwrap()
+        .get(0);
+    assert_eq!(head, offset);
+    let catalogued: i64 = raw
+        .query_one(
+            "SELECT count(*) FROM msgq.catalog($1) WHERE kind = 'address' AND name = $2",
+            &[&token, &red],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(catalogued, 1, "the owner's address is in its catalogue");
+
+    // Another principal is refused, and learns nothing about the stream.
+    let other: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY[$2])",
+            &[
+                &format!("blue-read-{}", unique()).as_str(),
+                &format!("group/blue-{}", unique()).as_str(),
+            ],
+        )
+        .unwrap()
+        .get(0);
+    let refused = raw.query(
+        "SELECT * FROM msgq.read_since($1, $2, 0, 10)",
+        &[&other, &red],
+    );
+    let error = refused.expect_err("a cross-tenant read is refused");
+    let detail = format!("{error:?}");
+    assert!(detail.contains("outside the scopes"), "{detail}");
+    let nothing: i64 = raw
+        .query_one("SELECT count(*) FROM msgq.catalog($1)", &[&other])
+        .unwrap()
+        .get(0);
+    assert_eq!(nothing, 0, "another principal's catalogue is empty");
 }

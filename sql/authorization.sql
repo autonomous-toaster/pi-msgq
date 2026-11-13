@@ -253,10 +253,17 @@ BEGIN
     END IF;
 
     EXECUTE format('GRANT USAGE ON SCHEMA msgq TO %I', role_name);
+    EXECUTE format('GRANT SELECT ON msgq.meta TO %I', role_name);
     EXECUTE format(
-        'GRANT SELECT ON msgq.address, msgq.cursor, msgq.retention, msgq.meta TO %I', role_name);
-    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON msgq.cursor, msgq.retention TO %I', role_name);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION msgq.publish_as(TEXT, TEXT, JSONB) TO %I', role_name);
+        'GRANT EXECUTE ON FUNCTION msgq.publish_as(TEXT, TEXT, JSONB),'
+        ' msgq.read_since(TEXT, TEXT, BIGINT, INT), msgq.stream_of(TEXT, TEXT),'
+        ' msgq.catalog(TEXT) TO %I', role_name);
+
+    -- Reads go through the functions too: the bookkeeping tables are not a side door.
+    EXECUTE format(
+        'REVOKE SELECT ON msgq.address, msgq.cursor, msgq.retention FROM %I', role_name);
+    EXECUTE format(
+        'REVOKE INSERT, UPDATE, DELETE ON msgq.cursor, msgq.retention FROM %I', role_name);
     EXECUTE format('GRANT EXECUTE ON FUNCTION msgq.identity_of(TEXT) TO %I', role_name);
     EXECUTE format('GRANT EXECUTE ON FUNCTION msgq.ensure_queue(TEXT) TO %I', role_name);
 
@@ -274,5 +281,100 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'msgq_runtime') THEN
         PERFORM msgq.grant_runtime('msgq_runtime');
     END IF;
+END;
+$$;
+
+-- The read surface. Same shape as the write path: the credential is resolved first, the address second,
+-- the table third. A caller holds no privilege on the streams, so these functions are the only door.
+CREATE OR REPLACE FUNCTION msgq.read_since(
+    p_token TEXT, p_address TEXT, p_since BIGINT DEFAULT 0, p_limit INT DEFAULT 100)
+RETURNS TABLE (msg_id BIGINT, record JSONB)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    ident msgq.identity;
+    addr TEXT := msgq.canonical_address(p_address);
+    queue TEXT;
+    rows INT := greatest(1, least(coalesce(p_limit, 100), 1000));
+BEGIN
+    SELECT * INTO ident FROM msgq.identity_of(p_token);
+    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+        RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
+            USING ERRCODE = '42501';
+    END IF;
+
+    SELECT q.queue_name INTO queue FROM msgq.address q WHERE q.address = addr;
+    IF queue IS NULL THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY EXECUTE format(
+        'SELECT s.msg_id, s.message FROM pgmq.%I s WHERE s.msg_id > $1 ORDER BY s.msg_id LIMIT $2',
+        'q_' || queue) USING greatest(coalesce(p_since, 0), 0), rows;
+END;
+$$;
+
+-- Where a stream starts, where it has got to, and how much has already gone: one call, because a
+-- reader that asks three times can be told three different truths.
+CREATE OR REPLACE FUNCTION msgq.stream_of(p_token TEXT, p_address TEXT)
+RETURNS TABLE (head BIGINT, oldest BIGINT, dropped BIGINT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    ident msgq.identity;
+    addr TEXT := msgq.canonical_address(p_address);
+    queue TEXT;
+BEGIN
+    SELECT * INTO ident FROM msgq.identity_of(p_token);
+    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+        RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
+            USING ERRCODE = '42501';
+    END IF;
+
+    SELECT q.queue_name, coalesce(q.newest_offset, 0) INTO queue, head
+        FROM msgq.address q WHERE q.address = addr;
+    IF queue IS NULL THEN
+        head := 0;
+        oldest := 0;
+        dropped := 0;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    EXECUTE format('SELECT coalesce(min(s.msg_id), 0) FROM pgmq.%I s', 'q_' || queue) INTO oldest;
+    SELECT coalesce(max(r.removed_total), 0) INTO dropped FROM msgq.retention r WHERE r.topic = addr;
+    RETURN NEXT;
+END;
+$$;
+
+-- What this caller may hold: the addresses in its scopes and the cursors it owns.
+CREATE OR REPLACE FUNCTION msgq.catalog(p_token TEXT)
+RETURNS TABLE (kind TEXT, name TEXT, address TEXT, detail JSONB)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    ident msgq.identity;
+BEGIN
+    SELECT * INTO ident FROM msgq.identity_of(p_token);
+
+    RETURN QUERY
+        SELECT 'address'::TEXT, a.address, a.address,
+               jsonb_build_object('head', coalesce(a.newest_offset, 0))
+        FROM msgq.address a
+        WHERE msgq.in_scope(a.address, ident.scopes)
+        ORDER BY a.address;
+
+    RETURN QUERY
+        SELECT 'cursor'::TEXT, c.consumer, c.address,
+               jsonb_build_object('offset', c.last_msg_id)
+        FROM msgq.cursor c
+        WHERE msgq.in_scope(c.address, ident.scopes)
+        ORDER BY c.address, c.consumer;
 END;
 $$;
