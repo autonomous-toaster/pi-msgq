@@ -47,10 +47,14 @@ surface is the same choice the write path made, so this keeps one architecture:
     msgq.publish_as(token, address, record)         -> offset
     msgq.read_since(token, address, since, limit)   -> records
     msgq.stream_of(token, address)                  -> head, oldest, dropped
-    msgq.catalog(token)                             -> addresses, cursors, pins
+    msgq.catalog(token)                             -> addresses, cursors
     msgq.cursor(token, address, name, offset?)      -> position
     msgq.prune(token, address, before, keep)        -> removed
     msgq.renew_credential(token, lease)             -> expiry
+
+Presence is not in that surface. It is not bookkeeping the engine owns: it is derived from the presence
+records a reader already sees through `read_since`, so a second derivation in SQL would be a second
+answer to the same question.
 
 Each resolves the credential first, checks the address second, and touches a table third. The runtime
 role holds execute on these and no privilege on the streams, so the grants stop being decorative.
