@@ -109,7 +109,7 @@ The contract that keeps them honest is the behavioural fixture family in
 
 ```bash
 cargo test --manifest-path cli/Cargo.toml --test behaviour              # local
-MSGQ_BEHAVIOUR_ENGINE=shared MSGQ_TEST_DATABASE_URI=postgres://… \
+MSGQ_BEHAVIOUR_ENGINE=shared MSGQ_TEST_DATABASE_URI=$(just pg-url) \
   cargo test --manifest-path cli/Cargo.toml --test behaviour            # shared
 ```
 
@@ -129,6 +129,22 @@ Both suites read `protocol/fixtures/` — canonical records plus `expectations.j
 each side must do with them (the CLI checks the publisher's gate, the extension checks the reader's
 tolerance) — and both check their known-type list against the one published in `PROTOCOL.md`. Add a
 fixture and its expectation together, or `every_fixture_has_an_expectation` fails.
+
+### The shared engine's tests
+
+The shared engine's tests need a PostgreSQL with pgmq, and `just` provides one:
+
+```bash
+just pg-url       # build/start the test database, print a connection string
+just pg-down      # stop it (the container and its data stay)
+just ci           # does this for you, then covers both engines
+```
+
+The image is built from `ci/pgmq/Dockerfile` — the upstream `postgres` image plus pgmq's SQL at a
+version pinned in the image tag — so CI needs podman and nothing else. A real server can be used
+instead by exporting `MSGQ_TEST_DATABASE_URI`; `just pg-url` returns that value untouched when it is
+set. A run without a database is not a quiet pass: the tests say so, and the CRAP gate refuses
+functions it could not measure.
 
 The one client that is not pi is a shell script, and it is the canary for the wire:
 

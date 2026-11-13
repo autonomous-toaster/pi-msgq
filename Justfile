@@ -15,12 +15,58 @@ export LCOV_FILE := `\
     _dirty=$(git diff --no-ext-diff -- cli/src cli/tests cli/Cargo.toml cli/Cargo.lock 2>/dev/null | sha256sum | cut -c1-8); \
     printf "target/lcov-%s.info" "$(printf '%s:%s' "$_tree" "$_dirty" | sha256sum | cut -c1-8)"`
 
+# The shared engine's tests need a PostgreSQL with pgmq. The image is built locally from a pinned
+# upstream version, so CI needs podman but neither a third-party image publisher nor network access
+# once the image is cached.
+PG_IMAGE := "localhost/pi-msgq-pgmq:18-v1.13.1"
+PG_NAME  := "pi-msgq-pg"
+PG_PORT  := "55433"
+
 # CRAP score above which a function counts as crappy
 CRAP_THRESHOLD := "30"
 
 # Soft target for a source file, in lines. Files listed as known debt are reported but not failed,
 # so the rule stops new offenders without pretending the existing ones are fine.
 FILE_TARGET := "550"
+
+# Build the test database image. pgmq's SQL is fetched at build time from the pinned tag.
+pg-image:
+    podman build -t {{PG_IMAGE}} ci/pgmq
+
+# Print a connection string for a PostgreSQL with pgmq, starting a throwaway one when needed.
+# A caller-supplied MSGQ_TEST_DATABASE_URI wins, so a real server can be used instead.
+pg-url:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${MSGQ_TEST_DATABASE_URI:-}" ]; then
+        printf '%s\n' "$MSGQ_TEST_DATABASE_URI"
+        exit 0
+    fi
+    if ! command -v podman >/dev/null; then
+        echo "podman is needed to run the shared engine's tests" >&2
+        exit 1
+    fi
+    if ! podman container exists {{PG_NAME}} >/dev/null 2>&1; then
+        podman build -t {{PG_IMAGE}} ci/pgmq >/dev/null
+        podman run -d --name {{PG_NAME}} \
+            -e POSTGRES_USER=msgq -e POSTGRES_DB=msgq \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -p 127.0.0.1:{{PG_PORT}}:5432 {{PG_IMAGE}} >/dev/null
+    fi
+    podman start {{PG_NAME}} >/dev/null 2>&1 || true
+    for _ in $(seq 1 60); do
+        if podman exec {{PG_NAME}} pg_isready -U msgq -d msgq >/dev/null 2>&1; then
+            printf 'postgres://msgq@127.0.0.1:%s/msgq\n' {{PG_PORT}}
+            exit 0
+        fi
+        sleep 1
+    done
+    echo "the test database did not become ready" >&2
+    exit 1
+
+# Stop the test database without losing it, so the next run starts quickly.
+pg-down:
+    podman stop {{PG_NAME}}
 
 # Run all checks (mirrors what CI will run)
 ci: veriplan check fmt lint lint-suppressions check-file-sizes check-test-names machete rust-test-then-crap extension-test
@@ -67,14 +113,10 @@ test:
     fi
     rm -f {{crate}}/target/lcov-*.info
     mkdir -p {{crate}}/target
-    # The shared engine's tests need a database. Without one they measure nothing, and `crap` then
-    # scores the whole shared engine as untested, which is true. Say so rather than hide it.
-    if [ -z "${MSGQ_TEST_DATABASE_URI:-}" ]; then
-        echo "MSGQ_TEST_DATABASE_URI is unset: the shared engine's tests will not run and"
-        echo "`just crap` will refuse the result. Point it at a database with pgmq installed,"
-        echo "for example: export MSGQ_TEST_DATABASE_URI=postgres://msgq@127.0.0.1:55432/msgq"
-    fi
-    output=$(cd {{crate}} && MSGQ_TEST_DATABASE_URI="${MSGQ_TEST_DATABASE_URI:-}" cargo llvm-cov nextest --lib --bins --tests \
+    # The shared engine's tests need a database with pgmq. Provide one so that a run without any
+    # setup still exercises both engines, instead of scoring the shared engine as untested.
+    export MSGQ_TEST_DATABASE_URI="$(just pg-url)"
+    output=$(cd {{crate}} && cargo llvm-cov nextest --lib --bins --tests \
         --lcov --output-path "$LCOV_FILE" 2>&1)
     code=$?
     if [ $code -eq 0 ]; then
