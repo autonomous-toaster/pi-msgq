@@ -81,6 +81,14 @@ impl PgStore {
     }
 
     /// The connection, locked for the length of one call.
+    /// The credential this bus presents to the function surface. Every read and every cursor write
+    /// resolves it, so a store without one cannot reach a tenant's stream at all.
+    fn token(&self) -> Result<&str, Error> {
+        self.credential.as_deref().ok_or_else(|| {
+            Error::Runtime("the shared engine needs a credential to name the caller".into())
+        })
+    }
+
     fn conn(&self) -> Result<MutexGuard<'_, Client>, Error> {
         self.client
             .lock()
@@ -206,38 +214,33 @@ impl Bus for PgStore {
 
     fn cursor_get(&self, consumer: &str, topic: &str) -> Result<Option<i64>, Error> {
         let mut client = self.conn()?;
-        let row = client
-            .query_opt(
-                "SELECT last_msg_id FROM msgq.cursor WHERE consumer = $1 AND address = $2",
-                &[&consumer, &topic],
-            )
-            .map_err(pg)?;
-        Ok(row.map(|row| row.get(0)))
+        let position = scalar_i64(
+            &mut client,
+            "SELECT msgq.cursor($1, $2, $3, NULL)",
+            &[&self.token()?, &topic, &consumer],
+        )?;
+        // Zero is both "never written" and "at the start", and a reader treats them the same way.
+        Ok((position != 0).then_some(position))
     }
 
     fn cursor_set(&self, consumer: &str, topic: &str, offset: i64) -> Result<bool, Error> {
         let mut client = self.conn()?;
-        let row = client
-            .query_one(
-                "INSERT INTO msgq.cursor (consumer, address, last_msg_id) VALUES ($1, $2, $3)
-                 ON CONFLICT (consumer, address) DO UPDATE
-                 SET last_msg_id = GREATEST(msgq.cursor.last_msg_id, EXCLUDED.last_msg_id)
-                 RETURNING last_msg_id",
-                &[&consumer, &topic, &offset],
-            )
-            .map_err(pg)?;
-        let stored: i64 = row.get(0);
+        let stored = scalar_i64(
+            &mut client,
+            "SELECT msgq.cursor($1, $2, $3, $4)",
+            &[&self.token()?, &topic, &consumer, &offset],
+        )?;
         Ok(stored == offset)
     }
 
     fn cursor_reset(&self, consumer: &str, topic: &str) -> Result<usize, Error> {
         let mut client = self.conn()?;
-        Ok(client
-            .execute(
-                "DELETE FROM msgq.cursor WHERE consumer = $1 AND address = $2",
-                &[&consumer, &topic],
-            )
-            .map_err(pg)? as usize)
+        let gone = scalar_i64(
+            &mut client,
+            "SELECT msgq.cursor_reset($1, $2, $3)",
+            &[&self.token()?, &topic, &consumer],
+        )?;
+        Ok(gone as usize)
     }
 
     fn prune_before(
@@ -248,72 +251,33 @@ impl Bus for PgStore {
         batch: usize,
     ) -> Result<Removal, Error> {
         let mut client = self.conn()?;
-        let Some(name) = queue_of(&mut client, topic)? else {
-            return Ok(Removal {
-                removed: 0,
-                batches: 0,
-            });
-        };
-        let batch = batch.max(1) as i64;
-        let (mut removed, mut batches) = (0usize, 0usize);
-        loop {
-            let deleted: u64 = client
-                .execute(
-                    &format!(
-                        "DELETE FROM pgmq.{} WHERE msg_id IN (
-                             SELECT msg_id FROM pgmq.{}
-                             WHERE msg_id <= $1 AND NOT (msg_id = ANY($2))
-                             ORDER BY msg_id LIMIT $3)",
-                        quote_ident(&format!("q_{name}")),
-                        quote_ident(&format!("q_{name}"))
-                    ),
-                    &[&cut, &keep, &batch],
-                )
-                .map_err(pg)?;
-            if deleted == 0 {
-                break;
-            }
-            removed += deleted as usize;
-            batches += 1;
-            if deleted < batch as u64 {
-                break;
-            }
-        }
-        Ok(Removal { removed, batches })
+        // The function removes in batches and writes the watermark itself, because the watermark is a
+        // claim about what was removed and only the operation that removes it may make that claim.
+        let size = batch.max(1) as i64;
+        let removed = scalar_i64(
+            &mut client,
+            "SELECT msgq.prune($1, $2, $3, $4::bigint[], $5::bigint::int)",
+            &[&self.token()?, &topic, &cut, &keep.to_vec(), &size],
+        )?;
+        Ok(Removal {
+            removed: removed as usize,
+            batches: (removed / size + i64::from(removed % size > 0)) as usize,
+        })
     }
 
     fn list_addresses(&self) -> Result<Vec<(String, i64, i64)>, Error> {
         let mut client = self.conn()?;
         let rows = client
             .query(
-                "SELECT address, queue_name, newest_offset FROM msgq.address ORDER BY address",
-                &[],
+                "SELECT name, (detail ->> 'count')::bigint, (detail ->> 'head')::bigint
+                 FROM msgq.catalog($1) WHERE kind = 'address' ORDER BY name",
+                &[&self.token()?],
             )
             .map_err(pg)?;
-        let mut out = Vec::new();
-        for row in rows {
-            let address: String = row.get(0);
-            let name: String = row.get(1);
-            let registered: i64 = row.get(2);
-            let counts = scalar_i64(
-                &mut client,
-                &format!(
-                    "SELECT COUNT(*) FROM pgmq.{}",
-                    quote_ident(&format!("q_{name}"))
-                ),
-                &[],
-            )?;
-            let newest = scalar_i64(
-                &mut client,
-                &format!(
-                    "SELECT COALESCE(MAX(msg_id), 0) FROM pgmq.{}",
-                    quote_ident(&format!("q_{name}"))
-                ),
-                &[],
-            )?;
-            out.push((address, counts, registered.max(newest)));
-        }
-        Ok(out)
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2)))
+            .collect())
     }
 
     fn list_consumers(&self, topic: Option<&str>) -> Result<Vec<(String, String, i64)>, Error> {
@@ -321,16 +285,16 @@ impl Bus for PgStore {
         let rows = match topic {
             Some(topic) => client
                 .query(
-                    "SELECT consumer, address, last_msg_id FROM msgq.cursor
-                     WHERE address = $1 ORDER BY consumer",
-                    &[&topic],
+                    "SELECT name, address, (detail ->> 'offset')::bigint FROM msgq.catalog($1)
+                     WHERE kind = 'cursor' AND address = $2 ORDER BY name",
+                    &[&self.token()?, &topic],
                 )
                 .map_err(pg)?,
             None => client
                 .query(
-                    "SELECT consumer, address, last_msg_id FROM msgq.cursor
-                     ORDER BY consumer, address",
-                    &[],
+                    "SELECT name, address, (detail ->> 'offset')::bigint FROM msgq.catalog($1)
+                     WHERE kind = 'cursor' ORDER BY address, name",
+                    &[&self.token()?],
                 )
                 .map_err(pg)?,
         };
@@ -342,15 +306,27 @@ impl Bus for PgStore {
 
     fn delete_consumers(&self, name: &str, topic: Option<&str>) -> Result<usize, Error> {
         let mut client = self.conn()?;
-        let affected = match topic {
-            Some(topic) => client.execute(
-                "DELETE FROM msgq.cursor WHERE consumer = $1 AND address = $2",
-                &[&name, &topic],
-            ),
-            None => client.execute("DELETE FROM msgq.cursor WHERE consumer = $1", &[&name]),
+        let addresses: Vec<String> = match topic {
+            Some(topic) => vec![topic.to_string()],
+            None => client
+                .query(
+                    "SELECT address FROM msgq.catalog($1) WHERE kind = 'cursor' AND name = $2",
+                    &[&self.token()?, &name],
+                )
+                .map_err(pg)?
+                .into_iter()
+                .map(|row| row.get(0))
+                .collect(),
+        };
+        let mut gone = 0usize;
+        for address in addresses {
+            gone += scalar_i64(
+                &mut client,
+                "SELECT msgq.cursor_reset($1, $2, $3)",
+                &[&self.token()?, &address, &name],
+            )? as usize;
         }
-        .map_err(pg)?;
-        Ok(affected as usize)
+        Ok(gone)
     }
 
     fn wake(&self, topics: &[&str]) -> Box<dyn Wake> {
@@ -489,43 +465,33 @@ impl Bus for PgStore {
     }
 
     fn retention_record(&self, topic: &str, cut: i64, removed_total: i64) -> Result<(), Error> {
-        let mut client = self.conn()?;
-        client
-            .execute(
-                "INSERT INTO msgq.retention (topic, cut_offset, removed_total) VALUES ($1, $2, $3)
-                 ON CONFLICT (topic, cut_offset) DO UPDATE
-                 SET removed_total = EXCLUDED.removed_total, removed_at = now()",
-                &[&topic, &cut, &removed_total],
-            )
-            .map_err(pg)?;
+        // msgq.prune wrote the watermark as part of removing the records. A second writer would be a
+        // claim about a removal that did not happen here.
+        let _ = (topic, cut, removed_total);
         Ok(())
     }
 
     fn retention_watermark(&self, topic: &str) -> Result<Option<(i64, i64)>, Error> {
         let mut client = self.conn()?;
         let row = client
-            .query_opt(
-                "SELECT cut_offset, removed_total FROM msgq.retention
-                 WHERE topic = $1 ORDER BY cut_offset DESC LIMIT 1",
-                &[&topic],
+            .query_one(
+                "SELECT cut, dropped FROM msgq.stream_of($1, $2)",
+                &[&self.token()?, &topic],
             )
             .map_err(pg)?;
-        Ok(row.map(|row| (row.get(0), row.get(1))))
+        let cut: i64 = row.get(0);
+        let removed: i64 = row.get(1);
+        Ok((cut > 0).then_some((cut, removed)))
     }
 
     fn retention_dropped(&self, topic: &str, cursor: i64) -> Result<i64, Error> {
         let mut client = self.conn()?;
-        let row = client
-            .query_one(
-                "SELECT
-                    (SELECT COALESCE(MAX(removed_total), 0) FROM msgq.retention WHERE topic = $1)
-                  - (SELECT COALESCE(MAX(removed_total), 0) FROM msgq.retention
-                     WHERE topic = $1 AND cut_offset <= $2)",
-                &[&topic, &cursor],
-            )
-            .map_err(pg)?;
-        let dropped: i64 = row.get(0);
-        Ok(dropped.max(0))
+        // What was removed after the point this consumer had reached.
+        scalar_i64(
+            &mut client,
+            "SELECT msgq.dropped($1, $2, $3)",
+            &[&self.token()?, &topic, &cursor],
+        )
     }
 
     fn record_at(&self, _offset: i64) -> Result<Option<(String, String)>, Error> {

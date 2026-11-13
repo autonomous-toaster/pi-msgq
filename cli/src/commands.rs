@@ -755,6 +755,10 @@ pub fn consumers(
                     .collect();
                 println!("{}", serde_json::to_string(&array)?);
             } else {
+                if let Some((owner, _scopes)) = store.identity()? {
+                    // Cursors belong to the principal that wrote them, so the listing names it.
+                    println!("owner:\t{owner}");
+                }
                 for (name, topic, offset, lag, dropped) in described {
                     println!("{name}\t{topic}\t{offset}\t{lag}\t{dropped}");
                 }

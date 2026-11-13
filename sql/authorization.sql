@@ -14,6 +14,27 @@
 -- public or in an extensions schema; this statement only helps a plain server.
 CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
 
+ALTER TABLE IF EXISTS msgq.address ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
+ALTER TABLE IF EXISTS msgq.cursor ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM msgq.cursor)
+       AND NOT EXISTS (SELECT 1 FROM information_schema.key_column_usage
+                       WHERE table_schema = 'msgq' AND table_name = 'cursor'
+                         AND constraint_name = 'cursor_pkey' AND column_name = 'owner') THEN
+        ALTER TABLE msgq.cursor DROP CONSTRAINT cursor_pkey;
+        ALTER TABLE msgq.cursor ADD PRIMARY KEY (owner, consumer, address);
+    END IF;
+    -- One user on this bus: the addresses it already wrote are its own.
+    IF (SELECT count(*) FROM msgq.identity) = 1 THEN
+        UPDATE msgq.address
+           SET owner = (SELECT name FROM msgq.identity LIMIT 1)
+         WHERE owner = '';
+    END IF;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS msgq.identity (
     name TEXT PRIMARY KEY,
     digest BYTEA NOT NULL UNIQUE,
@@ -197,6 +218,10 @@ BEGIN
     END IF;
 
     name := msgq.ensure_queue(addr);
+    -- Ownership follows the first write: an address belongs to the principal that opened it, and
+    -- prune authority follows ownership rather than read access.
+    UPDATE msgq.address SET owner = ident.name
+        WHERE msgq.address.address = addr AND msgq.address.owner = '';
     SELECT sent INTO new_offset
     FROM pgmq.send(
         name, payload,
@@ -284,11 +309,14 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS msgq.read_since(TEXT, TEXT, BIGINT, INT);
+DROP FUNCTION IF EXISTS msgq.prune(TEXT, TEXT, BIGINT, INT);
+
 -- The read surface. Same shape as the write path: the credential is resolved first, the address second,
 -- the table third. A caller holds no privilege on the streams, so these functions are the only door.
 CREATE OR REPLACE FUNCTION msgq.read_since(
     p_token TEXT, p_address TEXT, p_since BIGINT DEFAULT 0, p_limit INT DEFAULT 100)
-RETURNS TABLE (msg_id BIGINT, record JSONB)
+RETURNS TABLE (msg_id BIGINT, record JSONB, created_at BIGINT)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -311,15 +339,18 @@ BEGIN
     END IF;
 
     RETURN QUERY EXECUTE format(
-        'SELECT s.msg_id, s.message FROM pgmq.%I s WHERE s.msg_id > $1 ORDER BY s.msg_id LIMIT $2',
+        'SELECT s.msg_id, s.message, EXTRACT(EPOCH FROM s.enqueued_at)::bigint'
+        ' FROM pgmq.%I s WHERE s.msg_id > $1 ORDER BY s.msg_id LIMIT $2',
         'q_' || queue) USING greatest(coalesce(p_since, 0), 0), rows;
 END;
 $$;
 
 -- Where a stream starts, where it has got to, and how much has already gone: one call, because a
 -- reader that asks three times can be told three different truths.
+DROP FUNCTION IF EXISTS msgq.stream_of(TEXT, TEXT);
+
 CREATE OR REPLACE FUNCTION msgq.stream_of(p_token TEXT, p_address TEXT)
-RETURNS TABLE (head BIGINT, oldest BIGINT, dropped BIGINT)
+RETURNS TABLE (head BIGINT, oldest BIGINT, dropped BIGINT, cut BIGINT)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -341,13 +372,43 @@ BEGIN
         head := 0;
         oldest := 0;
         dropped := 0;
+        cut := 0;
         RETURN NEXT;
         RETURN;
     END IF;
 
     EXECUTE format('SELECT coalesce(min(s.msg_id), 0) FROM pgmq.%I s', 'q_' || queue) INTO oldest;
-    SELECT coalesce(max(r.removed_total), 0) INTO dropped FROM msgq.retention r WHERE r.topic = addr;
+    SELECT coalesce(max(r.removed_total), 0), coalesce(max(r.cut_offset), 0)
+      INTO dropped, cut FROM msgq.retention r WHERE r.topic = addr;
     RETURN NEXT;
+END;
+$$;
+
+-- How much a particular consumer has lost: what was removed after the point it had reached. Exact at a
+-- prune boundary, an over-report inside the last batch, which is the honest direction for a warning.
+CREATE OR REPLACE FUNCTION msgq.dropped(p_token TEXT, p_address TEXT, p_cursor BIGINT)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    ident msgq.identity;
+    addr TEXT := msgq.canonical_address(p_address);
+    lost BIGINT;
+BEGIN
+    SELECT * INTO ident FROM msgq.identity_of(p_token);
+    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+        RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
+            USING ERRCODE = '42501';
+    END IF;
+
+    SELECT coalesce(max(r.removed_total), 0)
+         - coalesce((SELECT max(r.removed_total) FROM msgq.retention r
+                      WHERE r.topic = addr AND r.cut_offset <= greatest(coalesce(p_cursor, 0), 0)), 0)
+      INTO lost
+      FROM msgq.retention r WHERE r.topic = addr;
+    RETURN greatest(lost, 0);
 END;
 $$;
 
@@ -360,21 +421,164 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     ident msgq.identity;
+    row RECORD;
+    total BIGINT;
 BEGIN
     SELECT * INTO ident FROM msgq.identity_of(p_token);
 
-    RETURN QUERY
-        SELECT 'address'::TEXT, a.address, a.address,
-               jsonb_build_object('head', coalesce(a.newest_offset, 0))
-        FROM msgq.address a
-        WHERE msgq.in_scope(a.address, ident.scopes)
-        ORDER BY a.address;
+    FOR row IN
+        SELECT t.address, t.queue_name, coalesce(t.newest_offset, 0) AS head
+          FROM msgq.address t
+         WHERE msgq.in_scope(t.address, ident.scopes)
+         ORDER BY t.address
+    LOOP
+        EXECUTE format('SELECT count(*) FROM pgmq.%I', 'q_' || row.queue_name) INTO total;
+        kind := 'address';
+        name := row.address;
+        address := row.address;
+        detail := jsonb_build_object(
+            'head', row.head, 'count', total,
+            'dropped', coalesce(
+                (SELECT max(r.removed_total) FROM msgq.retention r WHERE r.topic = row.address), 0));
+        RETURN NEXT;
+    END LOOP;
 
+    -- A cursor belongs to whoever wrote it: another principal's consumer name is not this caller's row.
     RETURN QUERY
         SELECT 'cursor'::TEXT, c.consumer, c.address,
-               jsonb_build_object('offset', c.last_msg_id)
+               jsonb_build_object('offset', c.last_msg_id, 'owner', c.owner)
         FROM msgq.cursor c
-        WHERE msgq.in_scope(c.address, ident.scopes)
+        WHERE c.owner = ident.name AND msgq.in_scope(c.address, ident.scopes)
         ORDER BY c.address, c.consumer;
+END;
+$$;
+
+-- A cursor belongs to the principal that wrote it, so a reused consumer name is a new position rather
+-- than a moved one. The owner is stamped here and never passed in.
+CREATE OR REPLACE FUNCTION msgq.cursor(
+    p_token TEXT, p_address TEXT, p_consumer TEXT, p_offset BIGINT DEFAULT NULL)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    ident msgq.identity;
+    addr TEXT := msgq.canonical_address(p_address);
+    name TEXT := coalesce(nullif(btrim(p_consumer), ''), 'default');
+    position BIGINT;
+BEGIN
+    SELECT * INTO ident FROM msgq.identity_of(p_token);
+    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+        RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
+            USING ERRCODE = '42501';
+    END IF;
+
+    IF p_offset IS NULL THEN
+        SELECT c.last_msg_id INTO position
+            FROM msgq.cursor c
+            WHERE c.owner = ident.name AND c.consumer = name AND c.address = addr;
+        RETURN coalesce(position, 0);
+    END IF;
+
+    INSERT INTO msgq.cursor (owner, consumer, address, last_msg_id)
+    VALUES (ident.name, name, addr, greatest(p_offset, 0))
+    ON CONFLICT (owner, consumer, address)
+    DO UPDATE SET last_msg_id = greatest(msgq.cursor.last_msg_id, EXCLUDED.last_msg_id)
+    RETURNING last_msg_id INTO position;
+    RETURN position;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION msgq.cursor_reset(p_token TEXT, p_address TEXT, p_consumer TEXT)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    ident msgq.identity;
+    addr TEXT := msgq.canonical_address(p_address);
+    name TEXT := coalesce(nullif(btrim(p_consumer), ''), 'default');
+    gone BIGINT;
+BEGIN
+    SELECT * INTO ident FROM msgq.identity_of(p_token);
+    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+        RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
+            USING ERRCODE = '42501';
+    END IF;
+    DELETE FROM msgq.cursor c
+        WHERE c.owner = ident.name AND c.consumer = name AND c.address = addr;
+    GET DIAGNOSTICS gone = ROW_COUNT;
+    RETURN gone;
+END;
+$$;
+
+-- Prune is the only operation that removes records, and therefore the only one that may claim what was
+-- removed. Authority follows ownership of the address: read access is not a licence to erase history.
+DROP FUNCTION IF EXISTS msgq.prune(TEXT, TEXT, BIGINT, BIGINT[]);
+
+CREATE OR REPLACE FUNCTION msgq.prune(
+    p_token TEXT, p_address TEXT, p_before BIGINT,
+    p_keep BIGINT[] DEFAULT ARRAY[]::BIGINT[], p_batch INT DEFAULT 500)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    ident msgq.identity;
+    addr TEXT := msgq.canonical_address(p_address);
+    queue TEXT;
+    owner TEXT;
+    cut BIGINT := greatest(coalesce(p_before, 0), 0);
+    keep_ids BIGINT[] := coalesce(p_keep, ARRAY[]::BIGINT[]);
+    batch INT := greatest(1, least(coalesce(p_batch, 500), 10000));
+    removed BIGINT;
+    total BIGINT := 0;
+BEGIN
+    SELECT * INTO ident FROM msgq.identity_of(p_token);
+    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+        RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
+            USING ERRCODE = '42501';
+    END IF;
+
+    SELECT a.queue_name, a.owner INTO queue, owner FROM msgq.address a WHERE a.address = addr;
+    IF queue IS NULL THEN
+        RETURN 0;
+    END IF;
+    IF owner IS DISTINCT FROM ident.name THEN
+        RAISE EXCEPTION 'msgq: % belongs to %, not %', addr, coalesce(nullif(owner, ''), 'nobody'),
+            ident.name USING ERRCODE = '42501';
+    END IF;
+
+    LOOP
+        EXECUTE format(
+            'DELETE FROM pgmq.%I WHERE ctid IN ('
+            '  SELECT ctid FROM pgmq.%I WHERE msg_id <= $1 AND NOT (msg_id = ANY($3)) LIMIT $2)',
+            'q_' || queue, 'q_' || queue) USING cut, batch, keep_ids;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+        total := total + removed;
+        EXIT WHEN removed < batch;
+    END LOOP;
+
+    IF total > 0 THEN
+        INSERT INTO msgq.retention (topic, cut_offset, removed_total)
+        VALUES (addr, cut, (SELECT coalesce(max(r.removed_total), 0) FROM msgq.retention r WHERE r.topic = addr) + total);
+    END IF;
+    RETURN total;
+END;
+$$;
+
+
+-- cursor and prune are defined below grant_runtime, so their execute grants live here.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'msgq_runtime') THEN
+        GRANT EXECUTE ON FUNCTION msgq.cursor(TEXT, TEXT, TEXT, BIGINT) TO msgq_runtime;
+        GRANT EXECUTE ON FUNCTION msgq.prune(TEXT, TEXT, BIGINT, BIGINT[], INT) TO msgq_runtime;
+        GRANT EXECUTE ON FUNCTION msgq.cursor_reset(TEXT, TEXT, TEXT) TO msgq_runtime;
+        GRANT EXECUTE ON FUNCTION msgq.dropped(TEXT, TEXT, BIGINT) TO msgq_runtime;
+    END IF;
 END;
 $$;

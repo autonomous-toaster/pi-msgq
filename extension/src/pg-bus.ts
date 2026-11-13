@@ -169,15 +169,13 @@ export class PgBus implements Bus {
 	 * find a record by offset alone.
 	 */
 	async readOneAsync(address: string, offset: number): Promise<BusEvent | undefined> {
-		const queue = await this.queueOf(address);
 		const result = await this.client.query(
-			`SELECT msg_id, message::text AS payload,
-			        EXTRACT(EPOCH FROM enqueued_at)::bigint AS created_at
-			 FROM pgmq.${quote(`q_${queue}`)} WHERE msg_id = $1`,
-			[offset],
+			"SELECT msg_id, record::text AS payload, created_at FROM msgq.read_since($1, $2, $3, 1)",
+			[this.token, address, Math.max(offset - 1, 0)],
 		);
 		const row = result.rows[0];
-		if (!row) return undefined;
+		// One record after the offset before it: anything else is not the record that was asked for.
+		if (!row || Number(row.msg_id) !== offset) return undefined;
 		return {
 			offset: Number(row.msg_id),
 			topic: address,
@@ -226,11 +224,8 @@ export class PgBus implements Bus {
 
 				while (!stopped) {
 					const result = await this.client.query(
-						`SELECT msg_id, message::text AS payload,
-						        EXTRACT(EPOCH FROM enqueued_at)::bigint AS created_at
-						 FROM pgmq.${quote(`q_${queue}`)}
-						 WHERE msg_id > $1 ORDER BY msg_id LIMIT $2`,
-						[cursor ?? 0, READ_BATCH],
+						"SELECT msg_id, record::text AS payload, created_at FROM msgq.read_since($1, $2, $3, $4)",
+						[this.token, address, cursor ?? 0, READ_BATCH],
 					);
 					if (result.rows.length === 0) {
 						// A notification and a timeout are both a reason to look again.
@@ -278,41 +273,35 @@ export class PgBus implements Bus {
 		};
 	}
 
-	/** Create the consumer's row if it is missing, the way the CLI does. */
+	/** A consumer with no stored position reads from the start; the function stamps the owner. */
 	private async initializeCursor(consumer: string, address: string): Promise<void> {
-		await this.client.query(
-			`INSERT INTO msgq.cursor (consumer, address, last_msg_id) VALUES ($1, $2, 0)
-			 ON CONFLICT (consumer, address) DO NOTHING`,
-			[consumer, address],
-		);
+		await this.cursor(address, consumer, 0);
 	}
 
 	private async storedOffset(consumer: string, address: string): Promise<number> {
+		return this.cursor(address, consumer);
+	}
+
+	/** One function for read and write: a position belongs to the principal that wrote it. */
+	private async cursor(address: string, consumer: string, offset?: number): Promise<number> {
 		const result = await this.client.query(
-			"SELECT last_msg_id FROM msgq.cursor WHERE consumer = $1 AND address = $2",
-			[consumer, address],
+			"SELECT msgq.cursor($1, $2, $3, $4) AS position",
+			[this.token, address, consumer, offset ?? null],
 		);
-		return Number(result.rows[0]?.last_msg_id ?? 0);
+		return Number(result.rows[0]?.position ?? 0);
 	}
 
 	private async persist(consumer: string, address: string, offset: number): Promise<void> {
-		await this.client.query(
-			`INSERT INTO msgq.cursor (consumer, address, last_msg_id) VALUES ($1, $2, $3)
-			 ON CONFLICT (consumer, address) DO UPDATE
-			 SET last_msg_id = GREATEST(msgq.cursor.last_msg_id, EXCLUDED.last_msg_id)`,
-			[consumer, address, offset],
-		);
+		await this.cursor(address, consumer, offset);
 	}
 
 	/** What a consumer has lost to the retention window, for the gap report. */
 	async dropped(address: string, cursor: number): Promise<number> {
-		const result = await this.client.query(
-			`SELECT
-			   (SELECT COALESCE(MAX(removed_total), 0) FROM msgq.retention WHERE topic = $1)
-			 - (SELECT COALESCE(MAX(removed_total), 0) FROM msgq.retention
-			    WHERE topic = $1 AND cut_offset <= $2) AS dropped`,
-			[address, cursor],
-		);
+		const result = await this.client.query("SELECT msgq.dropped($1, $2, $3) AS dropped", [
+			this.token,
+			address,
+			cursor,
+		]);
 		return Math.max(0, Number(result.rows[0]?.dropped ?? 0));
 	}
 }

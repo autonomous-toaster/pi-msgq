@@ -44,6 +44,22 @@ async function publish(dsn: string, address: string, record: unknown): Promise<n
 	}
 }
 
+
+/** A credential for the function surface: reads and cursors resolve it before touching a table. */
+async function credential(dsn: string): Promise<string> {
+	const module = await import("pg");
+	const client = new module.default.Client({ connectionString: dsn });
+	await client.connect();
+	try {
+		const row = await client.query("SELECT msgq.register_identity($1, ARRAY['group']) AS token", [
+			`ext-${unique()}`,
+		]);
+		return String(row.rows[0].token);
+	} finally {
+		await client.end();
+	}
+}
+
 test("the settings supply what the location does not", () => {
 	assert.deepEqual(pgSettings("postgres://a@h:6000/db", {}), {
 		connectionString: "postgres://a@h:6000/db",
@@ -72,6 +88,7 @@ test("a subscription receives what another client publishes", async (t) => {
 		t.diagnostic("MSGQ_TEST_DB_URI is unset: the shared bus was not exercised");
 		return;
 	}
+	process.env.MSGQ_TOKEN = await credential(DSN);
 	const address = `group/ext-${unique()}`;
 	const consumer = `session/ext-${unique()}`;
 	const bus = await PgBus.open(DSN, [address]);

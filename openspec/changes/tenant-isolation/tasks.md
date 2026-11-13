@@ -9,16 +9,16 @@
 
 - [x] 2.1 Add the read function surface. `msgq.read_since` returns records. `msgq.stream_of` returns head, oldest and dropped. `msgq.catalog` returns addresses and cursors. Resolve the credential first in every function. Verify a cross-tenant read is refused.
 - [x] 2.2 Grant the runtime role the function surface only. Grant execute on the read functions. Revoke select on the engine schema. Verify a direct select as the runtime role is refused.
-- [ ] 2.3 Move the extension's shared reads onto the read function. Replace the direct select in the subscription pump. Verify the extension holds no direct select.
-- [ ] 2.4 Report a refused read in the extension. Report the refusal. Stop reading the address. Keep the session running. Verify a refused read delivers nothing.
+- [x] 2.3 Move the extension's shared reads onto the read function. Replace the direct select in the subscription pump. Verify the extension holds no direct select.
+- [x] 2.4 Report a refused read in the extension. Report the refusal. Stop reading the address. Keep the session running. Verify a refused read delivers nothing.
 
 ## 3. Tenant-owned cursors and prune
 
-- [ ] 3.1 Add an owner to cursors. Stamp the owner from the credential on every cursor write. Verify two principals saving one consumer name produce two rows.
-- [ ] 3.2 Implement the prune function. `msgq.prune` deletes in batches inside one scoped address. The prune writes the retention watermark itself. The prune returns the total removed. Verify that a watermark written without a prune is refused.
-- [ ] 3.3 Keep the runtime role unable to delete. Revoke delete on the queue tables. Perform every delete inside the prune function. Grant execute on the prune function. Verify a direct delete as the runtime role is refused.
-- [ ] 3.4 Scope the consumer surface in the CLI. The listing names only the caller's rows. The listing shows the owner. Every cursor command acts on a row owned by the caller. Verify another principal's consumer is absent.
-- [ ] 3.5 Scope the prune command and its reporting. Prune removes only addresses inside the caller's scopes. Prune reports the total removed. Verify a refused prune exits non-zero and removes no record.
+- [x] 3.1 Add an owner to cursors. Stamp the owner from the credential on every cursor write. Verify two principals saving one consumer name produce two rows.
+- [x] 3.2 Implement the prune function. `msgq.prune` deletes in batches inside one scoped address. The prune writes the retention watermark itself. The prune returns the total removed. Verify that a watermark written without a prune is refused.
+- [x] 3.3 Keep the runtime role unable to delete. Revoke delete on the queue tables. Perform every delete inside the prune function. Grant execute on the prune function. Verify a direct delete as the runtime role is refused.
+- [x] 3.4 Scope the consumer surface in the CLI. The listing names only the caller's rows. The listing shows the owner. Every cursor command acts on a row owned by the caller. Verify another principal's consumer is absent.
+- [x] 3.5 Scope the prune command and its reporting. Prune removes only addresses inside the caller's scopes. Prune reports the total removed. Verify a refused prune exits non-zero and removes no record.
 
 ## 4. Owner stamp
 

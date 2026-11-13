@@ -902,6 +902,15 @@ fn a_runtime_role_cannot_write_a_stream_directly() {
         "the runtime role must not insert into a stream directly"
     );
 
+    let deleted = runtime.execute(
+        &format!("DELETE FROM pgmq.\"q_{queue}\" WHERE msg_id <= 1"),
+        &[],
+    );
+    assert!(
+        deleted.is_err(),
+        "the runtime role must not delete from a stream"
+    );
+
     let created = runtime.execute("CREATE TABLE pgmq.sneaky ()", &[]);
     assert!(created.is_err(), "the runtime role must not create in pgmq");
 
@@ -1180,4 +1189,68 @@ fn a_cross_tenant_read_is_refused_and_the_owner_reads_its_own() {
         .unwrap()
         .get(0);
     assert_eq!(nothing, 0, "another principal's catalogue is empty");
+}
+
+#[test]
+fn a_prune_outside_ownership_is_refused_and_removes_nothing() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let address = format!("group/owned-{}", unique());
+    let store = open(&dsn);
+    let sender = format!("cli/owner@{}", unique());
+    for message in ["one", "two"] {
+        store
+            .publish(
+                &address,
+                &json!({"v": 1, "type": "note", "from": sender, "to": address,
+                        "message": message}),
+            )
+            .unwrap();
+    }
+
+    // A principal that may read the room still may not erase its history.
+    let other: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['group'])",
+            &[&format!("guest-{}", unique()).as_str()],
+        )
+        .unwrap()
+        .get(0);
+    let guest = Store::open_with(&Target::Shared(dsn.clone()), Some(other))
+        .expect("open")
+        .0;
+    let refused = guest.prune_before(&address, i64::MAX, &[], 100);
+    let error = refused.expect_err("a prune outside ownership is refused");
+    assert!(format!("{error:?}").contains("belongs to"), "{error:?}");
+
+    let left: i64 = raw
+        .query_one(
+            "SELECT count(*) FROM msgq.read_since($1, $2, 0, 100)",
+            &[&fixture_token(&dsn), &address],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(left, 2, "a refused prune removes no record");
+}
+
+#[test]
+fn a_consumer_name_is_deleted_only_where_the_caller_holds_it() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let store = open(&dsn);
+    let first = format!("group/del-one-{}", unique());
+    let second = format!("group/del-two-{}", unique());
+    let consumer = format!("reader-{}", unique());
+    store.cursor_set(&consumer, &first, 1).unwrap();
+    store.cursor_set(&consumer, &second, 2).unwrap();
+
+    assert_eq!(store.delete_consumers(&consumer, Some(&first)).unwrap(), 1);
+    assert_eq!(store.list_consumers(Some(&first)).unwrap().len(), 0);
+    assert_eq!(store.delete_consumers(&consumer, None).unwrap(), 1);
+    assert_eq!(store.list_consumers(Some(&second)).unwrap().len(), 0);
 }
