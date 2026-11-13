@@ -12,6 +12,7 @@ pub mod error;
 pub mod pg;
 pub mod presence;
 pub mod record;
+pub mod seal;
 pub mod store;
 
 /// Package version.

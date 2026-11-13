@@ -92,7 +92,10 @@ pub enum CursorAction {
 /// Publish one message to an address.
 pub fn publish(db: &crate::config::Target, args: PublishArgs) -> Result<(), Error> {
     let canonical = address::canonicalize(&args.address)?;
-    let value = build_record(&canonical, &args)?;
+    let mut value = build_record(&canonical, &args)?;
+    if let Some(key) = crate::seal::Key::from_env()? {
+        crate::seal::seal_body(&mut value, &key)?;
+    }
     let (store, _) = Store::open(db)?;
 
     // When awaiting, record where the reply stream ends *before* publishing, so an
@@ -531,10 +534,49 @@ pub fn read(
     events.sort_by(|a, b| a.offset.cmp(&b.offset).then_with(|| a.topic.cmp(&b.topic)));
     events.truncate(limit as usize);
 
+    let failures = decrypt_events(&mut events)?;
     for event in &events {
         render(event, json, with_offset);
     }
+    if !failures.is_empty() {
+        return Err(Error::runtime(format!(
+            "cannot decrypt {} record(s): {}",
+            failures.len(),
+            failures.join("; ")
+        )));
+    }
     Ok(())
+}
+
+/// Open every sealed body in a batch, in place.
+///
+/// Returns one line per record that could not be opened. A body that does not open is removed rather
+/// than printed: an unopenable body is an error, never content.
+fn decrypt_events(events: &mut [StoredRecord]) -> Result<Vec<String>, Error> {
+    let key = crate::seal::Key::from_env()?;
+    let mut failures = Vec::new();
+    for event in events.iter_mut() {
+        let mut value: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
+        if crate::seal::enc_info(&value).is_none() {
+            continue;
+        }
+        let outcome = match &key {
+            Some(key) => crate::seal::open_body(&mut value, key).map_err(|error| error.to_string()),
+            None => Err(
+                "no passphrase is configured; set MSGQ_PASSPHRASE or MSGQ_PASSPHRASE_FILE"
+                    .to_string(),
+            ),
+        };
+        match outcome {
+            Ok(()) => event.payload = serde_json::to_vec(&value)?,
+            Err(reason) => {
+                crate::seal::blank_body(&mut value);
+                event.payload = serde_json::to_vec(&value)?;
+                failures.push(format!("{}#{}: {reason}", event.topic, event.offset));
+            }
+        }
+    }
+    Ok(failures)
 }
 
 /// Take one lock per followed address, so two processes cannot share a consumer's cursor.
@@ -646,6 +688,9 @@ pub fn follow(
             continue;
         }
 
+        for failure in decrypt_events(&mut batch)? {
+            eprintln!("msgq: {failure}");
+        }
         for event in batch {
             store.cursor_set(consumer, &event.topic, event.offset)?;
             offsets.insert(event.topic.clone(), event.offset);
@@ -1093,6 +1138,7 @@ pub fn db_info(db: &crate::config::Target) -> Result<(), Error> {
         resolve_retention(None).unwrap_or(crate::config::DEFAULT_RETENTION_S)
     );
     println!("credential:       {}", store.credential()?);
+    println!("encryption:       {}", crate::seal::describe()?);
 
     let presence_age = streams
         .iter()

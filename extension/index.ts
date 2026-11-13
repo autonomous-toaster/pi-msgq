@@ -62,7 +62,6 @@ import {
 	planDelivery,
 	type ReferencedRecord,
 	wantsReply,
-	refusal,
 } from "./src/delivery.ts";
 import { type CommandDeps, registerCommands } from "./src/commands.ts";
 import {
@@ -81,7 +80,8 @@ import { formatIdentity, type IdentityFacts } from "./src/commands-text.ts";
 import { runPlanned } from "./src/run.ts";
 import { Presence, PRESENCE_TTL_S } from "./src/presence.ts";
 import type { PresenceState } from "./src/presence-text.ts";
-import { decodeRecord, type MsgqRecord, recordBody } from "./src/record.ts";
+import { decodeRecord, openRecord, type MsgqRecord, recordBody } from "./src/record.ts";
+import { describeKey, loadKey, type SealingKey } from "./src/seal.ts";
 import {
 	askWaitSeconds,
 	interpretAsk,
@@ -138,6 +138,8 @@ export default function (pi: ExtensionAPI) {
 	let self = "";
 	let consumer = "";
 	let policy: Policy = "display";
+	/** The key this session seals and opens bodies with, when a passphrase is configured. */
+	let sealingKey: SealingKey | undefined;
 	let addresses: string[] = [];
 	let skipped = 0;
 	/** Senders allowed to start a turn under the honour policy. Empty means no allowlist. */
@@ -471,14 +473,15 @@ export default function (pi: ExtensionAPI) {
 		offset: number,
 		subscription: Subscription,
 	): void {
-		// An unreadable body is an error, not content. The refusal is checked before `type` is
-		// consulted, so no policy can turn it into a turn, and nothing claims it was received.
-		const refused = refusal(record);
-		if (refused) {
-			report(`msgq cannot read a record from ${record.from}: ${refused.reason}`, "error");
+		// An unreadable body is an error, not content. Opening happens before `type` is consulted, so
+		// no policy can turn an unopened body into a turn and nothing claims it was received.
+		const opened = openRecord(record, sealingKey);
+		if (!opened.ok) {
+			report(`msgq cannot read a record from ${record.from}: ${opened.reason}`, "error");
 			subscription.save(offset);
 			return;
 		}
+		record = opened.record;
 
 		// An acknowledgement is never itself acknowledged.
 		const phases = isAckRecord(record) ? undefined : parseAckRequest(record.meta);
@@ -619,6 +622,7 @@ export default function (pi: ExtensionAPI) {
 			trusted,
 			card: currentCard,
 			write: writeState(),
+			encryption: describeKey(sealingKey),
 		};
 	}
 
@@ -862,6 +866,15 @@ export default function (pi: ExtensionAPI) {
 		consumer = consumerId(identity);
 		extraTopics = extra;
 		currentCwd = ctx.cwd;
+
+		// Keys. A broken configured source is reported and treated as absent, so reads refuse sealed
+		// bodies instead of pretending the session can open them.
+		try {
+			sealingKey = loadKey();
+		} catch (error) {
+			sealingKey = undefined;
+			report(`msgq cannot use the configured passphrase: ${String(error)}`, "warning");
+		}
 
 		// Bus. A connection string selects the shared engine; anything else is a file.
 		try {

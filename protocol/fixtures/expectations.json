@@ -91,6 +91,12 @@
       "publish": "accept",
       "read": "accept",
       "why": "a record may be accepted while its body stays uninterpretable to a reader"
+    },
+    {
+      "file": "16-sealed-body.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "a sealed body is accepted by both sides; a reader with the passphrase reads it and a reader without one refuses it, naming the key identifier"
     }
   ]
 }

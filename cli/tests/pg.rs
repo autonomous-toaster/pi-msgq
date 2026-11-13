@@ -1034,3 +1034,41 @@ fn a_sender_may_speak_as_itself_and_no_further() {
         assert_eq!(stored, expected, "the record claimed {claimed}");
     }
 }
+
+#[test]
+fn the_engine_holds_no_plaintext_body() {
+    use msgq::seal::{Key, seal_body};
+
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let address = format!("group/sealed-{}", unique());
+    let store = open(&dsn);
+    let key = Key::derive("correct horse", msgq::seal::DEFAULT_SALT).unwrap();
+    let mut record = json!({
+        "v": 1, "type": "note", "from": "session/a", "to": address,
+        "message": "the plan is tomorrow"
+    });
+    assert!(seal_body(&mut record, &key).unwrap());
+    let offset = store.publish(&address, &record).unwrap();
+
+    let mut raw = client(&dsn);
+    let queue = queue_for(&mut raw, &address).expect("registered");
+    let stored: String = raw
+        .query_one(
+            &format!("SELECT message::text FROM pgmq.\"q_{queue}\" WHERE msg_id = $1"),
+            &[&offset],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        !stored.contains("the plan is tomorrow"),
+        "the engine holds the plaintext body: {stored}"
+    );
+
+    // And the same bytes open again through the reader's path.
+    let mut read_back: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    msgq::seal::open_body(&mut read_back, &key).expect("the stored body opens");
+    assert_eq!(read_back["message"], "the plan is tomorrow");
+}

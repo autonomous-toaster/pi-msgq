@@ -121,7 +121,7 @@ pub fn opaque_body(value: &Value) -> Option<String> {
 }
 
 /// Whether the record's body belongs to the kind that may be opaque at all.
-fn body_may_be_opaque(value: &Value) -> bool {
+pub(crate) fn body_may_be_opaque(value: &Value) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("event") {
         return true;
     }

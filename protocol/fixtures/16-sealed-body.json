@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "type": "note",
+  "from": "session/fixture",
+  "to": "session/reader",
+  "message": "XzYMue1/WfW4zzn17hixyVHOQnyTLrOj0JKXEr/9PYW4pedu",
+  "meta": {
+    "enc": {
+      "alg": "aes-256-gcm",
+      "kid": "858ebfb29776c869",
+      "nonce": "Zml4dHVyZW5vbmNl",
+      "field": "message"
+    }
+  }
+}

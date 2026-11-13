@@ -156,6 +156,8 @@ export interface IdentityFacts {
 	/** Whether this session can write, when the engine can refuse. A read-only session is not an
 	 * idle one and must not look like one. */
 	write?: string;
+	/** How this session encrypts, or that it does not. */
+	encryption?: string;
 }
 
 /** How presence reads in the identity report. */
@@ -178,6 +180,7 @@ export function formatIdentity(facts: IdentityFacts): string {
 		["trust", facts.trusted.length > 0 ? facts.trusted.join(", ") : "(none set: every sender)"],
 	];
 	if (facts.write) rows.push(["write", facts.write]);
+	if (facts.encryption) rows.push(["encryption", facts.encryption]);
 	if (facts.card) {
 		for (const [label, key] of [
 			["project", "project"],

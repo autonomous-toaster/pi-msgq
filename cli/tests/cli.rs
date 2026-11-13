@@ -1620,3 +1620,96 @@ fn each_scope_reads_only_its_own_roster() {
         unscoped.stdout
     );
 }
+
+#[test]
+fn a_sealed_body_needs_the_passphrase_to_read() {
+    let db = temp_db();
+    let pass = "correct horse";
+    let published = run_env(
+        &db,
+        &["publish", "group/x", "the plan is tomorrow"],
+        &[("MSGQ_PASSPHRASE", pass)],
+    );
+    assert_eq!(published.code, 0, "{}", published.stderr);
+
+    // The file itself carries no plaintext: that is the whole point.
+    let bytes = std::fs::read(&db).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("the plan is tomorrow"),
+        "the plaintext body is in the bus file"
+    );
+
+    let sealed = run(&db, &["read", "group/x", "--from-start"]);
+    assert_eq!(sealed.code, 1, "a reader without a key must fail");
+    assert!(sealed.stderr.contains("no passphrase"), "{}", sealed.stderr);
+    assert!(
+        sealed.stderr.contains("cannot decrypt"),
+        "{}",
+        sealed.stderr
+    );
+
+    let opened = run_env(
+        &db,
+        &["read", "group/x", "--from-start"],
+        &[("MSGQ_PASSPHRASE", pass)],
+    );
+    assert_eq!(opened.code, 0, "{}", opened.stderr);
+    assert!(
+        opened.stdout.contains("the plan is tomorrow"),
+        "{}",
+        opened.stdout
+    );
+
+    let info = run_env(&db, &["db", "info"], &[("MSGQ_PASSPHRASE", pass)]);
+    assert!(info.stdout.contains("aes-256-gcm"), "{}", info.stdout);
+    assert!(
+        !info.stdout.contains(pass),
+        "the report prints no key material: {}",
+        info.stdout
+    );
+}
+
+#[test]
+fn a_bus_without_a_passphrase_stores_plaintext_and_says_so() {
+    let db = temp_db();
+    let published = run(&db, &["publish", "group/x", "in the clear"]);
+    assert_eq!(published.code, 0, "{}", published.stderr);
+    let info = run(&db, &["db", "info"]);
+    assert!(
+        info.stdout.contains("none (bodies are plaintext)"),
+        "{}",
+        info.stdout
+    );
+    let read = run(&db, &["read", "group/x", "--from-start"]);
+    assert!(read.stdout.contains("in the clear"), "{}", read.stdout);
+}
+
+#[test]
+fn a_mixed_history_reads_whole() {
+    let db = temp_db();
+    let pass = "correct horse";
+    run(&db, &["publish", "group/x", "before the key"]);
+    run_env(
+        &db,
+        &["publish", "group/x", "after the key"],
+        &[("MSGQ_PASSPHRASE", pass)],
+    );
+    let opened = run_env(
+        &db,
+        &["read", "group/x", "--from-start"],
+        &[("MSGQ_PASSPHRASE", pass)],
+    );
+    assert_eq!(opened.code, 0, "{}", opened.stderr);
+    assert!(
+        opened.stdout.contains("before the key"),
+        "{}",
+        opened.stdout
+    );
+    assert!(opened.stdout.contains("after the key"), "{}", opened.stdout);
+
+    // Without the key the plaintext record still reads, and the sealed one refuses.
+    let mixed = run(&db, &["read", "group/x", "--from-start"]);
+    assert_eq!(mixed.code, 1);
+    assert!(mixed.stdout.contains("before the key"), "{}", mixed.stdout);
+    assert!(!mixed.stdout.contains("after the key"), "{}", mixed.stdout);
+}
