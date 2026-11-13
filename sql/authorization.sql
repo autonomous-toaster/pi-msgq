@@ -25,14 +25,15 @@ CREATE TABLE IF NOT EXISTS msgq.identity (
 COMMENT ON TABLE msgq.identity IS
     'One row per writer: the sha256 of a credential, the addresses it may write, and an optional expiry.';
 
--- The canonical spelling of an address. Two spellings that differ in case or surrounding space are
--- one address, so a scope cannot be escaped by spelling.
+-- The canonical spelling of an address: whitespace and stray slashes removed, runs of slashes
+-- collapsed, case preserved. Case is part of the address, as it is in the CLI: the shared engine
+-- does not quietly lowercase a name the local engine keeps.
 CREATE OR REPLACE FUNCTION msgq.canonical_address(address TEXT)
 RETURNS TEXT
 LANGUAGE sql IMMUTABLE
 SET search_path = pg_catalog, pg_temp
 AS $$
-    SELECT regexp_replace(lower(btrim(address, ' /')), '/+', '/', 'g')
+    SELECT regexp_replace(btrim(address, ' /'), '/+', '/', 'g')
 $$;
 
 -- A scope is an address and everything beneath it. "group/red" covers "group/red/sub", not
@@ -67,7 +68,7 @@ LANGUAGE sql IMMUTABLE
 SET search_path = pg_catalog, pg_temp, public, extensions, msgq
 AS $$
     SELECT left(
-        rtrim(left(rtrim(lower(regexp_replace(address, '[^A-Za-z0-9]', '_', 'g')), '_'), 30), '_')
+        lower(rtrim(left(rtrim(regexp_replace(address, '[^A-Za-z0-9]', '_', 'g'), '_'), 30), '_'))
         || '_' || left(encode(digest(address, 'sha256'), 'hex'), 16),
         47
     )::text

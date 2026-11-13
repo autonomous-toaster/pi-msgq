@@ -246,3 +246,28 @@ test("the identity report admits a session with no bus address", () => {
 	assert.match(text, /follows\s+\(none\)/);
 	assert.match(text, /trust\s+\(none set: every sender\)/);
 });
+
+test("a read-only session is not reported as an idle one", () => {
+	const idle = formatIdentity({
+		self: "session/a",
+		bus: "/tmp/msgq.db",
+		addresses: ["session/a"],
+		policy: "display",
+		presence: "registered",
+		trusted: [],
+		write: "writable",
+	});
+	assert.match(idle, /write\s+writable/);
+
+	const readOnly = formatIdentity({
+		self: "session/a",
+		bus: "postgres://db/msgq",
+		addresses: ["session/a"],
+		policy: "display",
+		presence: "lost",
+		trusted: [],
+		write: "read-only (the credential is not recognised)",
+	});
+	assert.match(readOnly, /read-only/);
+	assert.notEqual(idle, readOnly, "the two states are distinguishable by name");
+});

@@ -87,6 +87,9 @@ export interface Bus {
 		consumer: string,
 		onEvent: (event: BusEvent) => void,
 		onError: (error: unknown) => void,
+		/** Called once with how many records the retention window removed before this consumer's
+		 * cursor, when the engine can tell. A gap is reported, never fatal. */
+		onGap?: (dropped: number) => void,
 	): Subscription;
 	readOne(address: string, offset: number): BusEvent | undefined;
 }
@@ -112,6 +115,7 @@ export class HonkerBus implements Bus {
 		consumer: string,
 		onEvent: (event: BusEvent) => void,
 		onError: (error: unknown) => void,
+		_onGap?: (dropped: number) => void,
 	): Subscription {
 		this.initializeCursor(consumer, address);
 

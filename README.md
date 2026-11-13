@@ -203,10 +203,40 @@ as well, and follows with a consumer of `maki#<session-id>`, so a shared alias f
 them instead of colliding on the follow lock. Address the id for one session, the alias for the
 group; answers always come back from the id.
 
+## Two backends
+
+One product, two engines, and a deployment runs exactly one of them:
+
+| | local | shared |
+|---|---|---|
+| location | a filesystem path (`MSGQ_DB`, `--db`) | a connection string or `PI_MSGQ_PG*` variables |
+| storage | one SQLite file | PostgreSQL, through [pgmq](https://github.com/pgmq/pgmq) |
+| reach | the machine that holds the file | every machine that can reach the server |
+| identity | file permissions; the sender is a claim | a credential the server checks |
+| retention | a declared window, default one hour | the same window |
+
+Nothing synchronises the two: there is no relay, no bridge and no dual write. Pick one and point
+every session at it.
+
+```bash
+msgq --db ./msgq.db publish group/standup "hi"                    # local
+msgq --db postgres://bus@db.internal/msgq publish group/standup "hi"   # shared
+```
+
+The shared engine reads `PI_MSGQ_PGHOST`, `PI_MSGQ_PGPORT`, `PI_MSGQ_PGUSER`, `PI_MSGQ_PGPASSWORD`,
+`PI_MSGQ_PGDATABASE` and `PI_MSGQ_PGSSLMODE` — the libpq names under a prefix of their own, so a
+shell's global `PG*` settings are never picked up by accident. They supply what the connection
+string does not, which is how a password stays out of a URI. The credential is `MSGQ_TOKEN` or
+`~/.config/msgq/token`; `msgq db info` says whether it was accepted, and never prints it.
+
+Presence and the roster are per scope: set `MSGQ_SCOPE` and a session advertises on
+`group/<scope>/presence`, so two teams on one server do not read each other's participants.
+
 ## What it will not do
 
-- **No daemon, no broker, no network.** The bus is one SQLite file, so the reach of the system is the
-  reach of the file. Nothing crosses machines.
+- **No daemon and no broker.** The local backend is one SQLite file and the shared backend is a
+  PostgreSQL you already run; msgq adds no service of its own. Reach is the reach of the file or of
+  that server, and nothing crosses between the two.
 - **No process management.** The bus carries messages; it does not start, stop or supervise the
   sessions at either end. A peer is a process somebody else started.
 - **No handover or context transfer.** You say what you want; you do not send your conversation.
@@ -230,4 +260,7 @@ group; answers always come back from the id.
 | A message appears but the agent ignores it | the default `display` policy. Start with `--msgq-policy honor` |
 | A peer does nothing when messaged | its trust list excludes you, or its policy is `display` |
 | `msgq disabled` in the session | the bus could not be opened — check `MSGQ_DB` |
+| `no credential was presented` | the server has identities; set `MSGQ_TOKEN` or write the identity file |
+| `is outside the scopes of` | the credential may not write that address |
+| `read-only` in `/peers me` | the session can read but its writes are refused |
 | `msgq exited with 1 and said nothing` | it is not on `PATH`. See [DEVELOPMENT.md](DEVELOPMENT.md) |

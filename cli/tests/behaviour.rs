@@ -69,10 +69,23 @@ fn temp_db() -> PathBuf {
     dir.join("msgq.db")
 }
 
+/// A credential the behaviour cases may use, with scopes over every address the fixtures name.
+fn credential(dsn: &str) -> String {
+    let mut client =
+        postgres::Client::connect(dsn, postgres::NoTls).expect("the test database must accept");
+    client
+        .query_one(
+            "SELECT msgq.register_identity('cli/behaviour', ARRAY['group','session','cwd','cli'])",
+            &[],
+        )
+        .expect("an identity must be mintable")
+        .get(0)
+}
+
 /// Where the bus lives for one case.
 enum Bus {
     Local(PathBuf),
-    Shared(String),
+    Shared { dsn: String, token: String },
 }
 
 impl Bus {
@@ -81,7 +94,15 @@ impl Bus {
     fn fresh() -> Self {
         let bus = match engine().as_str() {
             "local" => Bus::Local(temp_db()),
-            "shared" => Bus::Shared(shared_dsn()),
+            "shared" => {
+                let dsn = shared_dsn();
+                // The cases run on a bus that can authorize, so the suite exercises the path a
+                // deployment uses rather than the one where nobody is trusted.
+                Bus::Shared {
+                    token: credential(&dsn),
+                    dsn,
+                }
+            }
             other => {
                 panic!("engine '{other}' has no runner; add one rather than turning the suite off")
             }
@@ -91,7 +112,7 @@ impl Bus {
     }
 
     fn empty(&self) {
-        let Bus::Shared(dsn) = self else {
+        let Bus::Shared { dsn, .. } = self else {
             return;
         };
         let mut client = postgres::Client::connect(dsn, postgres::NoTls)
@@ -115,17 +136,19 @@ impl Bus {
     fn location(&self) -> String {
         match self {
             Bus::Local(path) => path.display().to_string(),
-            Bus::Shared(dsn) => dsn.clone(),
+            Bus::Shared { dsn, .. } => dsn.clone(),
         }
     }
 
     fn run(&self, args: &[&str]) -> Run {
-        let out = Command::new(bin())
-            .arg("--db")
-            .arg(self.location())
-            .args(args)
-            .output()
-            .unwrap();
+        let mut command = Command::new(bin());
+        command.arg("--db").arg(self.location()).args(args);
+        // A scope in the caller's shell would move the roster out from under the fixtures.
+        command.env_remove("MSGQ_SCOPE");
+        if let Bus::Shared { token, .. } = self {
+            command.env("MSGQ_TOKEN", token);
+        }
+        let out = command.output().unwrap();
         Run {
             code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),

@@ -13,6 +13,7 @@ import {
 	wantsReply,
 } from "../src/delivery.ts";
 import { opaqueBody, type MsgqRecord } from "../src/record.ts";
+import { refusal } from "../src/delivery.ts";
 
 const SELF = "session/api-worker";
 
@@ -242,7 +243,11 @@ test("a declared encoding makes a body uninterpretable", () => {
 	);
 	assert.equal(opaqueBody(record()), undefined);
 	// A malformed declaration never costs the reader a body it could have read.
-	assert.equal(opaqueBody(record({ meta: { enc: { alg: "age" } } })), undefined);
+	assert.equal(
+		opaqueBody(record({ meta: { enc: { alg: "age" } } })),
+		"unknown",
+		"an algorithm without a key id is still opaque",
+	);
 });
 
 test("presence and acknowledgement bodies are never uninterpretable", () => {
@@ -255,4 +260,17 @@ test("presence and acknowledgement bodies are never uninterpretable", () => {
 		});
 		assert.equal(opaqueBody(r), undefined, `${kind} must stay readable`);
 	}
+});
+
+test("a refusal carries all three consequences or none", () => {
+	const opaque = refusal(record({ meta: { enc: { alg: "age", kid: "acme-1" } } }));
+	assert.ok(opaque, "an encrypted body is refused");
+	assert.equal(opaque.kind, "opaque");
+	assert.equal(opaque.turn, false, "it starts no turn");
+	assert.equal(opaque.ack, false, "it is never acknowledged");
+	assert.match(opaque.reason, /kid=acme-1/);
+
+	// A readable record is refused by nothing at all, whatever its type.
+	assert.equal(refusal(record()), undefined);
+	assert.equal(refusal(record({ type: "event", event: { kind: "presence" } })), undefined);
 });

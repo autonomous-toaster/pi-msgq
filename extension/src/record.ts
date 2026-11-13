@@ -97,5 +97,6 @@ export function opaqueBody(record: MsgqRecord): string | undefined {
 	const meta = record.meta as { enc?: unknown } | undefined;
 	const enc = meta?.enc as { alg?: unknown; kid?: unknown } | undefined;
 	if (typeof enc?.alg !== "string") return undefined;
-	return typeof enc.kid === "string" ? enc.kid : undefined;
+	// An algorithm without a key id is still opaque: nothing here can read it.
+	return typeof enc.kid === "string" ? enc.kid : "unknown";
 }

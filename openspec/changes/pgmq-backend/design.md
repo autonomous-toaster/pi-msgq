@@ -216,6 +216,12 @@ behaviour, which is the intended break and is reported by `db info`.
 
 ## Open Questions
 
+- **Presence on the shared engine.** The local engine writes synchronously, so a session knows at
+  once whether its presence is registered. A server cannot be asked synchronously, and claiming
+  registration before the write settles would put the roster and the session in disagreement. The
+  shared bus therefore refuses a synchronous publish and reports presence as not registered, which
+  is honest but incomplete: the publish path needs an asynchronous form, and `Presence` with it.
+
 - The minimum pgmq version to accept. Deferrable: `db info` can report the installed version and the
   build's floor can be set once a first shared deployment exists.
 - Whether `msgq gc` should run on a timer inside the extension or be left to the operator (systemd

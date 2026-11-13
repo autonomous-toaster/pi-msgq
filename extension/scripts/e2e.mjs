@@ -40,8 +40,21 @@ function publish(address, message, ...extra) {
 	}).trim();
 }
 
+/** The bus is a server when the location says so; nothing else in this script cares which. */
+const SHARED = DB.includes("://");
+
 /** Publish straight to the engine, bypassing the CLI's record validation. */
 function publishRaw(dbPath, address, payload) {
+	if (SHARED) {
+		// A server cannot be opened as a file. The CLI is the smallest path to the same place, and
+		// this helper only exists to write records the CLI would refuse to validate.
+		const out = execFileSync(
+			CLI,
+			["--db", dbPath, "publish", address, "--json", JSON.stringify(payload)],
+			{ encoding: "utf8", env: { ...process.env, MSGQ_TOKEN: process.env.MSGQ_TOKEN } },
+		);
+		return Number(out.trim().split("#").pop());
+	}
 	const db = honker.open(dbPath, { watcherPollIntervalMs: 50 });
 	const offset = db.stream(address).publish(payload);
 	db.close();

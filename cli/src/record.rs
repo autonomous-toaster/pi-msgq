@@ -111,7 +111,13 @@ pub fn opaque_body(value: &Value) -> Option<String> {
     let enc = value.get("meta")?.get("enc")?;
     // A declaration without an algorithm is not a declaration.
     enc.get("alg").and_then(Value::as_str)?;
-    enc.get("kid").and_then(Value::as_str).map(str::to_string)
+    // An algorithm without a key id is still opaque: nothing here can read it.
+    Some(
+        enc.get("kid")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+    )
 }
 
 /// Whether the record's body belongs to the kind that may be opaque at all.
@@ -253,13 +259,14 @@ mod tests {
     }
 
     #[test]
-    fn a_declaration_without_a_key_identifier_is_not_opaque() {
-        // A malformed declaration never costs the reader a body it could have read.
+    fn a_declaration_without_a_key_identifier_is_still_opaque() {
         let value = json!({
             "v": 1, "type": "note", "from": "a", "to": "b", "message": "x",
             "meta": { "enc": { "alg": "age" } }
         });
-        assert_eq!(opaque_body(&value), None);
+        // The algorithm is the declaration. Without a key id nothing here can name the key, but
+        // the body is no more readable for it.
+        assert_eq!(opaque_body(&value).as_deref(), Some("unknown"));
     }
 
     #[test]

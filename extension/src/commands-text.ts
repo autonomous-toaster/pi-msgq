@@ -153,6 +153,9 @@ export interface IdentityFacts {
 	presence: "registered" | "lost" | "off";
 	trusted: string[];
 	card?: Card;
+	/** Whether this session can write, when the engine can refuse. A read-only session is not an
+	 * idle one and must not look like one. */
+	write?: string;
 }
 
 /** How presence reads in the identity report. */
@@ -174,6 +177,7 @@ export function formatIdentity(facts: IdentityFacts): string {
 		["presence", presenceText(facts.presence)],
 		["trust", facts.trusted.length > 0 ? facts.trusted.join(", ") : "(none set: every sender)"],
 	];
+	if (facts.write) rows.push(["write", facts.write]);
 	if (facts.card) {
 		for (const [label, key] of [
 			["project", "project"],

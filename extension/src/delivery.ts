@@ -2,7 +2,7 @@
 // turn-bearing records that arrive while the agent is running.
 
 import type { Policy } from "./config.ts";
-import { type MsgqRecord, recordBody } from "./record.ts";
+import { opaqueBody, type MsgqRecord, recordBody } from "./record.ts";
 
 /** What to do with a record at delivery time. */
 export type DeliveryPlan =
@@ -83,6 +83,26 @@ export class Coalescer {
 		this.pending = [];
 		return out;
 	}
+}
+
+/**
+ * Why a record must be refused before any policy sees it, if it must.
+ *
+ * The rule is deliberately structural: the three consequences travel together, so a caller cannot
+ * take one and leave the others. A refusal is reported, starts no turn, and is never acknowledged.
+ */
+export function refusal(
+	record: MsgqRecord,
+): { kind: "opaque"; kid: string; reason: string; ack: false; turn: false } | undefined {
+	const kid = opaqueBody(record);
+	if (kid === undefined) return undefined;
+	return {
+		kind: "opaque",
+		kid,
+		reason: `it is encrypted (kid=${kid})`,
+		ack: false,
+		turn: false,
+	};
 }
 
 /** Whether a record asks its recipient for an answer. */

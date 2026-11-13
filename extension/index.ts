@@ -61,6 +61,7 @@ import {
 	planDelivery,
 	type ReferencedRecord,
 	wantsReply,
+	refusal,
 } from "./src/delivery.ts";
 import { type CommandDeps, registerCommands } from "./src/commands.ts";
 import {
@@ -465,6 +466,15 @@ export default function (pi: ExtensionAPI) {
 		offset: number,
 		subscription: Subscription,
 	): void {
+		// An unreadable body is an error, not content. The refusal is checked before `type` is
+		// consulted, so no policy can turn it into a turn, and nothing claims it was received.
+		const refused = refusal(record);
+		if (refused) {
+			report(`msgq cannot read a record from ${record.from}: ${refused.reason}`, "error");
+			subscription.save(offset);
+			return;
+		}
+
 		// An acknowledgement is never itself acknowledged.
 		const phases = isAckRecord(record) ? undefined : parseAckRequest(record.meta);
 		const busy = context ? !context.isIdle() : false;
@@ -555,6 +565,12 @@ export default function (pi: ExtensionAPI) {
 				consumer,
 				(event) => onEvent(address, event, subscription),
 				(error) => disable(`bus subscription failed on ${address}: ${String(error)}`),
+				(dropped) =>
+					report(
+						`msgq is ${dropped} record(s) behind the retention window on ${address}; ` +
+							"continuing from the oldest retained record",
+						"warning",
+					),
 			);
 			return subscription;
 		});
@@ -597,7 +613,26 @@ export default function (pi: ExtensionAPI) {
 			presence: presenceConfigured ? (presenceHeld ? "registered" : "lost") : "off",
 			trusted,
 			card: currentCard,
+			write: writeState(),
 		};
+	}
+
+	/**
+	 * Whether this session can write, as far as it can tell.
+	 *
+	 * A refused write is not an idle session: the difference is exactly what an operator needs when
+	 * a session goes quiet, so it is reported by name rather than inferred from silence.
+	 */
+	function writeState(): string | undefined {
+		const failure = presence?.error;
+		if (failure === undefined) {
+			return presenceHeld ? "writable" : undefined;
+		}
+		const text = failure instanceof Error ? failure.message : String(failure);
+		if (/credential|scope|refus|permission|42501|28P01|28000/i.test(text)) {
+			return `read-only (${text})`;
+		}
+		return `write failed (${text})`;
 	}
 
 	async function handleCardAction(value: unknown): Promise<ReturnType<typeof toolText>> {
@@ -823,9 +858,13 @@ export default function (pi: ExtensionAPI) {
 		extraTopics = extra;
 		currentCwd = ctx.cwd;
 
-		// Bus.
+		// Bus. A connection string selects the shared engine; anything else is a file.
 		try {
-			bus = new HonkerBus(busPath);
+			if (busPath.includes("://")) {
+				bus = await PgBus.open(busPath, subscriptionAddresses(identity, extraTopics));
+			} else {
+				bus = new HonkerBus(busPath);
+			}
 			resubscribe();
 		} catch (error) {
 			disable(`cannot open ${busPath}: ${String(error)}`);

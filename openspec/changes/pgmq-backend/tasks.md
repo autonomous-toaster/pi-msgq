@@ -48,15 +48,15 @@
 
 ## 6. Extension on the shared engine
 
-- [ ] 6.1 Implement the extension's shared-engine bus (`readSince`, `saveOffset`, `subscribe`, wake, reconnect) against the same interface as the local bus. Verify `extension/test/` covers a subscribe-and-receive cycle against a local Postgres.
-- [ ] 6.2 Add gap handling to the extension consumer: report the dropped count once, resume at the oldest retained record, keep consuming. Verify a test where the cursor is behind a pruned prefix.
-- [ ] 6.3 Add the opaque-body rule to delivery: consult `meta.enc` before `type`, report an error, start no turn, and publish no `received` acknowledgement. Verify tests for each of the three consequences.
-- [ ] 6.4 Add the distinct degradation states: bus unopenable, credential rejected (read-only, reported), and unsupported record version. Verify `/peers me` distinguishes a read-only session from an idle one.
+- [x] 6.1 Implement the extension's shared-engine bus (`readSince`, `saveOffset`, `subscribe`, wake, reconnect) against the same interface as the local bus. Verify `extension/test/` covers a subscribe-and-receive cycle against a local Postgres.
+- [x] 6.2 Add gap handling to the extension consumer: report the dropped count once, resume at the oldest retained record, keep consuming. Verify a test where the cursor is behind a pruned prefix.
+- [x] 6.3 Add the opaque-body rule to delivery: consult `meta.enc` before `type`, report an error, start no turn, and publish no `received` acknowledgement. Verify tests for each of the three consequences.
+- [x] 6.4 Add the distinct degradation states: bus unopenable, credential rejected (read-only, reported), and unsupported record version. Verify `/peers me` distinguishes a read-only session from an idle one.
 
 ## 7. Integration
 
-- [ ] 7.1 Run both conformance suites (record shape and behaviour) against both engines in CI. Verify the CI job fails when one engine's behaviour is changed in isolation.
-- [ ] 7.2 Update `README.md` with the two-backend table and the migration note for `msgq await`, and confirm each documented command runs against the backend it names.
+- [x] 7.1 Run both conformance suites (record shape and behaviour) against both engines in CI. Verify the CI job fails when one engine's behaviour is changed in isolation.
+- [x] 7.2 Update `README.md` with the two-backend table and the migration note for `msgq await`, and confirm each documented command runs against the backend it names.
 - [ ] 7.3 Run an end-to-end scenario on the shared engine with two sessions, one `ask` and its reply, a `note`, and presence. Confirm both rosters and the acknowledgements. Verify with `extension/scripts/e2e.mjs` extended for the shared backend.
 
 ## Workflow follow-up

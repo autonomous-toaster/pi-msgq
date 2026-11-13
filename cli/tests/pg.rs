@@ -56,17 +56,22 @@ fn client(dsn: &str) -> Client {
     Client::connect(dsn, NoTls).expect("the named test database must accept connections")
 }
 
-/// How many queues the server holds, and how many rows the pgmq registry has.
-fn pgmq_footprint(client: &mut Client) -> (i64, i64) {
+/// Whether an address has a queue, and whether the engine's registry knows it. Counted per address
+/// rather than globally: other suites share this database, so a global count measures them too.
+fn footprint(client: &mut Client, address: &str) -> (i64, i64) {
+    let name = msgq::pg::queue_name(address);
     let queues: i64 = client
         .query_one(
-            "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'pgmq' AND tablename LIKE 'q\\_%'",
-            &[],
+            "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'pgmq' AND tablename = $1",
+            &[&format!("q_{name}")],
         )
         .unwrap()
         .get(0);
     let registry: i64 = client
-        .query_one("SELECT COUNT(*) FROM pgmq.meta", &[])
+        .query_one(
+            "SELECT COUNT(*) FROM pgmq.meta WHERE queue_name = $1",
+            &[&name],
+        )
         .unwrap()
         .get(0);
     (queues, registry)
@@ -79,7 +84,8 @@ fn a_fresh_connection_bootstraps_only_the_bus_tables() {
     };
     let _serialised = exclusive(&dsn);
     let mut raw = client(&dsn);
-    let before = pgmq_footprint(&mut raw);
+    let untouched = format!("group/untouched-{}", unique());
+    let before = footprint(&mut raw, &untouched);
 
     let (store, created) =
         Store::open_with(&Target::Shared(dsn.clone()), None).expect("the shared engine must open");
@@ -114,11 +120,12 @@ fn a_fresh_connection_bootstraps_only_the_bus_tables() {
     );
 
     // And nothing else: no queue was created and the engine's registry is untouched.
-    let after = pgmq_footprint(&mut raw);
+    let after = footprint(&mut raw, &untouched);
     assert_eq!(
         before, after,
         "a fresh connection creates no queue and adds no registry row"
     );
+    assert_eq!(after, (0, 0), "nothing was there to begin with");
 }
 
 #[test]
@@ -177,12 +184,12 @@ fn headers_of(raw: &mut Client, queue: &str, offset: i64) -> serde_json::Value {
     serde_json::from_str(&text.expect("a stored record carries headers")).unwrap()
 }
 
-/// The canonical spelling the bus stores: lowercase, no surrounding space or slash, no doubled
-/// slash. A test that looks an address up has to use it.
+/// The canonical spelling the bus stores: no surrounding space or slash, no doubled slash, and
+/// case preserved. A test that looks an address up has to use it.
 fn canonical(address: &str) -> String {
     let trimmed = address
         .trim_matches(|c: char| c == ' ' || c == '/')
-        .to_lowercase();
+        .to_string();
     let mut out = String::new();
     let mut after_slash = false;
     for c in trimmed.chars() {
@@ -229,29 +236,32 @@ fn the_address_survives_a_long_path_and_a_case_pair() {
     assert!(queue.len() <= 47, "{queue} exceeds the engine's limit");
     assert_eq!(
         headers["msgq"]["address"],
-        json!(long.to_lowercase()),
-        "the record carries the canonical address"
+        json!(long),
+        "the record carries the address, with its spelling intact"
     );
 
-    // Two spellings of one address are one address: the queue is shared and the registry holds the
-    // canonical form, so a scope cannot be escaped by capitalising it.
+    // Spelling is part of an address, exactly as it is in the CLI: the shared engine does not
+    // quietly lowercase a name the local engine keeps.
     let upper = format!("session/Api{unique}");
     let lower = format!("session/api{unique}");
     let (upper_queue, upper_headers) = publish_and_stamp(&dsn, &upper);
     let (lower_queue, lower_headers) = publish_and_stamp(&dsn, &lower);
-    assert_eq!(upper_queue, lower_queue, "one address, one queue");
-    assert_eq!(upper_headers["msgq"]["address"], json!(lower));
+    assert_ne!(
+        upper_queue, lower_queue,
+        "a case-differing pair stays distinct"
+    );
+    assert_eq!(upper_headers["msgq"]["address"], json!(upper));
     assert_eq!(lower_headers["msgq"]["address"], json!(lower));
 
     let mut raw = client(&dsn);
     let rows: i64 = raw
         .query_one(
-            "SELECT COUNT(*) FROM msgq.address WHERE address = $1",
-            &[&lower],
+            "SELECT COUNT(*) FROM msgq.address WHERE address = ANY($1)",
+            &[&vec![upper, lower]],
         )
         .unwrap()
         .get(0);
-    assert_eq!(rows, 1, "the registry keeps the canonical spelling");
+    assert_eq!(rows, 2, "each spelling is its own address");
 }
 
 #[test]
@@ -769,10 +779,11 @@ fn a_write_outside_the_scopes_is_refused_and_changes_nothing() {
     let inside = format!("group/red/sub-{}", unique());
     let outside = format!("group/redder-{}", unique());
 
-    // A differently-spelled form of an address inside the scope is still inside it.
+    // A differently-spelled form of an address inside the scope is still inside it: the bus
+    // compares the canonical spelling.
     store
         .publish(
-            &inside.to_uppercase(),
+            &format!(" /{inside}/ "),
             &json!({"v": 1, "type": "note", "from": "cli/lier@h", "to": inside,
                     "message": "hi"}),
         )

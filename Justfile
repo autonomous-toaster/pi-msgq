@@ -68,8 +68,21 @@ pg-url:
 pg-down:
     podman stop {{PG_NAME}}
 
+# The same behavioural fixtures against the shared engine. Two engines, one product: a change that
+# only one of them honours is exactly what this catches.
+behaviour-shared:
+    #!/usr/bin/env bash
+    export MSGQ_TEST_DATABASE_URI="$(just pg-url)"
+    export MSGQ_BEHAVIOUR_ENGINE=shared
+    if output=$(cd {{crate}} && cargo test --test behaviour 2>&1); then
+        echo "✓ behavioural fixtures passed on both engines"
+    else
+        printf '%s\n' "$output"
+        exit 1
+    fi
+
 # Run all checks (mirrors what CI will run)
-ci: veriplan check fmt lint lint-suppressions check-file-sizes check-test-names machete rust-test-then-crap extension-test
+ci: veriplan check fmt lint lint-suppressions check-file-sizes check-test-names machete rust-test-then-crap behaviour-shared extension-test
 # make explicit that we run tests then crap (crap reuses test's lcov output)
 rust-test-then-crap: test crap
 
@@ -273,6 +286,15 @@ check-test-names:
 # The extension's unit and conformance suites.
 extension-test:
     #!/usr/bin/env bash
+    # `pg` is an optional dependency: a session on a local file never loads it, but the shared
+    # engine's tests do, so install when it is missing.
+    if [ ! -d {{ext}}/node_modules ]; then
+        (cd {{ext}} && npm install --no-audit --no-fund >/dev/null) || {
+            echo "the extension's optional dependencies could not be installed" >&2
+            exit 1
+        }
+    fi
+    export MSGQ_TEST_DATABASE_URI="$(just pg-url)"
     if output=$(cd {{ext}} && node --test test/ 2>&1); then
         echo "✓ extension tests passed"
     else
