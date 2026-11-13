@@ -92,6 +92,12 @@ export interface Bus {
 		onGap?: (dropped: number) => void,
 	): Subscription;
 	readOne(address: string, offset: number): BusEvent | undefined;
+	/** Write a record. A file answers at once; a server answers when the write has landed, so a
+	 * caller that must know whether it landed awaits the result. */
+	publish(address: string, record: unknown): number | void | Promise<void>;
+	/** Fold the write-ahead log back, where the engine has one. */
+	truncateWal(): void;
+	close(): void | Promise<void>;
 }
 
 /** The bus over the local engine: one SQLite file, read through the native binding. */

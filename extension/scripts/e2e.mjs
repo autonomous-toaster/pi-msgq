@@ -218,6 +218,12 @@ function split(entries) {
 	};
 }
 
+/** Every UI request the session made, when E2E_DEBUG is set: the extension's own reports. */
+function debugUi(ui) {
+	if (!process.env.E2E_DEBUG) return;
+	for (const entry of ui) console.error("ui:", JSON.stringify(entry));
+}
+
 function report(label, ok, detail) {
 	console.log(`${detail} ${ok ? "RESULT: PASS" : "RESULT: FAIL"} ${label}`);
 	process.exit(ok ? 0 : 1);
@@ -236,6 +242,7 @@ async function scenarioDefaultNote() {
 	const { custom, assistants } = split(data.entries);
 	shutdown(child);
 
+	debugUi(ui);
 	const notified = ui.some((r) => JSON.stringify(r).includes("msgq"));
 	const ok =
 		custom.length === 1 &&

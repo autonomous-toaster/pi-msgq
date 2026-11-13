@@ -23,6 +23,7 @@ import {
 	type BusEvent,
 	type Subscription,
 } from "./src/consumer.ts";
+import { PgBus } from "./src/pg-bus.ts";
 import {
 	ConfigError,
 	consumerId,
@@ -260,7 +261,7 @@ export default function (pi: ExtensionAPI) {
 			const next = await deriveCard(cwd);
 			if (!force && sameCard(next, currentCard)) return;
 			currentCard = next;
-			presenceHeld = presence.setCard(next);
+			presenceHeld = await presence.setCard(next);
 			if (!presenceHeld) {
 				report(`msgq presence could not publish its locator card: ${presenceWhy()}`, "warning");
 			}
@@ -305,10 +306,12 @@ export default function (pi: ExtensionAPI) {
 	/** Move presence to a new state, reporting a lost lease without failing. */
 	function setPresenceState(state: PresenceState): void {
 		if (!presence) return;
-		presenceHeld = presence.setState(state);
-		if (!presenceHeld) {
-			report(`msgq presence is not registered (${state}): ${presenceWhy()}`, "warning");
-		}
+		void presence.setState(state).then((held) => {
+			presenceHeld = held;
+			if (!held) {
+				report(`msgq presence is not registered (${state}): ${presenceWhy()}`, "warning");
+			}
+		});
 	}
 
 	/**
@@ -342,7 +345,9 @@ export default function (pi: ExtensionAPI) {
 			clearInterval(renewTimer);
 			renewTimer = undefined;
 		}
-		presence?.stop();
+		// A retraction is a write: it is started here and settles on its own, because teardown is
+		// not a place to wait for the network.
+		void presence?.stop();
 		presence = undefined;
 		presenceHeld = false;
 		derivedCard = {};
@@ -365,7 +370,7 @@ export default function (pi: ExtensionAPI) {
 		// Before the handle goes: this session's readers are closed, so the log can be folded
 		// back and emptied instead of sitting at its high-water mark for whoever is left.
 		bus?.truncateWal();
-		bus?.close();
+		void bus?.close();
 		bus = null;
 		context = undefined;
 		addresses = [];
@@ -884,7 +889,7 @@ export default function (pi: ExtensionAPI) {
 				card: currentCard,
 				scope: process.env.MSGQ_SCOPE?.trim() || undefined,
 			});
-			presenceHeld = presence.start();
+			presenceHeld = await presence.start();
 			if (!presenceHeld) {
 				report(`msgq presence is not registered (${presenceWhy()})`, "warning");
 			}
@@ -898,14 +903,16 @@ export default function (pi: ExtensionAPI) {
 				const held = presenceHeld;
 				// A presence write is best-effort and cannot throw: a full disk or a closed
 				// handle must not take the session down with it.
-				presenceHeld = presence.renew();
-				// Only the change is news. Reporting every failure would repeat the same line
-				// each TTL, and a bus that came back would go unmentioned.
-				if (held && !presenceHeld) {
-					report(`msgq presence was lost: ${presenceWhy()}`, "warning");
-				} else if (!held && presenceHeld) {
-					report("msgq presence is registered", "info");
-				}
+				void presence.renew().then((nowHeld) => {
+					presenceHeld = nowHeld;
+					// Only the change is news. Reporting every failure would repeat the same line
+					// each TTL, and a bus that came back would go unmentioned.
+					if (held && !nowHeld) {
+						report(`msgq presence was lost: ${presenceWhy()}`, "warning");
+					} else if (!held && nowHeld) {
+						report("msgq presence is registered", "info");
+					}
+				});
 			}, renewMs);
 			renewTimer.unref?.();
 		}
@@ -1033,7 +1040,7 @@ export default function (pi: ExtensionAPI) {
 		consumer = consumerId(renamed);
 		resubscribe();
 		if (presence) {
-			presenceHeld = presence.setOwner({ address: self, alias: renamed.alias });
+			presenceHeld = await presence.setOwner({ address: self, alias: renamed.alias });
 			if (!presenceHeld) {
 				report(`msgq presence could not re-register after a rename: ${presenceWhy()}`, "warning");
 			}

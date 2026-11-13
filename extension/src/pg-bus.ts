@@ -7,6 +7,8 @@
 // `pg` is an optional dependency: a session on a local file never loads it, and a session pointed
 // at a server that cannot load it reports that rather than pretending to be connected.
 
+import { readFileSync } from "node:fs";
+
 import type { Bus, BusEvent, Subscription } from "./consumer.ts";
 
 /** Records fetched per read. */
@@ -61,6 +63,20 @@ export function pgSettings(
 	return settings;
 }
 
+/** The credential this session writes with: the environment, then the identity file's directory. */
+function tokenFrom(env: Record<string, string | undefined>): string | undefined {
+	const direct = env.MSGQ_TOKEN?.trim();
+	if (direct) return direct;
+	try {
+		const home = env.HOME;
+		if (!home) return undefined;
+		const token = readFileSync(`${home}/.config/msgq/token`, "utf8").trim();
+		return token || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Load the optional driver, or say why it is unavailable. */
 async function loadDriver(): Promise<PgModule> {
 	try {
@@ -80,12 +96,14 @@ function quote(identifier: string): string {
 /** The bus over a PostgreSQL database with the pgmq schema installed. */
 export class PgBus implements Bus {
 	private readonly client: PgClient;
+	private readonly token: string | undefined;
 	private readonly queues = new Map<string, string>();
 	private closed = false;
 
-	private constructor(client: PgClient, queues: Map<string, string>) {
+	private constructor(client: PgClient, queues: Map<string, string>, token?: string) {
 		this.client = client;
 		this.queues = queues;
+		this.token = token;
 	}
 
 	/** Connect, and resolve the queue name of every address this session will touch. */
@@ -104,19 +122,24 @@ export class PgBus implements Bus {
 			]);
 			queues.set(address, String(result.rows[0]?.queue_name ?? ""));
 		}
-		return new PgBus(client, queues);
+		return new PgBus(client, queues, tokenFrom(env));
 	}
 
 	/**
-	 * The local engine writes synchronously, so presence can decide at once whether it is
-	 * registered. A server cannot be asked synchronously, and claiming registration before the
-	 * write settles would be a false claim — the roster and the session would disagree. Publishing
-	 * on the shared engine needs an asynchronous presence path, which this bus does not have yet.
+	 * Write through the authorizing function, so the server stamps the sender and checks the
+	 * address against this identity's scopes. A refusal rejects, which the caller reports.
 	 */
-	publish(): never {
-		throw new Error(
-			"the shared engine cannot publish synchronously: presence is not registered from this session",
-		);
+	async publish(address: string, record: unknown): Promise<void> {
+		if (!this.token) {
+			throw new Error(
+				"the shared engine needs a credential to write; set MSGQ_TOKEN or write ~/.config/msgq/token",
+			);
+		}
+		await this.client.query("SELECT msgq.publish_as($1, $2, $3::text::jsonb)", [
+			this.token,
+			address,
+			JSON.stringify(record),
+		]);
 	}
 
 	/** Nothing to fold back: the server's own autovacuum owns this. */

@@ -131,53 +131,60 @@ export class Presence {
 		};
 	}
 
-	/** Register presence. Returns false when the record could not be published. */
-	start(): boolean {
+	/**
+	 * Register presence. Resolves false when the record could not be published.
+	 *
+	 * Awaited rather than assumed: on a server the write lands later, and a session that claimed
+	 * registration before then would disagree with the roster.
+	 */
+	async start(): Promise<boolean> {
 		if (this.closed) return false;
-		return this.publish(this.state);
+		return await this.publish(this.state);
 	}
 
 	/** Renew: the same record again, newer, so the lifetime restarts. */
-	renew(): boolean {
+	async renew(): Promise<boolean> {
 		if (this.closed) return false;
-		return this.publish(this.state);
+		return await this.publish(this.state);
 	}
 
 	/** Change state, and say so at once rather than waiting for the next renewal. */
-	setState(state: PresenceState): boolean {
+	async setState(state: PresenceState): Promise<boolean> {
 		if (this.closed) return false;
 		if (state === this.state) return this.published;
 		this.state = state;
-		return this.publish(state);
+		return await this.publish(state);
 	}
 
 	/** Replace the locator card, and say so at once. */
-	setCard(card: Card | undefined): boolean {
+	async setCard(card: Card | undefined): Promise<boolean> {
 		if (this.closed) return false;
 		if (sameCard(card, this.card)) return this.published;
 		this.card = card;
-		return this.publish(this.state);
+		return await this.publish(this.state);
 	}
 
 	/** Re-register under a new address (a rename), or with a new alias. */
-	setOwner(next: { address: string; alias?: string }): boolean {
+	async setOwner(next: { address: string; alias?: string }): Promise<boolean> {
 		if (this.closed) return false;
 		if (next.address === this.address && next.alias === this.alias) return this.published;
 		this.address = next.address;
 		this.alias = next.alias;
-		return this.publish(this.state);
+		return await this.publish(this.state);
 	}
 
 	/** Retract presence. Idempotent, and never fatal. */
-	stop(): void {
+	async stop(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
-		this.publish("gone");
+		await this.publish("gone");
 	}
 
-	private publish(state: PresenceRecordState): boolean {
+	private async publish(state: PresenceRecordState): Promise<boolean> {
 		try {
-			this.bus.publish(this.address_to_publish_to, this.record(state));
+			// A file answers at once and a server answers later; awaiting both is the only way to
+			// report the same thing about either.
+			await this.bus.publish(this.address_to_publish_to, this.record(state));
 		} catch (error) {
 			// A bus write fails for reasons that have nothing to do with this presence: a full disk, a
 			// handle closed underneath us. The reason is kept for the caller, and nothing is claimed.

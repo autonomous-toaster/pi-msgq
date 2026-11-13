@@ -979,3 +979,60 @@ fn the_reported_credential_state_distinguishes_the_four_cases() {
         "no false assurance: {described}"
     );
 }
+
+#[test]
+fn a_sender_may_speak_as_itself_and_no_further() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let identity = format!("session/owner-{}", unique());
+    let token: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['session', 'group'])",
+            &[&identity.as_str()],
+        )
+        .unwrap()
+        .get(0);
+    let store = Store::open_with(&Target::Shared(dsn.clone()), Some(token))
+        .expect("open")
+        .0;
+    let address = format!("group/sender-{}", unique());
+    let queue = {
+        store
+            .publish(
+                &address,
+                &json!({"v": 1, "type": "note", "from": identity, "to": address,
+                        "message": "first"}),
+            )
+            .unwrap();
+        queue_for(&mut raw, &address).expect("registered")
+    };
+
+    let own = format!("session/worker-{}", unique());
+    for (claimed, expected) in [
+        // Inside the credential's scopes: one credential, several sessions.
+        (own.clone(), own.clone()),
+        // Another user's namespace: replaced by the identity.
+        ("cwd/elsewhere".to_string(), identity.clone()),
+        // Not an address at all: replaced by the identity.
+        ("not an address".to_string(), identity.clone()),
+    ] {
+        let offset = store
+            .publish(
+                &address,
+                &json!({"v": 1, "type": "note", "from": claimed, "to": address,
+                        "message": "hi"}),
+            )
+            .unwrap();
+        let stored: String = raw
+            .query_one(
+                &format!("SELECT message->>'from' FROM pgmq.\"q_{queue}\" WHERE msg_id = $1"),
+                &[&offset],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(stored, expected, "the record claimed {claimed}");
+    }
+}

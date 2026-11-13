@@ -217,10 +217,14 @@ behaviour, which is the intended break and is reported by `db info`.
 ## Open Questions
 
 - **Presence on the shared engine.** The local engine writes synchronously, so a session knows at
-  once whether its presence is registered. A server cannot be asked synchronously, and claiming
-  registration before the write settles would put the roster and the session in disagreement. The
-  shared bus therefore refuses a synchronous publish and reports presence as not registered, which
-  is honest but incomplete: the publish path needs an asynchronous form, and `Presence` with it.
+  once whether its presence is registered. A server cannot be asked synchronously, so the presence
+  path (and `Bus.publish` with it) resolves a promise, and nothing claims registration before the
+  write lands.
+
+  One consequence is worth stating: a credential belongs to a *user*, while presence belongs to a
+  *session*. The authorizing function therefore keeps a claimed `from` that lies inside the writer's
+  own scopes, so one credential can serve several sessions and each appears in the roster as
+  itself — and replaces any claim outside them, or any claim that is not an address at all.
 
 - The minimum pgmq version to accept. Deferrable: `db info` can report the installed version and the
   build's floor can be set once a first shared deployment exists.

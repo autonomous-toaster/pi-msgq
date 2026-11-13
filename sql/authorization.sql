@@ -25,6 +25,12 @@ CREATE TABLE IF NOT EXISTS msgq.identity (
 COMMENT ON TABLE msgq.identity IS
     'One row per writer: the sha256 of a credential, the addresses it may write, and an optional expiry.';
 
+-- Recreating the write path is how a schema change lands: it is code, not data, and a CREATE OR
+-- REPLACE cannot rename an argument. The grants are re-applied at the bottom of this file.
+DROP FUNCTION IF EXISTS msgq.register_identity(TEXT, TEXT[], TIMESTAMPTZ);
+DROP FUNCTION IF EXISTS msgq.publish_as(TEXT, TEXT, JSONB);
+DROP FUNCTION IF EXISTS msgq.identity_of(TEXT);
+
 -- The canonical spelling of an address: whitespace and stray slashes removed, runs of slashes
 -- collapsed, case preserved. Case is part of the address, as it is in the CLI: the shared engine
 -- does not quietly lowercase a name the local engine keeps.
@@ -128,6 +134,27 @@ BEGIN
 END;
 $$;
 
+-- Who the stored record says wrote it.
+--
+-- The identity is the default. A record may name an address inside the identity's own scopes,
+-- which is how one credential serves several sessions: each process speaks as itself, and none of
+-- them can speak as somebody else.
+CREATE OR REPLACE FUNCTION msgq.sender_of(record JSONB, ident msgq.identity)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    claimed TEXT := msgq.canonical_address(coalesce(record ->> 'from', ''));
+BEGIN
+    IF claimed ~ '^(session|cwd|group|cli)/[^/]' AND msgq.in_scope(claimed, ident.scopes) THEN
+        RETURN claimed;
+    END IF;
+    RETURN ident.name;
+END;
+$$;
+
 -- The only write path for a runtime role.
 CREATE OR REPLACE FUNCTION msgq.publish_as(token TEXT, address TEXT, record JSONB)
 RETURNS BIGINT
@@ -139,6 +166,7 @@ DECLARE
     ident msgq.identity := msgq.identity_of(token);
     addr TEXT := msgq.canonical_address(address);
     payload JSONB := record;
+    sender TEXT;
     name TEXT;
     new_offset BIGINT;
 BEGIN
@@ -147,8 +175,10 @@ BEGIN
             USING ERRCODE = '42501';
     END IF;
 
-    -- The sender is the identity, whatever the record claimed: a writer cannot speak as another.
-    payload := jsonb_set(payload, '{from}', to_jsonb(ident.name), true);
+    -- A writer may speak as any address it is scoped for — a session per process, under one
+    -- credential — but never as another user's, and never as something that is not an address.
+    sender := msgq.sender_of(payload, ident);
+    payload := jsonb_set(payload, '{from}', to_jsonb(sender), true);
     payload := jsonb_set(payload, '{to}', to_jsonb(addr), true);
     -- A credential has no business in a record, and neither has anything that resembles one.
     payload := payload - 'token' - 'credential' - 'secret';
@@ -170,7 +200,7 @@ $$;
 
 -- Mint an identity and return the credential once. Operators run this; the bus never does.
 CREATE OR REPLACE FUNCTION msgq.register_identity(
-    name TEXT,
+    identity_name TEXT,
     scopes TEXT[],
     expires_at TIMESTAMPTZ DEFAULT NULL
 )
@@ -181,9 +211,16 @@ SET search_path = pg_catalog, pg_temp, public, extensions, msgq
 AS $$
 DECLARE
     token TEXT := encode(gen_random_bytes(32), 'hex');
+    canonical TEXT := msgq.canonical_address(identity_name);
 BEGIN
+    -- The identity is the sender the bus stamps, so it has to be an address a peer can answer:
+    -- one of the reserved schemes and a non-empty name.
+    IF canonical !~ '^(session|cwd|group|cli)/[^/]' THEN
+        RAISE EXCEPTION 'msgq: an identity must be an address such as session/planner, not %',
+            identity_name USING ERRCODE = '22023';
+    END IF;
     INSERT INTO msgq.identity (name, digest, scopes, expires_at)
-    VALUES (msgq.canonical_address(name), msgq.token_digest(token), scopes, expires_at)
+    VALUES (canonical, msgq.token_digest(token), scopes, expires_at)
     ON CONFLICT ON CONSTRAINT identity_pkey DO UPDATE
         SET digest = EXCLUDED.digest,
             scopes = EXCLUDED.scopes,
@@ -209,8 +246,7 @@ BEGIN
     EXECUTE format(
         'GRANT SELECT ON msgq.address, msgq.cursor, msgq.retention, msgq.meta TO %I', role_name);
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON msgq.cursor, msgq.retention TO %I', role_name);
-    EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION msgq.publish_as(TEXT, TEXT, JSONB) TO %I', role_name);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION msgq.publish_as(TEXT, TEXT, JSONB) TO %I', role_name);
     EXECUTE format('GRANT EXECUTE ON FUNCTION msgq.identity_of(TEXT) TO %I', role_name);
     EXECUTE format('GRANT EXECUTE ON FUNCTION msgq.ensure_queue(TEXT) TO %I', role_name);
 

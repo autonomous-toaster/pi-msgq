@@ -57,7 +57,7 @@
 
 - [x] 7.1 Run both conformance suites (record shape and behaviour) against both engines in CI. Verify the CI job fails when one engine's behaviour is changed in isolation.
 - [x] 7.2 Update `README.md` with the two-backend table and the migration note for `msgq await`, and confirm each documented command runs against the backend it names.
-- [ ] 7.3 Run an end-to-end scenario on the shared engine with two sessions, one `ask` and its reply, a `note`, and presence. Confirm both rosters and the acknowledgements. Verify with `extension/scripts/e2e.mjs` extended for the shared backend.
+- [x] 7.3 Run an end-to-end scenario on the shared engine with two sessions, one `ask` and its reply, a `note`, and presence. Confirm both rosters and the acknowledgements. Verify with `extension/scripts/e2e.mjs` extended for the shared backend.
 
 ## Workflow follow-up
 

@@ -116,7 +116,7 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
         &bob_address,
         "the suite is green",
         "--from",
-        "session/someone-else",
+        "cwd/somewhere-else",
     ]);
     let read = bob.ok(&["read", &bob_address, "--from-start"]);
     assert!(read.contains("the suite is green"), "{read}");
@@ -126,8 +126,8 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
         "the sender is the identity, not the claim: {stored}"
     );
     assert!(
-        !stored.contains("session/someone-else"),
-        "the claimed sender is gone: {stored}"
+        !stored.contains("cwd/somewhere-else"),
+        "a claim outside the identity's scopes is gone: {stored}"
     );
 
     // An ask, and an acknowledgement written by the other session while the ask waits. The record
@@ -140,6 +140,8 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
             "which tests?",
             "--type",
             "prompt",
+            "--from",
+            &alice_address,
             "--print-id",
         ])
         .trim()
