@@ -334,6 +334,10 @@ arrives, or when its wait window closes. A reply SHALL be printed as the command
 other two outcomes SHALL be reported as such. None of the three SHALL be an error. The wait window
 SHALL default to a finite value and MAY be disabled.
 
+With `--no-wait` the command SHALL publish the same record and return as soon as it is published,
+printing its offset, without waiting for any reply. The published record SHALL be identical to the
+one a blocking ask publishes, so a client cannot tell the two apart on the wire.
+
 #### Scenario: Reply arrives
 - **WHEN** the recipient replies to the message
 - **THEN** the reply is printed and the command succeeds
@@ -349,6 +353,14 @@ SHALL default to a finite value and MAY be disabled.
 #### Scenario: Wait window disabled
 - **WHEN** the wait window is disabled
 - **THEN** the command waits until the recipient replies or finishes
+
+#### Scenario: Asking without waiting
+- **WHEN** `--no-wait` is provided
+- **THEN** the command prints the offset of the published question and returns before any reply exists
+
+#### Scenario: One question, one shape
+- **WHEN** the same question is asked with and without `--no-wait`
+- **THEN** the two records differ only in the offset they are stored at
 
 ### Requirement: Record identity
 Every record SHALL have an id of the form `<address>#<offset>`: the canonical address whose stream
