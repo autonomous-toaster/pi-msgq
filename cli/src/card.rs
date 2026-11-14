@@ -36,7 +36,13 @@ impl PathMode {
 ///
 /// The full path stays in `summary`: a picker needs to tell candidates apart, not to locate them.
 pub fn summary_compact(card: &Value) -> String {
-    // One line, one pair of columns: a tab or a newline inside a name would break both.
+    // One row a picker can show beside an address: a long project or branch is shortened in the
+    // middle, where the identifying characters are at both ends ("feature/…-indeed").
+    const PROJECT: usize = 14;
+    const BRANCH: usize = 14;
+    const DIRECTORY: usize = 10;
+
+    // A tab or a newline inside a name would break the two columns.
     let field = |key: &str| -> Option<String> {
         card.get(key).and_then(Value::as_str).and_then(|value| {
             let cleaned = value.trim().replace(['\t', '\n'], " ");
@@ -46,16 +52,21 @@ pub fn summary_compact(card: &Value) -> String {
     };
 
     let head = match (field("project"), field("branch")) {
-        (Some(project), Some(branch)) => Some(format!("{project}/{branch}")),
-        (Some(project), None) => Some(project),
-        (None, Some(branch)) => Some(branch),
+        (Some(project), Some(branch)) => Some(format!(
+            "{}/{}",
+            clip(&project, PROJECT),
+            clip(&branch, BRANCH)
+        )),
+        (Some(project), None) => Some(clip(&project, PROJECT)),
+        (None, Some(branch)) => Some(clip(&branch, BRANCH)),
         (None, None) => None,
     };
     let tail = field("path")
         .map(|path| path.trim_end_matches('/').to_string())
         .filter(|path| !path.is_empty() && path != ".")
         .and_then(|path| path.rsplit('/').next().map(str::to_string))
-        .filter(|name| !name.is_empty());
+        .filter(|name| !name.is_empty())
+        .map(|name| clip(&name, DIRECTORY));
 
     match (head, tail) {
         (Some(head), Some(tail)) => format!("{head}  {tail}"),
@@ -63,6 +74,20 @@ pub fn summary_compact(card: &Value) -> String {
         (None, Some(tail)) => tail,
         (None, None) => "-".to_string(),
     }
+}
+
+/// A name held to `budget` characters, shortened in the middle so both ends stay readable.
+fn clip(value: &str, budget: usize) -> String {
+    let characters: Vec<char> = value.chars().collect();
+    if characters.len() <= budget || budget < 5 {
+        return value.to_string();
+    }
+    let head = budget / 2;
+    let tail = budget - head - 1;
+    let mut clipped: String = characters[..head].iter().collect();
+    clipped.push('…');
+    clipped.extend(characters[characters.len() - tail..].iter());
+    clipped
 }
 
 /// Derive the locator card for `cwd`.
@@ -488,6 +513,25 @@ mod tests {
         );
         assert_eq!(card(serde_json::json!({"path": "."})), "-");
         assert_eq!(card(serde_json::json!({})), "-");
+        // A long name is shortened in the middle, where the identifying characters are.
+        let long = card(serde_json::json!({
+            "project": "a-very-long-repository-name-for-msgq",
+            "branch": "feature/a-very-long-branch-name-indeed",
+            "path": "/src/a-very-long-repository-name-for-msgq"
+        }));
+        // Both ends survive: the project's prefix and the branch's suffix are what identify it.
+        assert!(long.starts_with("a-very-"), "{long}");
+        assert!(long.contains("…indeed"), "{long}");
+        assert!(
+            long.chars().count() <= 41,
+            "a bounded description: {long:?}"
+        );
+        assert_eq!(
+            card(serde_json::json!({"project": "short", "branch": "main", "path": "/s/short"})),
+            "short/main  short",
+            "a name inside its budget keeps every character"
+        );
+
         // A tab in a name would break a two-column listing, so it is replaced by a space.
         let tabbed = card(serde_json::json!({"project": "a\tb", "path": "/c"}));
         assert!(

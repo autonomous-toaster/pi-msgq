@@ -18,6 +18,20 @@ T2.3 ALWAYS, the compact description SHALL contain no separator inside either co
 - **WHEN** a caller cuts the first column of a card form
 - **THEN** the output SHALL hold one address per line, whatever the second column holds
 
+### Requirement: A card description is bounded
+
+T2.5 ALWAYS, the compact description SHALL fit a bounded width whatever the length of a name.
+T2.5 ALWAYS, a shortened name SHALL keep both ends and lose the middle.
+T2.5 ALWAYS, the address SHALL stand first in the row. T4.1, T4.2
+
+#### Scenario: A long repository name
+- **WHEN** a card names a project and a branch longer than the budget
+- **THEN** the description SHALL be shortened in the middle and SHALL stay within the budget
+
+#### Scenario: A narrow terminal keeps the address
+- **WHEN** a picker shows the card form in a terminal narrower than the row
+- **THEN** the truncated part SHALL be the description, not the address
+
 ### Requirement: A card form falls back rather than varying
 
 T2.4 IF an address has no live participant, THEN the card form SHALL print `-` in the second column.

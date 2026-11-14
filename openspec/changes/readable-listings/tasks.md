@@ -15,3 +15,8 @@
 
 - [x] 3.1 Document both recipes in README — `topics --card | fzf --delimiter='\t' --with-nth=2.. | cut -f1` and the `sessions` equivalent — and state that the first column is what is selected while the second is what is shown.
 - [x] 3.2 Verify the documented recipes run as written against a live bus on both engines.
+
+## 4. A row that fits
+
+- [x] 4.1 Clip each part of the description to its budget with the middle replaced by `…`. Verify a long project, a long branch and a long directory each stay inside the budget. Verify a short name keeps every character.
+- [x] 4.2 Verify in a terminal narrower than the row that the address stays visible. Verify that the description is what truncates. Record the recipe in README without `--with-nth`.

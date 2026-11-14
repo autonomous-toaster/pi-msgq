@@ -409,15 +409,17 @@ columns, the address first and a short description second (`fzf` shows the secon
 first).
 
 ```bash
-msgq sessions --card | fzf --delimiter=$'\t' --with-nth=2,1 | cut -f1   # who to message
-msgq topics --card   | fzf --delimiter=$'\t' --with-nth=2,1 | cut -f1   # which stream to read
+msgq sessions --card | fzf | cut -f1   # who to message
+msgq topics --card   | fzf | cut -f1   # which stream to read
 ```
 
-`--with-nth=2,1` shows the description first and keeps the address beside it — and, because
-`--with-nth` reorders what `fzf` matches as well, you can type either `standup` or `pi-msgq/main` to
-narrow the list. `cut -f1` still selects the address, because `fzf` prints the line unchanged.
+The address comes first, so it stays visible when a narrow terminal truncates the right edge, and
+`cut -f1` takes it from the line `fzf` prints. Type either half to narrow the list: both columns are
+matched.
 
-The description is `project/branch  directory` — never the full path, so a candidate fits one row.
+The description is `project/branch  directory`, never the full path, and each part is clipped to a
+budget (`14/14`, then `10`) with the middle replaced by `…` — `gitlab-nc…estrator/63-orches…-run-api`
+— so a long repository or branch name cannot crowd out the address beside it.
 `msgq sessions --wide` still prints the whole locator when you want to know where a session really is,
 and `-` stands in the second column for an address no live participant advertises (in this scope).
 
