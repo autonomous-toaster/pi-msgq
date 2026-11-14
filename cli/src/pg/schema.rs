@@ -8,6 +8,11 @@ use crate::error::Error;
 /// granted it without the bus's own code being in the trust boundary.
 const AUTHORIZATION: &str = include_str!("../../../sql/authorization.sql");
 
+/// The schema this build installs. Bump when `BOOTSTRAP` or the authorizing SQL changes: a bus whose
+/// `msgq.meta` records this value is left alone, which is what keeps a command from rewriting eighteen
+/// function bodies and 30 kB of WAL every time it runs.
+pub const SCHEMA_VERSION: i32 = 2;
+
 /// Everything the bus adds to a database. A fresh connection runs exactly this and touches no
 /// pgmq table: creating a queue is a decision made per address, not at connect time.
 pub const BOOTSTRAP: &str = "CREATE SCHEMA IF NOT EXISTS msgq;
@@ -29,6 +34,13 @@ pub const BOOTSTRAP: &str = "CREATE SCHEMA IF NOT EXISTS msgq;
                      last_msg_id BIGINT NOT NULL,
                      PRIMARY KEY (consumer, address)
                  );
+                 CREATE TABLE IF NOT EXISTS msgq.identity (
+                     name TEXT PRIMARY KEY,
+                     digest BYTEA NOT NULL UNIQUE,
+                     scopes TEXT[] NOT NULL,
+                     expires_at TIMESTAMPTZ,
+                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                 );
                  CREATE TABLE IF NOT EXISTS msgq.retention (
                      topic TEXT NOT NULL,
                      cut_offset BIGINT NOT NULL,
@@ -44,9 +56,37 @@ pub fn connect(config: postgres::Config) -> Result<Client, Error> {
     let mut client = config
         .connect(postgres::NoTls)
         .map_err(|e| Error::runtime(format!("cannot connect to the bus: {e}")))?;
-    client
-        .batch_execute(&format!("{BOOTSTRAP}\n{AUTHORIZATION}"))
-        .map_err(|e| Error::runtime(format!("cannot bootstrap the bus schema: {}", pg(e))))?;
+    let installed: Option<i32> = client
+        .query_opt(
+            "SELECT value::int FROM msgq.meta WHERE key = 'schema_version'",
+            &[],
+        )
+        .ok()
+        .flatten()
+        .map(|row| row.get(0));
+
+    match installed {
+        Some(version) if version == SCHEMA_VERSION => {}
+        Some(version) if version > SCHEMA_VERSION => {
+            return Err(Error::runtime(format!(
+                "the bus holds schema {version} and this client installs {SCHEMA_VERSION}; upgrade the client"
+            )));
+        }
+        _ => {
+            client
+                .batch_execute(&format!("{BOOTSTRAP}\n{AUTHORIZATION}"))
+                .map_err(|e| {
+                    Error::runtime(format!("cannot bootstrap the bus schema: {}", pg(e)))
+                })?;
+            client
+                .execute(
+                    "INSERT INTO msgq.meta (key, value) VALUES ('schema_version', $1)
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    &[&SCHEMA_VERSION.to_string()],
+                )
+                .map_err(|e| Error::runtime(format!("cannot record the schema version: {e}")))?;
+        }
+    }
 
     let created_by = format!("msgq {}", crate::version());
     let engine = pgmq_version(&mut client);

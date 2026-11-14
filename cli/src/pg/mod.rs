@@ -89,6 +89,12 @@ impl PgStore {
         })
     }
 
+    /// The credential for a read. Empty means "present none": the function decides whether this bus
+    /// has nobody to check against.
+    fn read_token(&self) -> &str {
+        self.credential.as_deref().unwrap_or_default()
+    }
+
     fn conn(&self) -> Result<MutexGuard<'_, Client>, Error> {
         self.client
             .lock()
@@ -271,7 +277,7 @@ impl Bus for PgStore {
             .query(
                 "SELECT name, (detail ->> 'count')::bigint, (detail ->> 'head')::bigint
                  FROM msgq.catalog($1) WHERE kind = 'address' ORDER BY name",
-                &[&self.token()?],
+                &[&self.read_token()],
             )
             .map_err(pg)?;
         Ok(rows
@@ -287,14 +293,14 @@ impl Bus for PgStore {
                 .query(
                     "SELECT name, address, (detail ->> 'offset')::bigint FROM msgq.catalog($1)
                      WHERE kind = 'cursor' AND address = $2 ORDER BY name",
-                    &[&self.token()?, &topic],
+                    &[&self.read_token(), &topic],
                 )
                 .map_err(pg)?,
             None => client
                 .query(
                     "SELECT name, address, (detail ->> 'offset')::bigint FROM msgq.catalog($1)
                      WHERE kind = 'cursor' ORDER BY address, name",
-                    &[&self.token()?],
+                    &[&self.read_token()],
                 )
                 .map_err(pg)?,
         };

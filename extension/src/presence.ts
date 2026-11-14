@@ -31,10 +31,10 @@ export function presenceAddress(scope?: string): string {
 }
 
 /** Default lifetime of one presence record, in seconds. */
-export const PRESENCE_TTL_S = 30;
+export const PRESENCE_TTL_S = 120;
 
 /** Default renewal cadence: one third of the lifetime. */
-export const PRESENCE_RENEW_MS = 10_000;
+export const PRESENCE_RENEW_MS = 40_000;
 
 /** What a presence record may say: a state, or `gone`, which retracts it. */
 export type PresenceRecordState = PresenceState | "gone";

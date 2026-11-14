@@ -155,6 +155,18 @@ BEGIN
 END;
 $$;
 
+-- Whether this bus has nobody to check against: no credential presented and no identity registered.
+-- The read path mirrors the write path, so a single-user server stays usable; the first registered
+-- identity closes the door for reads exactly as it already does for writes.
+CREATE OR REPLACE FUNCTION msgq.open_bus(p_token TEXT)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT coalesce(btrim(p_token), '') = '' AND NOT EXISTS (SELECT 1 FROM msgq.identity)
+$$;
+
 -- Who the stored record says wrote it.
 --
 -- The identity is the default. A record may name an address inside the identity's own scopes,
@@ -301,13 +313,6 @@ BEGIN
 END;
 $$;
 
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'msgq_runtime') THEN
-        PERFORM msgq.grant_runtime('msgq_runtime');
-    END IF;
-END;
-$$;
 
 DROP FUNCTION IF EXISTS msgq.read_since(TEXT, TEXT, BIGINT, INT);
 DROP FUNCTION IF EXISTS msgq.prune(TEXT, TEXT, BIGINT, INT);
@@ -323,12 +328,16 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     ident msgq.identity;
+    open_call BOOLEAN;
     addr TEXT := msgq.canonical_address(p_address);
     queue TEXT;
     rows INT := greatest(1, least(coalesce(p_limit, 100), 1000));
 BEGIN
-    SELECT * INTO ident FROM msgq.identity_of(p_token);
-    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+    open_call := msgq.open_bus(p_token);
+    IF NOT open_call THEN
+        SELECT * INTO ident FROM msgq.identity_of(p_token);
+    END IF;
+    IF NOT open_call AND NOT msgq.in_scope(addr, ident.scopes) THEN
         RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
             USING ERRCODE = '42501';
     END IF;
@@ -357,11 +366,15 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     ident msgq.identity;
+    open_call BOOLEAN;
     addr TEXT := msgq.canonical_address(p_address);
     queue TEXT;
 BEGIN
-    SELECT * INTO ident FROM msgq.identity_of(p_token);
-    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+    open_call := msgq.open_bus(p_token);
+    IF NOT open_call THEN
+        SELECT * INTO ident FROM msgq.identity_of(p_token);
+    END IF;
+    IF NOT open_call AND NOT msgq.in_scope(addr, ident.scopes) THEN
         RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
             USING ERRCODE = '42501';
     END IF;
@@ -424,11 +437,15 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     ident msgq.identity;
+    open_call BOOLEAN;
     addr TEXT := msgq.canonical_address(p_address);
     lost BIGINT;
 BEGIN
-    SELECT * INTO ident FROM msgq.identity_of(p_token);
-    IF NOT msgq.in_scope(addr, ident.scopes) THEN
+    open_call := msgq.open_bus(p_token);
+    IF NOT open_call THEN
+        SELECT * INTO ident FROM msgq.identity_of(p_token);
+    END IF;
+    IF NOT open_call AND NOT msgq.in_scope(addr, ident.scopes) THEN
         RAISE EXCEPTION 'msgq: % is outside the scopes of %', addr, ident.name
             USING ERRCODE = '42501';
     END IF;
@@ -451,15 +468,19 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     ident msgq.identity;
+    open_call BOOLEAN;
     row RECORD;
     total BIGINT;
 BEGIN
-    SELECT * INTO ident FROM msgq.identity_of(p_token);
+    open_call := msgq.open_bus(p_token);
+    IF NOT open_call THEN
+        SELECT * INTO ident FROM msgq.identity_of(p_token);
+    END IF;
 
     FOR row IN
         SELECT t.address, t.queue_name, coalesce(t.newest_offset, 0) AS head
           FROM msgq.address t
-         WHERE msgq.in_scope(t.address, ident.scopes)
+         WHERE open_call OR msgq.in_scope(t.address, ident.scopes)
          ORDER BY t.address
     LOOP
         EXECUTE format('SELECT count(*) FROM pgmq.%I', 'q_' || row.queue_name) INTO total;
@@ -478,7 +499,7 @@ BEGIN
         SELECT 'cursor'::TEXT, c.consumer, c.address,
                jsonb_build_object('offset', c.last_msg_id, 'owner', c.owner)
         FROM msgq.cursor c
-        WHERE c.owner = ident.name AND msgq.in_scope(c.address, ident.scopes)
+        WHERE open_call OR (c.owner = ident.name AND msgq.in_scope(c.address, ident.scopes))
         ORDER BY c.address, c.consumer;
 END;
 $$;
@@ -609,7 +630,17 @@ BEGIN
         GRANT EXECUTE ON FUNCTION msgq.prune(TEXT, TEXT, BIGINT, BIGINT[], INT) TO msgq_runtime;
         GRANT EXECUTE ON FUNCTION msgq.cursor_reset(TEXT, TEXT, TEXT) TO msgq_runtime;
         GRANT EXECUTE ON FUNCTION msgq.dropped(TEXT, TEXT, BIGINT) TO msgq_runtime;
+        GRANT EXECUTE ON FUNCTION msgq.open_bus(TEXT) TO msgq_runtime;
         GRANT EXECUTE ON FUNCTION msgq.renew_credential(TEXT, INTERVAL) TO msgq_runtime;
+    END IF;
+END;
+$$;
+
+-- The grants run last: every function they name exists by this point.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'msgq_runtime') THEN
+        PERFORM msgq.grant_runtime('msgq_runtime');
     END IF;
 END;
 $$;

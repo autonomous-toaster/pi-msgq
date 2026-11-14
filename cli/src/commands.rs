@@ -21,7 +21,9 @@ const LOCK_TTL_S: i64 = 60;
 /// How often to renew follow locks.
 const LOCK_RENEW_EVERY: Duration = Duration::from_secs(30);
 /// How long a follow waits for updates before checking for an interrupt.
-const WAIT_SLICE: Duration = Duration::from_millis(250);
+// A watchdog, not a poll: the follower listens for a notification and only looks again when one does
+// not arrive. Kept well under the 30 s lock renewal so the renewal never starves.
+const WAIT_SLICE: Duration = Duration::from_secs(10);
 /// Records fetched per stream per follow iteration.
 const FOLLOW_BATCH: i64 = 100;
 

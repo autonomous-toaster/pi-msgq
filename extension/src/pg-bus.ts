@@ -18,7 +18,8 @@ export const DEFAULT_LEASE = "1 hour";
 const READ_BATCH = 100;
 
 /** Fallback wait when nothing notifies. */
-const IDLE_WAIT_MS = 1000;
+// A watchdog: the LISTEN channel wakes the pump, and this only covers a missed notification.
+const IDLE_WAIT_MS = 30_000;
 
 interface PgResult {
 	rows: Array<Record<string, unknown>>;
