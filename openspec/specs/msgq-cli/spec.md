@@ -696,3 +696,114 @@ T3.2 IF the body fails to open, THEN the CLI SHALL name the key identifier.
 #### Scenario: An unopenable body is an error
 - **WHEN** an operator reads a sealed record without the key
 - **THEN** the CLI SHALL exit non-zero and SHALL print no body
+
+### Requirement: A listing has a names form
+
+T2.1 ALWAYS, `msgq topics --names` SHALL print one address per line.
+T2.1 ALWAYS, `msgq sessions --names` SHALL print one participant address per line.
+T2.1 ALWAYS, `msgq consumers --names` SHALL print one consumer name per line.
+T2.1 ALWAYS, a names form SHALL print no count, no header, no offset and no JSON.
+
+#### Scenario: Names are addressable
+- **WHEN** a caller runs `msgq topics --names` on a bus that holds two addresses
+- **THEN** the output SHALL hold exactly the two addresses, one per line
+
+#### Scenario: Names carry no bookkeeping
+- **WHEN** a caller runs a names form
+- **THEN** the output SHALL hold no column separator and no header line
+
+
+#### Scenario: Names respect the caller's namespace
+- **WHEN** a caller runs `msgq consumers --names` on a bus that holds a cursor of another principal
+- **THEN** the output SHALL name no consumer of that principal
+
+### Requirement: Two output forms are refused together
+
+T2.2 IF a caller asks for a names form and JSON together, THEN the CLI SHALL exit with a usage error.
+
+#### Scenario: Two output forms are refused together
+- **WHEN** a caller requests a names form and JSON
+- **THEN** the CLI SHALL exit with a usage error
+
+### Requirement: A closed value is accepted from the members of a closed set
+
+T1.1 ALWAYS, the CLI SHALL accept a value of a closed set from the members of that closed set.
+T1.2 ALWAYS, the CLI SHALL validate an acknowledgement phase set where the argument is parsed.
+T1.3 ALWAYS, the help text SHALL name the members of a closed set.
+
+#### Scenario: The help names the members
+- **WHEN** a caller reads the help of a command with a closed-set argument
+- **THEN** the help SHALL name every member of that closed set
+
+### Requirement: A value outside a closed set is refused
+
+T1.1 IF a supplied value is not a member of the closed set of the argument, THEN the CLI SHALL exit with a usage error.
+
+#### Scenario: An unknown record type
+- **WHEN** a caller publishes with `--type` naming a value outside the members
+- **THEN** the CLI SHALL exit with a usage error and SHALL store no record
+
+#### Scenario: An unknown acknowledgement phase
+- **WHEN** a caller publishes with `--ack` naming a phase outside the protocol phases
+- **THEN** the CLI SHALL exit with a usage error and SHALL store no record
+
+### Requirement: The completion verb describes one shell
+
+T3.1 ALWAYS, `msgq completions <shell>` SHALL accept `zsh` alone.
+
+#### Scenario: The supported shell is named in the help
+- **WHEN** a caller reads the help of `msgq completions`
+- **THEN** the help SHALL name `zsh`
+
+### Requirement: An unknown shell is refused
+
+T4.2 IF the caller names another shell, THEN the CLI SHALL exit with a usage error.
+T4.2 IF the caller names no shell, THEN the CLI SHALL exit with a usage error.
+
+#### Scenario: Another shell is refused
+- **WHEN** a caller asks for a bash completion
+- **THEN** the CLI SHALL exit with a usage error and SHALL print no script
+
+### Requirement: A listing has a card form
+
+T2.3 ALWAYS, `msgq topics --card` SHALL print two tab-separated columns: the address, then a compact description.
+T2.3 ALWAYS, `msgq sessions --card` SHALL print the address, then the compact description of the card.
+T2.3 ALWAYS, the compact description SHALL name the project and the branch, separated by a slash.
+T2.3 ALWAYS, the compact description SHALL name the last component of the path.
+T2.3 ALWAYS, the compact description SHALL contain no separator inside either column.
+
+#### Scenario: An address with a card
+- **WHEN** a participant advertises an address with a card naming project, branch and path
+- **THEN** `--card` SHALL print the address, a tab, and the project and branch with the last path component
+
+#### Scenario: Two columns are cut cleanly
+- **WHEN** a caller cuts the first column of a card form
+- **THEN** the output SHALL hold one address per line, whatever the second column holds
+
+### Requirement: A card description is bounded
+
+T2.5 ALWAYS, the compact description SHALL fit a bounded width whatever the length of a name.
+T2.5 ALWAYS, a shortened name SHALL keep both ends and lose the middle.
+T2.5 ALWAYS, the address SHALL stand first in the row. T4.1, T4.2
+
+#### Scenario: A long repository name
+- **WHEN** a card names a project and a branch longer than the budget
+- **THEN** the description SHALL be shortened in the middle and SHALL stay within the budget
+
+#### Scenario: A narrow terminal keeps the address
+- **WHEN** a picker shows the card form in a terminal narrower than the row
+- **THEN** the truncated part SHALL be the description, not the address
+
+### Requirement: A card form falls back rather than varying
+
+T2.4 IF an address has no live participant, THEN the card form SHALL print `-` in the second column.
+T2.4 IF a card names neither project, branch nor path, THEN the card form SHALL print `-` in the second column. T2.1, T2.2, T2.3
+T2.4 IF a caller asks for two output forms together, THEN the CLI SHALL exit with a usage error.
+
+#### Scenario: A topic no participant advertises
+- **WHEN** a caller runs the card form on a bus where no participant advertises one of the addresses
+- **THEN** that address SHALL be printed with `-` as its description
+
+#### Scenario: Three forms are refused in pairs
+- **WHEN** a caller asks for the card form together with `--names` or `--json`
+- **THEN** the CLI SHALL exit with a usage error and SHALL print no listing
