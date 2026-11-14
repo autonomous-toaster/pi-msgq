@@ -214,6 +214,7 @@ One product, two engines, and a deployment runs exactly one of them:
 | reach | the machine that holds the file | every machine that can reach the server |
 | identity | file permissions; the sender is a claim | a credential the server checks |
 | retention | a declared window, default one hour | the same window |
+| bodies | plaintext unless you set a passphrase ([sealing](#sealing-message-bodies)) | the same |
 
 Nothing synchronises the two: there is no relay, no bridge and no dual write. Pick one and point
 every session at it.
@@ -259,7 +260,8 @@ and whether it was created by this command.
 **2. Who is who: file permissions.** This backend has no identities and no credential — that is the
 whole of its trust model, and it is worth saying plainly rather than implying more:
 
-- anyone who can read the file can read every record in it, and the bus adds no encryption;
+- anyone who can read the file can read every plaintext record in it; set a passphrase and
+  the bodies are sealed, but the envelope, the addresses and the senders stay readable;
 - anyone who can write the file can publish anything, **including a `from` that is not theirs**. A
   record's sender on this backend is a claim, not a fact.
 
@@ -306,16 +308,23 @@ connection and creates no queue until an address is used. To try it locally with
 server, `just pg-url` builds and starts one in podman and prints its URI.
 
 **2. An identity per user.** A credential is minted once and handed out; the server keeps only its
-hash. The identity name is the sender the bus stamps, so it has to be an address:
+hash. The identity names a **principal** — a user, not an address — and its scopes are the addresses
+that user may reach:
 
 ```bash
-psql "$MSGQ_DB_URI" -tAc "SELECT msgq.register_identity('session/alice', ARRAY['session/alice', 'group/standup'])"
+psql "$MSGQ_DB_URI" -tAc "SELECT msgq.register_identity('alice', ARRAY['session/alice', 'group/standup'])"
 # → the token, printed once. Put it in ~/.config/msgq/token, chmod 600.
 ```
 
-The scopes are the addresses this identity may write: `group/standup` covers everything beneath it,
-and nothing outside it. A record claiming a sender outside those scopes is stored under the
-identity's own name instead.
+`group/standup` covers everything beneath it, and nothing outside it. A record may speak as any
+participant address inside those scopes — `session/alice/sub`, `cli/alice@laptop` — because one
+credential serves every session of that user. A claim outside them is **refused** and stores nothing:
+there is no address the bus could rewrite it to, and a room is not a sender either.
+
+One credential, several sessions is what makes a long silence survivable: `msgq.renew_credential`
+extends the same row and keeps the digest, so a session that picks up after weeks is still itself and
+every sibling session stays logged in. The extension renews at session start and again at half its
+lease; by hand it is one `psql` call.
 
 **3. Point a session at it.** Three settings, once, in the shell that starts pi:
 
@@ -328,7 +337,8 @@ export MSGQ_SCOPE=standup
 **4. Check it before trusting it.**
 
 ```bash
-msgq db info        # backend: shared, credential: accepted as session/alice, retention_s: 3600
+msgq db info        # backend: shared, credential: accepted as alice,
+                    # identity: alice (scopes: group/standup, session/alice), retention_s: 3600
 msgq publish group/standup "hello"
 msgq read group/standup --from-start
 ```
@@ -337,6 +347,39 @@ msgq read group/standup --from-start
 cannot authorize anything and accepts writes unauthenticated. `missing (this bus has N identities
 …)` means it can, and this session did not present one. That is the whole of the trust model: once
 an identity exists, an unauthenticated write is refused rather than downgraded.
+
+**Reads, cursors and prune are scoped too.** A read, a catalog listing and a consumers listing name
+only what is inside your scopes, and a cursor belongs to the principal that wrote it, so two users can
+pick the same consumer name without moving each other's position. `msgq prune` removes records only
+from an address you opened — ownership follows the first write, not read access, so a member of a
+shared room cannot erase another member's history — and it is the only thing allowed to write the
+retention watermark. The engine's own tables are not readable or writable by the runtime role at all:
+every operation passes through a function that resolves the credential first.
+
+## Sealing message bodies
+
+Both engines store what they are given. Configure a passphrase and the **body** is sealed on the way
+in and opened on the way out; the envelope is left alone so routing still works.
+
+```bash
+export MSGQ_PASSPHRASE="correct horse battery staple"    # or MSGQ_PASSPHRASE_FILE=/run/secrets/msgq
+msgq publish group/standup "the plan is tomorrow"
+msgq read group/standup --from-start                     # opened for you, transparently
+```
+
+- One key per principal, derived from the passphrase with scrypt. The key is never stored, so a copy
+  of the bus file opens nothing; `MSGQ_KEY_SALT` names the derivation and `db info` prints the first
+  bytes of its hash as the **key identifier**, which tells two keys apart without revealing either.
+- `aes-256-gcm` with a fresh nonce per record. The algorithm and the identifier travel in the
+  record's metadata, so a reader that does not know the algorithm preserves the record and treats the
+  body as opaque rather than guessing.
+- Address, sender, type and offset stay readable, because routing, the roster and acknowledgements
+  need them. Presence and acknowledgement bodies are never sealed.
+- A body that does not open is an error, not content: `msgq read` exits non-zero, prints no body and
+  names the key identifier; the extension reports it, starts no turn and publishes no acknowledgement,
+  and the session keeps running.
+- A stream may hold plaintext and sealed records side by side, so turning encryption on does not
+  orphan the history that came before it.
 
 ## What it will not do
 
@@ -367,6 +410,8 @@ an identity exists, an unauthenticated write is refused rather than downgraded.
 | A peer does nothing when messaged | its trust list excludes you, or its policy is `display` |
 | `msgq disabled` in the session | the bus could not be opened — check `MSGQ_DB` |
 | `no credential was presented` | the server has identities; set `MSGQ_TOKEN` or write the identity file |
-| `is outside the scopes of` | the credential may not write that address |
+| `is outside the scopes of` | the credential may not write, read or prune that address |
+| `belongs to … not …` | a prune of an address another principal opened |
+| `did not open (kid=…)` | the passphrase differs from the one the record was sealed with |
 | `read-only` in `/peers me` | the session can read but its writes are refused |
 | `msgq exited with 1 and said nothing` | it is not on `PATH`. See [DEVELOPMENT.md](DEVELOPMENT.md) |

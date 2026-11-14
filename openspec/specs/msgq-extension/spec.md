@@ -901,3 +901,40 @@ T6.3 IF the extension cannot interpret the body, THEN the extension SHALL publis
 #### Scenario: An uninterpretable body is not acknowledged
 - **WHEN** the extension cannot interpret a record body and the sender asked for acknowledgements
 - **THEN** the extension SHALL publish no `received` acknowledgement
+
+### Requirement: The extension reads through the scoped API
+
+T2.3 ALWAYS, the extension SHALL read a shared stream through a function that takes the credential.
+T2.3 ALWAYS, the extension SHALL hold no direct read access to a queue table.
+
+#### Scenario: A shared read goes through the function
+- **WHEN** the extension reads a shared stream
+- **THEN** the extension SHALL call the read function with the credential
+
+### Requirement: A refused read is reported
+
+T2.4 IF the bus refuses a read, THEN the extension SHALL report the refusal.
+T2.4 IF the bus refuses a read, THEN the extension SHALL stop reading that address.
+
+#### Scenario: A refused read is reported
+- **WHEN** the extension reads an address outside the scopes of the session
+- **THEN** the extension SHALL report the refusal and SHALL deliver nothing
+
+### Requirement: Delivery refuses an unopenable body
+
+T4.1 IF the extension cannot open a body, THEN the extension SHALL report an error naming the key identifier.
+T4.1 IF the extension cannot open a body, THEN the extension SHALL start no turn.
+T4.1 IF the extension cannot open a body, THEN the extension SHALL publish no acknowledgement.
+
+#### Scenario: The three consequences travel together
+- **WHEN** the extension receives a record that the key does not open
+- **THEN** the extension SHALL report the error, start no turn, and publish no acknowledgement
+
+### Requirement: A session without a key keeps running
+
+T4.1 ALWAYS, the extension SHALL continue once the extension refuses a body.
+T4.1 ALWAYS, the identity report SHALL name the key state.
+
+#### Scenario: The session survives a sealed record
+- **WHEN** a session holds no key and receives a sealed record
+- **THEN** the session SHALL stay running and SHALL report the key problem

@@ -646,3 +646,53 @@ T5.4 IF the active backend cannot authorize, THEN the CLI SHALL require no crede
 #### Scenario: The local backend is unchanged
 - **WHEN** the active backend cannot authorize writes
 - **THEN** the CLI SHALL require no credential
+
+### Requirement: Cursors and consumers stay inside the caller's namespace
+
+T3.4 ALWAYS, the consumers listing SHALL name only the consumers owned by the caller.
+T3.4 ALWAYS, a cursor command SHALL act on a cursor row owned by the caller.
+T3.4 ALWAYS, the consumers listing SHALL show the owning principal.
+
+#### Scenario: Another tenant's consumer is absent
+- **WHEN** a consumer of another principal holds a cursor on an address
+- **THEN** the listing SHALL NOT name that consumer
+
+### Requirement: Prune reports the removal the caller may perform
+
+T3.5 ALWAYS, prune SHALL remove records only from an address inside the scopes of the caller.
+T3.5 ALWAYS, prune SHALL report the total removed.
+T3.5 ALWAYS, a refused prune SHALL leave the bus unchanged.
+
+#### Scenario: A refused prune changes nothing
+- **WHEN** prune names an address outside the scopes of the caller
+- **THEN** the CLI SHALL exit non-zero and SHALL remove no record
+
+### Requirement: The identity report names the caller
+
+T4.2 ALWAYS, db info SHALL report the principal of the caller.
+T4.2 ALWAYS, db info SHALL report the scopes of the caller.
+
+#### Scenario: The report names the principal
+- **WHEN** a client runs db info against a shared engine
+- **THEN** the report SHALL name the principal and the scopes of the client
+
+### Requirement: Publish seals the body
+
+T3.1 IF a key is configured, THEN the CLI SHALL seal the body on publish.
+T3.1 IF no key is configured, THEN the CLI SHALL store a plaintext body.
+T3.1 IF no key is configured, THEN the CLI SHALL report that the body is plaintext.
+
+#### Scenario: A configured key seals
+- **WHEN** an operator publishes with a key configured
+- **THEN** the stored body SHALL be sealed
+
+### Requirement: Read opens the body
+
+T3.2 IF the body opens, THEN the CLI SHALL print the content.
+T3.2 IF the body fails to open, THEN the CLI SHALL exit non-zero.
+T3.2 IF the body fails to open, THEN the CLI SHALL print no body.
+T3.2 IF the body fails to open, THEN the CLI SHALL name the key identifier.
+
+#### Scenario: An unopenable body is an error
+- **WHEN** an operator reads a sealed record without the key
+- **THEN** the CLI SHALL exit non-zero and SHALL print no body
