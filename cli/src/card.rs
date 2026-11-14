@@ -32,6 +32,39 @@ impl PathMode {
     }
 }
 
+/// A card in the two halves a picker can show: `project/branch  basename`.
+///
+/// The full path stays in `summary`: a picker needs to tell candidates apart, not to locate them.
+pub fn summary_compact(card: &Value) -> String {
+    // One line, one pair of columns: a tab or a newline inside a name would break both.
+    let field = |key: &str| -> Option<String> {
+        card.get(key).and_then(Value::as_str).and_then(|value| {
+            let cleaned = value.trim().replace(['\t', '\n'], " ");
+            let cleaned = cleaned.trim().to_string();
+            (!cleaned.is_empty()).then_some(cleaned)
+        })
+    };
+
+    let head = match (field("project"), field("branch")) {
+        (Some(project), Some(branch)) => Some(format!("{project}/{branch}")),
+        (Some(project), None) => Some(project),
+        (None, Some(branch)) => Some(branch),
+        (None, None) => None,
+    };
+    let tail = field("path")
+        .map(|path| path.trim_end_matches('/').to_string())
+        .filter(|path| !path.is_empty() && path != ".")
+        .and_then(|path| path.rsplit('/').next().map(str::to_string))
+        .filter(|name| !name.is_empty());
+
+    match (head, tail) {
+        (Some(head), Some(tail)) => format!("{head}  {tail}"),
+        (Some(head), None) => head,
+        (None, Some(tail)) => tail,
+        (None, None) => "-".to_string(),
+    }
+}
+
 /// Derive the locator card for `cwd`.
 ///
 /// A missing git repository or a missing `git` binary is not an error: the card falls back to the
@@ -432,6 +465,34 @@ mod tests {
         assert_eq!(
             summary(&serde_json::json!({"project": "org/repo", "path": "."})),
             "org/repo"
+        );
+    }
+
+    #[test]
+    fn the_compact_form_names_the_project_and_the_last_directory() {
+        let card = |value: serde_json::Value| summary_compact(&value);
+        assert_eq!(
+            card(
+                serde_json::json!({"project": "pi-msgq", "branch": "main", "path": "/src/pi-msgq"})
+            ),
+            "pi-msgq/main  pi-msgq"
+        );
+        assert_eq!(
+            card(serde_json::json!({"project": "pi-msgq", "path": "/src/pi-msgq"})),
+            "pi-msgq  pi-msgq"
+        );
+        assert_eq!(card(serde_json::json!({"branch": "main"})), "main");
+        assert_eq!(
+            card(serde_json::json!({"path": "/src/pi-msgq/"})),
+            "pi-msgq"
+        );
+        assert_eq!(card(serde_json::json!({"path": "."})), "-");
+        assert_eq!(card(serde_json::json!({})), "-");
+        // A tab in a name would break a two-column listing, so it is replaced by a space.
+        let tabbed = card(serde_json::json!({"project": "a\tb", "path": "/c"}));
+        assert!(
+            !tabbed.contains('\t'),
+            "the compact form holds no tab: {tabbed:?}"
         );
     }
 }

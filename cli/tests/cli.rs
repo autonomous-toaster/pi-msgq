@@ -1,5 +1,6 @@
 //! End-to-end integration tests for the msgq binary.
 
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -1940,4 +1941,66 @@ fn only_zsh_is_described() {
     let help = run(&db, &["completions", "--help"]);
     assert_eq!(help.code, 0);
     assert!(help.stdout.contains("zsh"), "{}", help.stdout);
+}
+
+#[test]
+fn a_listing_has_a_card_form() {
+    let db = temp_db();
+    assert_eq!(run(&db, &["publish", "group/standup", "hi"]).code, 0);
+
+    // A topic no participant advertises keeps the two columns and says so.
+    let topics = run(&db, &["topics", "--card"]);
+    assert_eq!(topics.code, 0, "{}", topics.stderr);
+    assert_eq!(topics.stdout, "group/standup\t-\n");
+
+    // A participant's own card stands beside its address.
+    let cwd = std::env::temp_dir().join(format!("msgq-card-{}", std::process::id()));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let card = run(&db, &["card", "--cwd", cwd.to_str().unwrap()]);
+    assert_eq!(card.code, 0, "{}", card.stderr);
+    let card: serde_json::Value = serde_json::from_str(card.stdout.trim()).unwrap();
+    let address = "session/carded";
+    let mut record = card.clone();
+    record["v"] = json!(1);
+    record["type"] = json!("event");
+    // The roster address is the record's sender, so the sender is the address being advertised.
+    record["from"] = json!(address);
+    record["to"] = json!("group/presence");
+    record["event"] = json!({
+        "kind": "presence",
+        "address": address,
+        "participant": "p-1",
+        "state": "idle",
+        "ttl": 600,
+        "card": card,
+    });
+    let published = run(
+        &db,
+        &["publish", "group/presence", &record.to_string(), "--json"],
+    );
+    assert_eq!(published.code, 0, "{}", published.stderr);
+
+    let sessions = run(&db, &["sessions", "--card"]);
+    assert_eq!(sessions.code, 0, "{}", sessions.stderr);
+    let line = sessions.stdout.lines().next().unwrap_or_default();
+    assert_eq!(line.split('\t').count(), 2, "two columns: {line:?}");
+    assert!(line.starts_with(address), "{line:?}");
+    assert!(
+        !line.contains(".json") && !line.ends_with("-"),
+        "a card is described: {line:?}"
+    );
+}
+
+#[test]
+fn three_output_forms_are_refused_in_pairs() {
+    let db = temp_db();
+    for command in [&["topics"][..], &["sessions"][..]] {
+        for pair in [["--card", "--names"], ["--card", "--json"]] {
+            let mut args = command.to_vec();
+            args.extend(pair);
+            let out = run(&db, &args);
+            assert_eq!(out.code, 2, "{command:?} accepted {pair:?}");
+            assert!(out.stdout.is_empty(), "{command:?} printed a listing");
+        }
+    }
 }

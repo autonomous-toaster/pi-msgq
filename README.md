@@ -404,6 +404,23 @@ What a tab offers: every subcommand and flag, the closed sets (`--type`, `--path
 come from `msgq topics --names`, `msgq sessions --names` and `msgq consumers --names`, which is also
 why those three flags exist: one enumeration per tab, no counting, no formatting.
 
+To pick a peer or a stream by what it *is* rather than by its id, use a card form: two tab-separated
+columns, the address first and a short description second (`fzf` shows the second and selects the
+first).
+
+```bash
+msgq sessions --card | fzf --delimiter=$'\t' --with-nth=2,1 | cut -f1   # who to message
+msgq topics --card   | fzf --delimiter=$'\t' --with-nth=2,1 | cut -f1   # which stream to read
+```
+
+`--with-nth=2,1` shows the description first and keeps the address beside it — and, because
+`--with-nth` reorders what `fzf` matches as well, you can type either `standup` or `pi-msgq/main` to
+narrow the list. `cut -f1` still selects the address, because `fzf` prints the line unchanged.
+
+The description is `project/branch  directory` — never the full path, so a candidate fits one row.
+`msgq sessions --wide` still prints the whole locator when you want to know where a session really is,
+and `-` stands in the second column for an address no live participant advertises (in this scope).
+
 Two things a tab does not do, stated so neither is a surprise. It opens the bus, because the names
 live there: with `MSGQ_DB` unset that creates `~/.pi/agent/msgq/msgq.db` the first time, exactly as
 running any `msgq` command would. And it completes addresses that exist, not the address of your

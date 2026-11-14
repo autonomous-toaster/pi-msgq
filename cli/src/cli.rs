@@ -179,6 +179,9 @@ pub enum Command {
         /// Print one address per line, with no count and no offset.
         #[arg(long, conflicts_with = "json")]
         names: bool,
+        /// Print the address and what is known about it, one tab apart.
+        #[arg(long, conflicts_with_all = ["json", "names"])]
+        card: bool,
     },
     /// List live participants on the bus.
     Sessions {
@@ -190,6 +193,9 @@ pub enum Command {
         /// Print one participant address per line.
         #[arg(long, conflicts_with = "json")]
         names: bool,
+        /// Print the address and what is known about it, one tab apart.
+        #[arg(long, conflicts_with_all = ["json", "names"])]
+        card: bool,
     },
     /// Print the peer locator derived from a working directory.
     Card {

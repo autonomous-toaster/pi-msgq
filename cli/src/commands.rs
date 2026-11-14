@@ -702,9 +702,27 @@ pub fn follow(
 }
 
 /// List distinct topics with message counts and highest offsets.
-pub fn topics(db: &crate::config::Target, json_out: bool, names: bool) -> Result<(), Error> {
+pub fn topics(
+    db: &crate::config::Target,
+    json_out: bool,
+    names: bool,
+    card: bool,
+) -> Result<(), Error> {
     let (store, _) = Store::open(db)?;
     let rows = store.list_topics()?;
+    if card {
+        // The roster answers "who is this" for the addresses a participant advertises; the rest keep
+        // the same two columns with `-`, so a picker never has to special-case a row.
+        let cards = cards_by_address(&store)?;
+        for (topic, _, _) in rows {
+            let description = cards
+                .get(&topic)
+                .map(card::summary_compact)
+                .unwrap_or_else(|| "-".to_string());
+            println!("{topic}\t{description}");
+        }
+        return Ok(());
+    }
     if names {
         for (topic, _, _) in rows {
             println!("{topic}");
@@ -793,6 +811,32 @@ pub fn consumers(
 }
 
 /// The presence tail, oldest first: what the roster and the collection commands both read.
+/// The card of the participant advertising each address, from this scope's roster.
+///
+/// One read, shared by every listing that wants to say who an address is.
+fn cards_by_address(store: &dyn Bus) -> Result<BTreeMap<String, Value>, Error> {
+    let now = unix_now();
+    let mut newest: BTreeMap<String, (i64, Value)> = BTreeMap::new();
+    for (created_at, record) in presence_tail(store)? {
+        if presence::is_retraction(&record.state) || created_at + record.ttl <= now {
+            continue;
+        }
+        let Some(card) = record.card.clone() else {
+            continue;
+        };
+        let fresher = newest
+            .get(&record.address)
+            .is_none_or(|(best, _)| created_at > *best);
+        if fresher {
+            newest.insert(record.address.clone(), (created_at, card));
+        }
+    }
+    Ok(newest
+        .into_iter()
+        .map(|(address, (_, card))| (address, card))
+        .collect())
+}
+
 fn presence_tail(store: &dyn Bus) -> Result<Vec<(i64, presence::PresenceRecord)>, Error> {
     let presence_address = presence::address(crate::config::scope().as_deref());
     let head = store.head(&presence_address)?;
@@ -835,6 +879,7 @@ pub fn sessions(
     json_out: bool,
     wide: bool,
     names: bool,
+    card: bool,
 ) -> Result<(), Error> {
     let (store, _) = Store::open(db)?;
     let now = unix_now();
@@ -872,6 +917,17 @@ pub fn sessions(
             .then_with(|| b.expires_at.cmp(&a.expires_at))
     });
 
+    if card {
+        for entry in &entries {
+            let description = entry
+                .card
+                .as_ref()
+                .map(card::summary_compact)
+                .unwrap_or_else(|| "-".to_string());
+            println!("{}\t{description}", entry.address);
+        }
+        return Ok(());
+    }
     if names {
         for entry in &entries {
             println!("{}", entry.address);

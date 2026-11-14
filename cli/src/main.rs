@@ -113,8 +113,13 @@ fn run(cli: Cli) -> Result<(), Error> {
             json,
             with_offset,
         ),
-        Command::Topics { json, names } => commands::topics(&db, json, names),
-        Command::Sessions { json, wide, names } => commands::sessions(&db, json, wide, names),
+        Command::Topics { json, names, card } => commands::topics(&db, json, names, card),
+        Command::Sessions {
+            json,
+            wide,
+            names,
+            card,
+        } => commands::sessions(&db, json, wide, names, card),
         Command::Card {
             cwd,
             paths,
