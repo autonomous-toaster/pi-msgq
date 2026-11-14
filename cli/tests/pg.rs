@@ -1319,3 +1319,94 @@ fn a_silent_session_renews_the_same_credential() {
     let stranger = raw.query_one("SELECT msgq.renew_credential($1)", &[&"nobody".to_string()]);
     assert!(stranger.is_err(), "renewal never creates a credential");
 }
+
+#[test]
+fn a_names_form_costs_one_catalogue_call_however_many_addresses() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    // Every shared-engine test holds this lock, so the counter below counts only this test's commits.
+    let _serialised = exclusive(&dsn);
+    let mut probe = client(&dsn);
+    let store = open(&dsn);
+    let base = unique();
+
+    let publish = |store: &Store, i: usize| {
+        let address = format!("group/names-{base}-{i}");
+        store
+            .publish(
+                &address,
+                &json!({"v": 1, "type": "note", "from": format!("cli/n@{}", unique()),
+                        "to": address, "message": "one"}),
+            )
+            .expect("publish");
+    };
+    let commits = |client: &mut Client| -> i64 {
+        client
+            .query_one(
+                "SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()",
+                &[],
+            )
+            .unwrap()
+            .get(0)
+    };
+    let cost = |store: &Store, probe: &mut Client| -> i64 {
+        let before = commits(probe);
+        assert!(!store.list_topics().unwrap().is_empty());
+        // The probe's own read commits too, so one extra is the measurement, not the listing.
+        commits(probe) - before
+    };
+
+    publish(&store, 0);
+    let few = cost(&store, &mut probe);
+    for i in 1..40 {
+        publish(&store, i);
+    }
+    let many = cost(&store, &mut probe);
+
+    assert_eq!(
+        many, few,
+        "a names form must not add a call per address: {few} with one address, {many} with forty"
+    );
+    assert!(many <= 3, "one catalogue call, not {many}");
+}
+
+#[test]
+fn a_names_form_names_only_the_callers_consumers() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let address = format!("group/names-scope-{}", unique());
+    let ours = format!("ours-{}", unique());
+    let store = open(&dsn);
+    store.cursor_set(&ours, &address, 1).unwrap();
+
+    // Another principal holds a cursor on the same address.
+    let other: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['group'])",
+            &[&format!("theirs-{}", unique()).as_str()],
+        )
+        .unwrap()
+        .get(0);
+    let guest = Store::open_with(&Target::Shared(dsn.clone()), Some(other))
+        .expect("open")
+        .0;
+    guest
+        .cursor_set(&format!("theirs-{}", unique()), &address, 2)
+        .unwrap();
+
+    let named: Vec<String> = store
+        .list_consumers(Some(&address))
+        .unwrap()
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect();
+    assert_eq!(
+        named,
+        vec![ours],
+        "a names form names the caller's cursors alone"
+    );
+}

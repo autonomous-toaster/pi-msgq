@@ -6,7 +6,9 @@
 
 pub mod address;
 pub mod card;
+pub mod cli;
 pub mod commands;
+pub mod completion;
 pub mod config;
 pub mod error;
 pub mod pg;

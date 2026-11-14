@@ -69,6 +69,17 @@ fn temp_db() -> PathBuf {
     dir.join("msgq.db")
 }
 
+/// Serialise against the other suites that use this database. The lock is PostgreSQL's, so it holds
+/// across test binaries: two suites clearing the same queues would otherwise clear each other's.
+fn exclusive(dsn: &str) -> postgres::Client {
+    let mut guard =
+        postgres::Client::connect(dsn, postgres::NoTls).expect("the test database must accept");
+    guard
+        .execute("SELECT pg_advisory_lock(1702453617)", &[])
+        .expect("the shared-engine lock");
+    guard
+}
+
 /// A credential the behaviour cases may use, with scopes over every address the fixtures name.
 fn credential(dsn: &str) -> String {
     let mut client =
@@ -297,6 +308,11 @@ fn every_case_the_fixtures_declare_has_a_runner() {
 #[test]
 fn behavioural_fixtures_pass_on_the_active_engine() {
     let engine = engine();
+    // The shared engine is one database for every suite: hold the lock while the cases run.
+    let _serialised = (engine == "shared")
+        .then(|| std::env::var("MSGQ_TEST_DB_URI").ok())
+        .flatten()
+        .map(|dsn| exclusive(&dsn));
     let mut failures: Vec<String> = Vec::new();
 
     for name in cases() {

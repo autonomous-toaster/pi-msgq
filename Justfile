@@ -68,6 +68,17 @@ pg-url:
 pg-down:
     podman stop {{PG_NAME}}
 
+# Install the zsh completion where `fpath` already looks. `ZSH_COMPLETION_DIR` names the directory;
+# without it the script goes to ~/.zfunc, which is what the README tells people to add to fpath.
+completions dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="${ZSH_COMPLETION_DIR:-{{dir}}}"
+    if [ -z "$target" ]; then target="$HOME/.zfunc"; fi
+    mkdir -p "$target"
+    cargo run --quiet --manifest-path {{crate}}/Cargo.toml -- completions zsh > "$target/_msgq"
+    printf 'wrote %s\n' "$target/_msgq"
+
 # The same behavioural fixtures against the shared engine. Two engines, one product: a change that
 # only one of them honours is exactly what this catches.
 behaviour-shared:

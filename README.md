@@ -381,6 +381,42 @@ msgq read group/standup --from-start                     # opened for you, trans
 - A stream may hold plaintext and sealed records side by side, so turning encryption on does not
   orphan the history that came before it.
 
+## Completion
+
+zsh, and zsh only: the script a tab runs calls back into the CLI for the names it cannot know.
+
+```bash
+just completions            # writes ~/.zfunc/_msgq
+# or, by hand, anywhere on fpath:
+msgq completions zsh > "${fpath[1]}/_msgq"
+```
+
+Then, once per shell, in `~/.zshrc`:
+
+```zsh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+```
+
+What a tab offers: every subcommand and flag, the closed sets (`--type`, `--paths`, the shell of
+`completions`), suggestions for the arguments that take a pattern (`--ack`, `prune --older-than`), and
+— the part a static script cannot do — the addresses, topics and consumer names on your bus. Those
+come from `msgq topics --names`, `msgq sessions --names` and `msgq consumers --names`, which is also
+why those three flags exist: one enumeration per tab, no counting, no formatting.
+
+Two things a tab does not do, stated so neither is a surprise. It opens the bus, because the names
+live there: with `MSGQ_DB` unset that creates `~/.pi/agent/msgq/msgq.db` the first time, exactly as
+running any `msgq` command would. And it completes addresses that exist, not the address of your
+working directory — that rule lives in the extension, and a second copy of it here would be a second
+answer to the same question.
+
+The script is generated from the command definition, never transcribed, and a test in the CLI suite
+fails when a flag or a closed set is missing from it. Regenerate after upgrading:
+
+```bash
+just completions
+```
+
 ## What it will not do
 
 - **No daemon and no broker.** The local backend is one SQLite file and the shared backend is a
@@ -411,6 +447,7 @@ msgq read group/standup --from-start                     # opened for you, trans
 | `msgq disabled` in the session | the bus could not be opened — check `MSGQ_DB` |
 | `no credential was presented` | the server has identities; set `MSGQ_TOKEN` or write the identity file |
 | `is outside the scopes of` | the credential may not write, read or prune that address |
+| `invalid value ... possible values` | a closed-set argument refused a value; exit 2, nothing written |
 | `belongs to … not …` | a prune of an address another principal opened |
 | `did not open (kid=…)` | the passphrase differs from the one the record was sealed with |
 | `read-only` in `/peers me` | the session can read but its writes are refused |

@@ -1,240 +1,16 @@
 //! Command-line interface for the msgq message bus.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use serde_json::json;
 
 use msgq::address;
 use msgq::card::{self, PathMode};
+use msgq::cli::{Cli, Command, ConsumersCmd, CursorCmd, DbCmd, Shell};
 use msgq::commands::{self, AskArgs, ConsumersAction, CursorAction, FromSpec, PublishArgs};
+use msgq::completion;
 use msgq::error::Error;
-
-#[derive(Parser)]
-#[command(
-    name = "msgq",
-    version,
-    about = "Durable topic-addressed message bus for pi",
-    long_about = None
-)]
-struct Cli {
-    /// Database path (overrides MSGQ_DB and the default).
-    #[arg(long, global = true, value_name = "PATH")]
-    db: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Publish one message to an address.
-    Publish {
-        /// Target address: session/<id>, cwd/<enc>, group/<name>, cli/<who>,
-        /// or a bare name (shorthand for group/<name>).
-        address: String,
-        /// Message body, or '-' to read it from stdin.
-        message: Option<String>,
-        /// Sender address (default: cli/<user>@<host>).
-        #[arg(long)]
-        from: Option<String>,
-        /// Record type: prompt, steer, follow_up, command, or note.
-        #[arg(long = "type", value_name = "TYPE")]
-        kind: Option<String>,
-        /// Treat MESSAGE (or stdin) as a full JSON record.
-        #[arg(long)]
-        json: bool,
-        /// Request acknowledgements: `--ack` for every phase, or `--ack started,completed`.
-        #[arg(long, value_name = "PHASES", num_args = 0..=1, default_missing_value = "true")]
-        ack: Option<String>,
-        /// The offset of the message this one answers, or its id `<address>#<offset>`.
-        #[arg(long, value_name = "ID")]
-        reply_to: Option<String>,
-        /// Print the record's id instead of its offset.
-        #[arg(long = "print-id")]
-        print_id: bool,
-        /// Wait for acknowledgements after publishing.
-        #[arg(long = "await")]
-        await_ack: bool,
-        /// Seconds to wait when awaiting; 0 waits without a limit.
-        #[arg(long, value_name = "N", default_value_t = 300)]
-        timeout: u64,
-    },
-    /// Ask another agent and wait for the answer.
-    Ask {
-        /// The address to ask.
-        address: String,
-        /// The question, or '-' to read it from stdin.
-        message: Option<String>,
-        /// Sender address (default: cli/<user>@<host>).
-        #[arg(long)]
-        from: Option<String>,
-        /// Address the answer arrives on (default: this sender).
-        #[arg(long, value_name = "ADDRESS")]
-        on: Option<String>,
-        /// Seconds to wait; 0 waits without a limit.
-        #[arg(long, value_name = "N", default_value_t = 600)]
-        timeout: u64,
-        /// Emit the reply as its raw record, and outcomes as JSON.
-        #[arg(long)]
-        json: bool,
-        /// Publish the question and return without waiting for the answer.
-        #[arg(long = "no-wait")]
-        no_wait: bool,
-    },
-    /// Wait for acknowledgements of a published message.
-    Await {
-        /// A record id (address#offset), or a bare offset together with --on.
-        target: String,
-        /// Address the acknowledgements arrive on; required with a bare offset.
-        #[arg(long, value_name = "ADDRESS")]
-        on: Option<String>,
-        /// Seconds to wait; 0 waits without a limit.
-        #[arg(long, value_name = "N", default_value_t = 300)]
-        timeout: u64,
-        /// Emit one JSON object per acknowledgement.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Read messages without touching any cursor.
-    Read {
-        #[arg(required = true, num_args = 1..)]
-        addresses: Vec<String>,
-        /// Start after this offset.
-        #[arg(long, value_name = "N")]
-        from: Option<i64>,
-        /// Start from the earliest record.
-        #[arg(long)]
-        from_start: bool,
-        /// Maximum number of records to print.
-        #[arg(long, value_name = "N", default_value_t = 1000)]
-        limit: i64,
-        /// Emit raw records as JSON lines.
-        #[arg(long)]
-        json: bool,
-        /// Wrap each JSON line as {topic, offset, created_at, record}.
-        #[arg(long, requires = "json")]
-        with_offset: bool,
-        /// Exit non-zero when retention removed records the caller asked for.
-        #[arg(long)]
-        strict: bool,
-    },
-    /// Follow addresses, advancing a durable consumer cursor.
-    Follow {
-        #[arg(required = true, num_args = 1..)]
-        addresses: Vec<String>,
-        /// Consumer (subscription) name.
-        #[arg(long)]
-        consumer: String,
-        /// Start after this offset.
-        #[arg(long, value_name = "N")]
-        from: Option<i64>,
-        /// Start from the earliest record.
-        #[arg(long)]
-        from_start: bool,
-        /// Emit raw records as JSON lines.
-        #[arg(long)]
-        json: bool,
-        /// Wrap each JSON line as {topic, offset, created_at, record}.
-        #[arg(long, requires = "json")]
-        with_offset: bool,
-    },
-    /// List addresses that have messages.
-    Topics {
-        #[arg(long)]
-        json: bool,
-    },
-    /// List live participants on the bus.
-    Sessions {
-        #[arg(long)]
-        json: bool,
-        /// Show the locator column: project, branch, and path.
-        #[arg(long)]
-        wide: bool,
-    },
-    /// Print the peer locator derived from a working directory.
-    Card {
-        /// Directory to describe (default: the current directory).
-        #[arg(long, value_name = "PATH")]
-        cwd: Option<PathBuf>,
-        /// Path detail: relative (default), full, or none.
-        #[arg(long, value_name = "MODE")]
-        paths: Option<String>,
-        /// Also report the addresses a participant publishing this card would answer at.
-        #[arg(long, value_name = "ADDR")]
-        address: Option<String>,
-    },
-    /// List or remove consumer cursors.
-    Consumers {
-        /// Restrict to one topic.
-        #[arg(long)]
-        topic: Option<String>,
-        #[arg(long)]
-        json: bool,
-        #[command(subcommand)]
-        action: Option<ConsumersCmd>,
-    },
-    /// Read, set, or reset one consumer cursor.
-    Cursor {
-        #[command(subcommand)]
-        action: CursorCmd,
-    },
-    /// Database information.
-    Db {
-        #[command(subcommand)]
-        action: DbCmd,
-    },
-    /// Remove records older than an age, never one a consumer has not passed.
-    Prune {
-        /// Age: a number and one of d, h, m, s. Records older than it are removable.
-        #[arg(long, value_name = "AGE")]
-        older_than: Option<String>,
-        /// Retention window to apply instead of the configured one.
-        #[arg(long, value_name = "AGE")]
-        retention: Option<String>,
-        /// Remove what would be removed, instead of reporting it.
-        #[arg(long)]
-        apply: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum ConsumersCmd {
-    /// Remove consumer cursors.
-    Rm {
-        name: String,
-        /// Restrict to one topic.
-        #[arg(long)]
-        topic: Option<String>,
-    },
-    /// Collect the cursors of sessions that are no longer live.
-    Gc {
-        /// Remove them, instead of reporting how many there are.
-        #[arg(long)]
-        apply: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum CursorCmd {
-    /// Print a consumer's saved offset, or 0 when it has none.
-    Get { consumer: String, topic: String },
-    /// Save a consumer's offset (monotonic).
-    Set {
-        consumer: String,
-        topic: String,
-        offset: i64,
-    },
-    /// Clear a consumer's offset.
-    Reset { consumer: String, topic: String },
-}
-
-#[derive(Subcommand)]
-enum DbCmd {
-    /// Show path, size, contents, and protocol version.
-    Info,
-}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -248,6 +24,9 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Error> {
+    // The command tree is the argument to the emitter, so `msgq completions` describes the CLI the
+    // parser runs rather than a copy of it.
+    let definition = || <Cli as clap::CommandFactory>::command();
     let db = msgq::config::resolve_target(cli.db.as_ref())?;
     match cli.command {
         Command::Publish {
@@ -267,7 +46,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 address,
                 message,
                 from,
-                kind,
+                kind: kind.map(|k| k.as_str().to_string()),
                 json,
                 ack,
                 reply_to,
@@ -334,8 +113,8 @@ fn run(cli: Cli) -> Result<(), Error> {
             json,
             with_offset,
         ),
-        Command::Topics { json } => commands::topics(&db, json),
-        Command::Sessions { json, wide } => commands::sessions(&db, json, wide),
+        Command::Topics { json, names } => commands::topics(&db, json, names),
+        Command::Sessions { json, wide, names } => commands::sessions(&db, json, wide, names),
         Command::Card {
             cwd,
             paths,
@@ -349,7 +128,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 Some(path) => path,
                 None => std::env::current_dir()?,
             };
-            let card = card::derive_card(&cwd, PathMode::parse(paths.as_deref())?)?;
+            let card = card::derive_card(&cwd, paths.unwrap_or(PathMode::Relative))?;
             match address {
                 // An address is a separate fact from the locator, so it is reported beside it
                 // rather than merged into it: the published `event.card` keeps its four fields.
@@ -376,6 +155,7 @@ fn run(cli: Cli) -> Result<(), Error> {
         Command::Consumers {
             topic,
             json,
+            names,
             action,
         } => {
             let action = match action {
@@ -385,7 +165,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                     return commands::consumers_gc(&db, apply);
                 }
             };
-            commands::consumers(&db, topic.as_deref(), action, json)
+            commands::consumers(&db, topic.as_deref(), action, json, names)
         }
         Command::Cursor { action } => commands::cursor(
             &db,
@@ -403,6 +183,12 @@ fn run(cli: Cli) -> Result<(), Error> {
                 CursorCmd::Reset { consumer, topic } => CursorAction::Reset { consumer, topic },
             },
         ),
+        Command::Completions { shell } => {
+            match shell {
+                Shell::Zsh => print!("{}", completion::script(&definition())),
+            }
+            Ok(())
+        }
         Command::Db { action } => match action {
             DbCmd::Info => commands::db_info(&db),
         },

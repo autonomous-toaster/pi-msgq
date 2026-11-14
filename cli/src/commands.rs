@@ -702,9 +702,15 @@ pub fn follow(
 }
 
 /// List distinct topics with message counts and highest offsets.
-pub fn topics(db: &crate::config::Target, json_out: bool) -> Result<(), Error> {
+pub fn topics(db: &crate::config::Target, json_out: bool, names: bool) -> Result<(), Error> {
     let (store, _) = Store::open(db)?;
     let rows = store.list_topics()?;
+    if names {
+        for (topic, _, _) in rows {
+            println!("{topic}");
+        }
+        return Ok(());
+    }
     if json_out {
         let array: Vec<Value> = rows
             .iter()
@@ -727,6 +733,7 @@ pub fn consumers(
     topic: Option<&str>,
     action: ConsumersAction,
     json_out: bool,
+    names: bool,
 ) -> Result<(), Error> {
     let topic = match topic {
         Some(t) => Some(address::canonicalize(t)?),
@@ -744,6 +751,12 @@ pub fn consumers(
                 let lag = (store.max_offset(&topic)? - offset).max(0);
                 let dropped = store.retention_dropped(&topic, offset)?;
                 described.push((name, topic, offset, lag, dropped));
+            }
+            if names {
+                for (name, _, _, _, _) in &described {
+                    println!("{name}");
+                }
+                return Ok(());
             }
             if json_out {
                 let array: Vec<Value> = described
@@ -817,7 +830,12 @@ fn live_participants(store: &dyn Bus) -> Result<BTreeSet<String>, Error> {
 ///
 /// Text columns are address, kind, state, alias and remaining lifetime; `--wide` adds one locator
 /// column built by [`card::summary`]. `--json` carries the card as an object, unchanged.
-pub fn sessions(db: &crate::config::Target, json_out: bool, wide: bool) -> Result<(), Error> {
+pub fn sessions(
+    db: &crate::config::Target,
+    json_out: bool,
+    wide: bool,
+    names: bool,
+) -> Result<(), Error> {
     let (store, _) = Store::open(db)?;
     let now = unix_now();
 
@@ -854,6 +872,12 @@ pub fn sessions(db: &crate::config::Target, json_out: bool, wide: bool) -> Resul
             .then_with(|| b.expires_at.cmp(&a.expires_at))
     });
 
+    if names {
+        for entry in &entries {
+            println!("{}", entry.address);
+        }
+        return Ok(());
+    }
     if json_out {
         for entry in &entries {
             let mut value = json!({

@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use crate::error::Error;
 
 /// How much of the current path to put in the locator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum PathMode {
     Relative,
     Full,

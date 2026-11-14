@@ -22,6 +22,35 @@ pub fn is_known_type(kind: &str) -> bool {
     KNOWN_TYPES.contains(&kind)
 }
 
+/// The known types as a closed set, so a writer is offered what this version produces.
+///
+/// The set bounds what `--type` writes, not what `validate` accepts: a record of an unknown type is
+/// still a record, and `--json` stays the way to publish one deliberately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Kind {
+    Prompt,
+    Steer,
+    #[value(name = "follow_up")]
+    FollowUp,
+    Note,
+    Command,
+    Event,
+}
+
+impl Kind {
+    /// The spelling this type carries in a record.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Steer => "steer",
+            Self::FollowUp => "follow_up",
+            Self::Note => "note",
+            Self::Command => "command",
+            Self::Event => "event",
+        }
+    }
+}
+
 /// A msgq message record.
 ///
 /// Unknown top-level fields are preserved in `extra` so a record supplied
@@ -304,6 +333,30 @@ mod conformance {
             .as_array()
             .expect("expectations.json has no 'cases' array")
             .clone()
+    }
+
+    #[test]
+    fn the_closed_set_is_the_known_set() {
+        use clap::ValueEnum;
+
+        let offered: Vec<String> = Kind::value_variants()
+            .iter()
+            .map(|kind| {
+                kind.to_possible_value()
+                    .expect("every variant is a value")
+                    .get_name()
+                    .to_string()
+            })
+            .collect();
+        // One list: an offered type cannot fall behind the interpreted ones, or ahead of them.
+        assert_eq!(offered, KNOWN_TYPES);
+        assert_eq!(
+            Kind::value_variants()
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>(),
+            KNOWN_TYPES
+        );
     }
 
     #[test]

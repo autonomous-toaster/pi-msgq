@@ -28,6 +28,16 @@ fn unique() -> String {
     format!("{}-{nanos}", std::process::id())
 }
 
+/// Hold the shared-engine lock for the whole scenario: this suite fills the same database.
+fn exclusive(dsn: &str) -> postgres::Client {
+    let mut guard =
+        postgres::Client::connect(dsn, postgres::NoTls).expect("the test database must accept");
+    guard
+        .execute("SELECT pg_advisory_lock(1702453617)", &[])
+        .expect("the shared-engine lock");
+    guard
+}
+
 /// Mint a credential with scopes over the addresses this scenario uses.
 fn credential(dsn: &str, name: &str) -> String {
     let mut client =
@@ -87,6 +97,8 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     let Some(dsn) = dsn() else {
         return;
     };
+    // One suite at a time touches this database.
+    let _serialised = exclusive(&dsn);
     let unique = unique();
     let scope = format!("team{unique}");
     let alice_address = format!("session/alice-{unique}");

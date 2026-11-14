@@ -1713,3 +1713,231 @@ fn a_mixed_history_reads_whole() {
     assert!(mixed.stdout.contains("before the key"), "{}", mixed.stdout);
     assert!(!mixed.stdout.contains("after the key"), "{}", mixed.stdout);
 }
+
+#[test]
+fn a_record_type_outside_the_set_is_refused_before_a_write() {
+    let db = temp_db();
+    let out = run(&db, &["publish", "group/typed", "hi", "--type", "nosuch"]);
+    assert_eq!(
+        out.code, 2,
+        "a closed value is a usage error: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("prompt") || out.stderr.contains("possible values"),
+        "{}",
+        out.stderr
+    );
+    let topics = run(&db, &["topics", "--json"]);
+    assert_eq!(topics.stdout.trim(), "[]", "a refused write stores nothing");
+
+    let ok = run(&db, &["publish", "group/typed", "hi", "--type", "note"]);
+    assert_eq!(ok.code, 0, "{}", ok.stderr);
+}
+
+#[test]
+fn the_help_names_the_closed_values() {
+    let db = temp_db();
+    for (command, members) in [
+        (
+            "publish",
+            &["prompt", "steer", "follow_up", "note", "command", "event"][..],
+        ),
+        ("card", &["relative", "full", "none"][..]),
+    ] {
+        let out = run(&db, &[command, "--help"]);
+        for member in members {
+            assert!(
+                out.stdout.contains(member),
+                "{command} --help omits {member}: {}",
+                out.stdout
+            );
+        }
+    }
+}
+
+#[test]
+fn an_acknowledgement_phase_outside_the_set_is_refused_before_a_write() {
+    let db = temp_db();
+    let bad = run(&db, &["publish", "group/acked", "hi", "--ack", "nosuch"]);
+    assert_eq!(bad.code, 2, "a phase outside the protocol is a usage error");
+    assert!(
+        bad.stderr.contains("acknowledgement phase"),
+        "{}",
+        bad.stderr
+    );
+    assert_eq!(
+        run(&db, &["topics", "--json"]).stdout.trim(),
+        "[]",
+        "a refused write stores nothing"
+    );
+
+    // The two accepted forms still publish.
+    assert_eq!(
+        run(&db, &["publish", "group/acked", "one", "--ack"]).code,
+        0
+    );
+    assert_eq!(
+        run(
+            &db,
+            &[
+                "publish",
+                "group/acked",
+                "two",
+                "--ack",
+                "started,completed"
+            ]
+        )
+        .code,
+        0
+    );
+}
+
+#[test]
+fn a_listing_has_a_names_form() {
+    let db = temp_db();
+    assert_eq!(run(&db, &["publish", "group/one", "hi"]).code, 0);
+    assert_eq!(run(&db, &["publish", "group/two", "hi"]).code, 0);
+    assert_eq!(
+        run(&db, &["cursor", "set", "reader", "group/one", "1"]).code,
+        0
+    );
+
+    let topics = run(&db, &["topics", "--names"]);
+    assert_eq!(topics.code, 0, "{}", topics.stderr);
+    assert_eq!(topics.stdout, "group/one\ngroup/two\n");
+    assert!(
+        !topics.stdout.contains('\t'),
+        "no column separator in a names form"
+    );
+
+    let consumers = run(&db, &["consumers", "--names"]);
+    assert_eq!(consumers.code, 0, "{}", consumers.stderr);
+    assert_eq!(consumers.stdout, "reader\n");
+
+    let sessions = run(&db, &["sessions", "--names"]);
+    assert_eq!(sessions.code, 0, "{}", sessions.stderr);
+    assert_eq!(sessions.stdout, "");
+}
+
+#[test]
+fn two_output_forms_are_refused_together() {
+    let db = temp_db();
+    for command in [&["topics"][..], &["sessions"][..], &["consumers"][..]] {
+        let mut args = command.to_vec();
+        args.extend(["--names", "--json"]);
+        let out = run(&db, &args);
+        assert_eq!(out.code, 2, "{command:?} accepted --names with --json");
+        assert!(out.stderr.contains("cannot be used with"), "{}", out.stderr);
+    }
+}
+
+#[test]
+fn the_script_keeps_describing_the_cli() {
+    let db = temp_db();
+    let script = run(&db, &["completions", "zsh"]);
+    assert_eq!(script.code, 0, "{}", script.stderr);
+    assert!(script.stdout.starts_with("#compdef msgq"));
+
+    // Every long flag the help of a command offers is in the script, and every closed set with it.
+    for command in [
+        "publish",
+        "ask",
+        "await",
+        "read",
+        "follow",
+        "topics",
+        "sessions",
+        "card",
+        "consumers",
+        "cursor",
+        "db",
+        "prune",
+        "completions",
+    ] {
+        let help = run(&db, &[command, "--help"]);
+        assert_eq!(help.code, 0, "{command} --help failed");
+        for line in help.stdout.lines() {
+            let line = line.trim_start();
+            let Some(rest) = line.strip_prefix("--") else {
+                continue;
+            };
+            let long = rest.split([' ', '[', '=']).next().unwrap_or_default();
+            if long.is_empty() || long == "help" || long == "version" {
+                continue;
+            }
+            assert!(
+                script.stdout.contains(&format!("--{long}[")),
+                "{command} --{long} is absent from the completion script"
+            );
+        }
+        if let Some(values) = help.stdout.split("[possible values: ").nth(1) {
+            let list = values.split(']').next().unwrap_or_default();
+            assert!(
+                script
+                    .stdout
+                    .contains(&format!("({})", list.replace(", ", " "))),
+                "{command}: the closed set ({list}) is absent"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tab_writes_nothing_and_emission_opens_no_bus() {
+    let db = temp_db();
+    let emitted = run(&db, &["completions", "zsh"]);
+    assert_eq!(emitted.code, 0);
+    assert!(
+        !db.exists(),
+        "emitting a script must not create or open a bus"
+    );
+
+    // What a tab runs: the two enumerations behind the address helper.
+    for command in ["topics", "sessions", "consumers"] {
+        let out = run(&db, &[command, "--names"]);
+        assert_eq!(out.code, 0, "{command} --names failed: {}", out.stderr);
+        assert_eq!(
+            out.stdout, "",
+            "{command} --names holds a name on an empty bus"
+        );
+    }
+    assert_eq!(run(&db, &["topics", "--json"]).stdout.trim(), "[]");
+    assert_eq!(run(&db, &["consumers", "--json"]).stdout.trim(), "[]");
+}
+
+#[test]
+fn the_script_is_valid_zsh() {
+    let db = temp_db();
+    let script = run(&db, &["completions", "zsh"]);
+    let path = std::env::temp_dir().join(format!("_msgq-{}", std::process::id()));
+    std::fs::write(&path, &script.stdout).unwrap();
+    let checked = Command::new("zsh").arg("-n").arg(&path).output();
+    let checked = checked.expect("zsh is required to lint the emitted script");
+    assert!(
+        checked.status.success(),
+        "zsh -n rejected the script: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn only_zsh_is_described() {
+    let db = temp_db();
+    let bash = run(&db, &["completions", "bash"]);
+    assert_eq!(bash.code, 2, "another shell is a usage error");
+    assert!(bash.stdout.is_empty(), "a refused shell prints no script");
+    assert!(
+        bash.stderr.contains("zsh"),
+        "the refusal names the shell that is supported: {}",
+        bash.stderr
+    );
+
+    let missing = run(&db, &["completions"]);
+    assert_eq!(missing.code, 2, "a missing shell is a usage error");
+
+    let help = run(&db, &["completions", "--help"]);
+    assert_eq!(help.code, 0);
+    assert!(help.stdout.contains("zsh"), "{}", help.stdout);
+}
