@@ -1410,3 +1410,76 @@ fn a_names_form_names_only_the_callers_consumers() {
         "a names form names the caller's cursors alone"
     );
 }
+
+#[test]
+fn a_newer_bus_refuses_this_client_and_says_so() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+    let recorded: String = raw
+        .query_one(
+            "SELECT value FROM msgq.meta WHERE key = 'schema_version'",
+            &[],
+        )
+        .expect("the bus records its schema version")
+        .get(0);
+    raw.execute(
+        "UPDATE msgq.meta SET value = '999' WHERE key = 'schema_version'",
+        &[],
+    )
+    .unwrap();
+    // Restore even if the assertion below fails, or every later test inherits a bus from the future.
+    struct Restore(String, String);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let Ok(mut client) = Client::connect(&self.0, NoTls) else {
+                return;
+            };
+            let _ = client.execute(
+                "UPDATE msgq.meta SET value = $1 WHERE key = 'schema_version'",
+                &[&self.1],
+            );
+        }
+    }
+    let _restore = Restore(dsn.clone(), recorded);
+
+    let refused = Store::open_with(&Target::Shared(dsn.clone()), None);
+    let error = format!(
+        "{:?}",
+        refused.err().expect("a bus from the future is refused")
+    );
+    assert!(
+        error.contains("999"),
+        "the error names the bus version: {error}"
+    );
+}
+
+#[test]
+fn a_names_listing_asks_for_no_counts() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let store = open(&dsn);
+    let address = format!("group/uncounted-{}", unique());
+    for i in 0..5 {
+        store
+            .publish(
+                &address,
+                &json!({"v": 1, "type": "note", "from": format!("cli/u@{}", unique()),
+                        "to": address, "message": format!("r{i}")}),
+            )
+            .unwrap();
+    }
+    let names = store.list_topics_names().unwrap();
+    let counted: Vec<String> = store
+        .list_topics()
+        .unwrap()
+        .into_iter()
+        .map(|(topic, _, _)| topic)
+        .collect();
+    assert_eq!(names, counted, "the names form lists the same addresses");
+    assert!(names.contains(&address));
+}

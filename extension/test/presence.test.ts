@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { HonkerBus, openRaw, type Bus } from "../src/consumer.ts";
-import { PRESENCE_ADDRESS, Presence, PRESENCE_TTL_S, presenceAddress } from "../src/presence.ts";
+import {
+	PRESENCE_ADDRESS,
+	PRESENCE_RENEW_MS,
+	PRESENCE_TTL_S,
+	Presence,
+	presenceAddress,
+} from "../src/presence.ts";
 import type { MsgqRecord } from "../src/record.ts";
 
 const INTERVAL = 50;
@@ -261,4 +267,14 @@ test("a scoped session publishes to its own scope address", async () => {
 	native.close();
 	const rows = topics.map((row: { topic: string }) => row.topic);
 	assert.deepEqual(rows, ["group/red/presence"]);
+});
+
+test("presence renews a third of its lifetime", () => {
+	// The cadence is the cost: one write per renewal, for as long as a session idles.
+	assert.equal(PRESENCE_TTL_S, 120);
+	assert.equal(PRESENCE_RENEW_MS, (PRESENCE_TTL_S * 1000) / 3);
+	assert.ok(
+		(24 * 60 * 60 * 1000) / PRESENCE_RENEW_MS <= 2160,
+		"a day of idle presence stays under 2,160 writes",
+	);
 });

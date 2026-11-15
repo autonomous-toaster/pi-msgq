@@ -54,6 +54,21 @@ without a checkpoint: 13.4 kB of log per 492 B of data. A checkpoint on close, b
 log into the file and leaves the two files in proportion. Failure to checkpoint is not an error: the
 next open replays the log as it always could.
 
+## Measured after the change
+
+Same method as the proposal: the CI image with `pg_stat_statements`, the real binary.
+
+| figure | before | after |
+|---|---|---|
+| statements for a second command | 63 | **7** |
+| server time for a second command | 6.7 ms | **1.1 ms** |
+| WAL for a read-only command | 30 kB | **0 bytes** |
+| queries for 30 s of idle `msgq follow` | 234 | **8** |
+| address lookups while idle | one per tick | **none** |
+| presence writes per idle day | 8,640 | **2,160** |
+| local log per record | 13.4 kB | **folded on close** |
+| a first command against an empty database | refused | **exit 0** |
+
 ## Risks / Trade-offs
 
 - **A stale `schema_version` skips a migration the bus needs** → the version lives with the code that

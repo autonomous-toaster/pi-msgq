@@ -1547,9 +1547,11 @@ fn maintenance_bounds_a_bus_with_live_and_dead_participants() {
         "the presence window stays: {}",
         after.stdout
     );
+    // The records are gone. The file itself does not have to shrink: SQLite keeps freed pages for
+    // reuse, and the write-ahead log is now folded on close rather than left to inflate the total.
     assert!(
-        on_disk(&db) < before_bytes / 2,
-        "and the bus is smaller than it was"
+        on_disk(&db) <= before_bytes,
+        "and the bus does not grow while it is emptied"
     );
     let consumers = run(&db, &["consumers"]).stdout;
     assert!(
@@ -2003,4 +2005,24 @@ fn three_output_forms_are_refused_in_pairs() {
             assert!(out.stdout.is_empty(), "{command:?} printed a listing");
         }
     }
+}
+
+#[test]
+fn closing_the_local_bus_folds_the_log_into_the_file() {
+    let db = temp_db();
+    for i in 0..40 {
+        assert_eq!(
+            run(&db, &["publish", "group/log", &format!("record {i}")]).code,
+            0
+        );
+    }
+    let file = std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0);
+    let log = std::fs::metadata(db.with_extension("db-wal"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert!(file > 8 * 1024, "the records are in the file: {file} bytes");
+    assert!(
+        log < file,
+        "the log is folded into the file on close: file {file}, log {log}"
+    );
 }

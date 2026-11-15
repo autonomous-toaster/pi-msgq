@@ -57,6 +57,16 @@ pub trait Bus: Send {
         batch: usize,
     ) -> Result<Removal, Error>;
     fn list_addresses(&self) -> Result<Vec<(String, i64, i64)>, Error>;
+
+    /// The addresses alone. The default pays for counts; an engine where counting is expensive says
+    /// otherwise.
+    fn list_topics_names(&self) -> Result<Vec<String>, Error> {
+        Ok(self
+            .list_addresses()?
+            .into_iter()
+            .map(|(topic, _, _)| topic)
+            .collect())
+    }
     fn list_consumers(&self, topic: Option<&str>) -> Result<Vec<(String, String, i64)>, Error>;
     fn delete_consumers(&self, name: &str, topic: Option<&str>) -> Result<usize, Error>;
     /// A wake source for the named topics. An engine that cannot subscribe falls back to polling.
@@ -108,6 +118,19 @@ pub struct Removal {
 /// An open message bus.
 pub struct LocalStore {
     db: Database,
+}
+
+impl Drop for LocalStore {
+    /// Fold the write-ahead log into the file on the way out.
+    ///
+    /// Every CLI invocation is its own process, and the local engine leaves whole pages in the log:
+    /// measured at 13.4 kB of log per 492 B of record, because nothing truncates it between runs. A
+    /// checkpoint here is best effort — a failure costs nothing, since the next open replays the log.
+    fn drop(&mut self) {
+        let _ = self
+            .db
+            .with_conn(|c| c.execute("PRAGMA wal_checkpoint(TRUNCATE)", []));
+    }
 }
 
 impl LocalStore {
@@ -512,7 +535,15 @@ impl LocalStore {
             .map_err(Error::runtime)
     }
 
-    /// Distinct topics with message count and highest offset.
+    /// The addresses alone. The local engine counts in one query, so this costs what it already paid.
+    pub fn list_topics_names(&self) -> Result<Vec<String>, Error> {
+        Ok(self
+            .list_topics()?
+            .into_iter()
+            .map(|(topic, _, _)| topic)
+            .collect())
+    }
+
     pub fn list_topics(&self) -> Result<Vec<(String, i64, i64)>, Error> {
         self.db
             .with_conn(|c| -> Result<Vec<(String, i64, i64)>, String> {

@@ -294,7 +294,7 @@ BEGIN
     EXECUTE format(
         'GRANT EXECUTE ON FUNCTION msgq.publish_as(TEXT, TEXT, JSONB),'
         ' msgq.read_since(TEXT, TEXT, BIGINT, INT), msgq.stream_of(TEXT, TEXT),'
-        ' msgq.catalog(TEXT) TO %I', role_name);
+        ' msgq.catalog(TEXT, BOOLEAN) TO %I', role_name);
 
     -- Reads go through the functions too: the bookkeeping tables are not a side door.
     EXECUTE format(
@@ -460,7 +460,9 @@ END;
 $$;
 
 -- What this caller may hold: the addresses in its scopes and the cursors it owns.
-CREATE OR REPLACE FUNCTION msgq.catalog(p_token TEXT)
+DROP FUNCTION IF EXISTS msgq.catalog(TEXT);
+
+CREATE OR REPLACE FUNCTION msgq.catalog(p_token TEXT, p_counts BOOLEAN DEFAULT TRUE)
 RETURNS TABLE (kind TEXT, name TEXT, address TEXT, detail JSONB)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -483,7 +485,12 @@ BEGIN
          WHERE open_call OR msgq.in_scope(t.address, ident.scopes)
          ORDER BY t.address
     LOOP
-        EXECUTE format('SELECT count(*) FROM pgmq.%I', 'q_' || row.queue_name) INTO total;
+        -- Counting is what makes a listing cost grow with history, so a caller that prints no count
+        -- is not made to pay for one.
+        total := 0;
+        IF p_counts THEN
+            EXECUTE format('SELECT count(*) FROM pgmq.%I', 'q_' || row.queue_name) INTO total;
+        END IF;
         kind := 'address';
         name := row.address;
         address := row.address;

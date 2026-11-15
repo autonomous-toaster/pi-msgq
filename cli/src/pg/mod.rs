@@ -30,6 +30,8 @@ const PRUNE_BATCH_DEFAULT: usize = 500;
 /// The bus over a PostgreSQL database with the pgmq schema installed.
 pub struct PgStore {
     client: Mutex<Client>,
+    /// Queue names already resolved: a follower would look one up on every tick otherwise.
+    queues: Mutex<std::collections::HashMap<String, String>>,
     /// Kept so the wake source can open its own connection: LISTEN needs a connection that is idle.
     config: postgres::Config,
     /// The credential this bus presents, if the deployment names one.
@@ -37,6 +39,19 @@ pub struct PgStore {
 }
 
 impl PgStore {
+    /// The queue behind an address, remembered after the first lookup.
+    fn queue_name(&self, client: &mut Client, address: &str) -> Result<Option<String>, Error> {
+        let mut cache = self.queues.lock().expect("the queue cache");
+        if let Some(name) = cache.get(address) {
+            return Ok(Some(name.clone()));
+        }
+        let Some(name) = queue_of(client, address)? else {
+            return Ok(None);
+        };
+        cache.insert(address.to_string(), name.clone());
+        Ok(Some(name))
+    }
+
     /// Connect and bootstrap the bus's own tables.
     ///
     /// The location is either a URI or libpq keyword settings; `MSGQ_PG*` variables win over
@@ -48,6 +63,7 @@ impl PgStore {
         crate::config::apply_pg_env(&mut config)?;
         Ok(PgStore {
             client: Mutex::new(schema::connect(config.clone())?),
+            queues: Mutex::new(std::collections::HashMap::new()),
             config,
             credential,
         })
@@ -89,8 +105,7 @@ impl PgStore {
         })
     }
 
-    /// The credential for a read. Empty means "present none": the function decides whether this bus
-    /// has nobody to check against.
+    /// The credential for a read: empty means "present none", and the function decides.
     fn read_token(&self) -> &str {
         self.credential.as_deref().unwrap_or_default()
     }
@@ -179,7 +194,7 @@ impl Bus for PgStore {
 
     fn read_since(&self, topic: &str, offset: i64, limit: i64) -> Result<Vec<StoredRecord>, Error> {
         let mut client = self.conn()?;
-        let Some(name) = queue_of(&mut client, topic)? else {
+        let Some(name) = self.queue_name(&mut client, topic)? else {
             return Ok(Vec::new());
         };
         let rows = client
@@ -205,7 +220,7 @@ impl Bus for PgStore {
 
     fn head(&self, topic: &str) -> Result<i64, Error> {
         let mut client = self.conn()?;
-        let Some(name) = queue_of(&mut client, topic)? else {
+        let Some(name) = self.queue_name(&mut client, topic)? else {
             return Ok(0);
         };
         scalar_i64(
@@ -269,6 +284,17 @@ impl Bus for PgStore {
             removed: removed as usize,
             batches: (removed / size + i64::from(removed % size > 0)) as usize,
         })
+    }
+
+    fn list_topics_names(&self) -> Result<Vec<String>, Error> {
+        let mut client = self.conn()?;
+        let rows = client
+            .query(
+                "SELECT name FROM msgq.catalog($1, FALSE) WHERE kind = 'address' ORDER BY name",
+                &[&self.read_token()],
+            )
+            .map_err(pg)?;
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
     }
 
     fn list_addresses(&self) -> Result<Vec<(String, i64, i64)>, Error> {
@@ -378,7 +404,7 @@ impl Bus for PgStore {
         for (address, records, newest) in self.list_addresses()? {
             let oldest: i64 = {
                 let mut client = self.conn()?;
-                let Some(name) = queue_of(&mut client, &address)? else {
+                let Some(name) = self.queue_name(&mut client, &address)? else {
                     continue;
                 };
                 let row = client
@@ -405,7 +431,7 @@ impl Bus for PgStore {
 
     fn prefix_end(&self, topic: &str, threshold: i64) -> Result<Option<i64>, Error> {
         let mut client = self.conn()?;
-        let Some(name) = queue_of(&mut client, topic)? else {
+        let Some(name) = self.queue_name(&mut client, topic)? else {
             return Ok(None);
         };
         let row = client
@@ -422,7 +448,7 @@ impl Bus for PgStore {
 
     fn count_stream_prefix(&self, topic: &str, cut: i64, keep: &[i64]) -> Result<i64, Error> {
         let mut client = self.conn()?;
-        let Some(name) = queue_of(&mut client, topic)? else {
+        let Some(name) = self.queue_name(&mut client, topic)? else {
             return Ok(0);
         };
         scalar_i64(
@@ -437,7 +463,7 @@ impl Bus for PgStore {
 
     fn newest_presence_offsets(&self, topic: &str) -> Result<Vec<i64>, Error> {
         let mut client = self.conn()?;
-        let Some(name) = queue_of(&mut client, topic)? else {
+        let Some(name) = self.queue_name(&mut client, topic)? else {
             return Ok(Vec::new());
         };
         let rows = client
@@ -455,7 +481,7 @@ impl Bus for PgStore {
 
     fn oldest_offset(&self, topic: &str) -> Result<Option<i64>, Error> {
         let mut client = self.conn()?;
-        let Some(name) = queue_of(&mut client, topic)? else {
+        let Some(name) = self.queue_name(&mut client, topic)? else {
             return Ok(None);
         };
         let row = client

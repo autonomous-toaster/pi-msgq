@@ -65,14 +65,9 @@ pub fn connect(config: postgres::Config) -> Result<Client, Error> {
         .flatten()
         .map(|row| row.get(0));
 
-    match installed {
-        Some(version) if version == SCHEMA_VERSION => {}
-        Some(version) if version > SCHEMA_VERSION => {
-            return Err(Error::runtime(format!(
-                "the bus holds schema {version} and this client installs {SCHEMA_VERSION}; upgrade the client"
-            )));
-        }
-        _ => {
+    match install_decision(installed)? {
+        false => {}
+        true => {
             client
                 .batch_execute(&format!("{BOOTSTRAP}\n{AUTHORIZATION}"))
                 .map_err(|e| {
@@ -103,6 +98,20 @@ pub fn connect(config: postgres::Config) -> Result<Client, Error> {
             .map_err(|e| Error::runtime(format!("cannot record {key}: {e}")))?;
     }
     Ok(client)
+}
+
+/// Whether this connection must install the schema, given what the bus records.
+///
+/// Separated from the connection so the decision is testable without a server: equal means leave the
+/// bus alone, absent or older means install, newer means the client is the stale one.
+fn install_decision(installed: Option<i32>) -> Result<bool, Error> {
+    match installed {
+        Some(version) if version == SCHEMA_VERSION => Ok(false),
+        Some(version) if version > SCHEMA_VERSION => Err(Error::runtime(format!(
+            "the bus holds schema {version} and this client installs {SCHEMA_VERSION}; upgrade the client"
+        ))),
+        _ => Ok(true),
+    }
 }
 
 /// The installed pgmq version, or how it was installed when it is not an extension.
@@ -161,4 +170,36 @@ pub fn scalar_i64(
 ) -> Result<i64, Error> {
     let row = client.query_one(sql, params).map_err(pg)?;
     Ok(row.get::<_, Option<i64>>(0).unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_schema_is_installed_only_when_it_is_owed() {
+        assert!(
+            install_decision(None).unwrap(),
+            "a bus with no version needs one"
+        );
+        assert!(
+            install_decision(Some(1)).unwrap(),
+            "an older bus is upgraded"
+        );
+        assert!(
+            !install_decision(Some(SCHEMA_VERSION)).unwrap(),
+            "a current bus is left alone"
+        );
+    }
+
+    #[test]
+    fn a_newer_bus_is_refused() {
+        let error = install_decision(Some(SCHEMA_VERSION + 1)).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&(SCHEMA_VERSION + 1).to_string()),
+            "{message}"
+        );
+        assert!(message.contains(&SCHEMA_VERSION.to_string()), "{message}");
+    }
 }

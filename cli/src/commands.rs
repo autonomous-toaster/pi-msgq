@@ -716,7 +716,7 @@ pub fn topics(
         // The roster answers "who is this" for the addresses a participant advertises; the rest keep
         // the same two columns with `-`, so a picker never has to special-case a row.
         let cards = cards_by_address(&store)?;
-        for (topic, _, _) in rows {
+        for topic in store.list_topics_names()? {
             let description = cards
                 .get(&topic)
                 .map(card::summary_compact)
@@ -726,7 +726,8 @@ pub fn topics(
         return Ok(());
     }
     if names {
-        for (topic, _, _) in rows {
+        // No count is printed, so none is asked for.
+        for topic in store.list_topics_names()? {
             println!("{topic}");
         }
         return Ok(());
