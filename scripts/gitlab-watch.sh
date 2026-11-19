@@ -17,6 +17,22 @@
 #   --state <dir>      where the ledger lives. Default: ~/.cache/gitlab-watch.
 #   --once             one cycle, then exit. --dry-run prints instead of publishing.
 #
+# Filters. A filtered event is not collected at all: it is never published, never spooled,
+# and never enters the ledger, so widening a filter later reports what it had been hiding.
+#
+#   --ignore-job <n>   ignore failed jobs whose name matches <n>. Repeatable, and <n> is a
+#                      shell glob, so --ignore-job 'lint*' drops a whole family of jobs.
+#   --only-job <n>     ignore every failed job whose name does not match <n>. Repeatable.
+#   --ignore-stage <n> same, keyed on the job's stage rather than its name.
+#   --allow-warned     do not report a failed job that may still be retried by hand: one
+#                      with allow_failure set, or one whose status is not a settled failure.
+#   --ignore-thread <n> do not report unresolved threads whose path matches <n>, either by
+#                      its basename ("CHANGELOG.md") or by full path ("docs/api/*.md").
+#   --ignore-author <n> do not report unresolved threads opened by this username.
+#
+# A pattern is matched with bash's [[ str == pattern ]], so it is a glob and never a regex.
+# With both --ignore-job and --only-job, a job must pass --only-job but is dropped by either.
+
 # A branch with no open merge request is not an error. The watcher logs it once and keeps
 # polling, so a branch whose MR is opened later is picked up on a following cycle.
 #
@@ -41,6 +57,12 @@ lines=40
 once=0
 dry=0
 state="${XDG_CACHE_HOME:-$HOME/.cache}/gitlab-watch"
+ignore_jobs=()
+only_jobs=()
+ignore_stages=()
+ignore_paths=()
+ignore_authors=()
+allow_warned=0
 
 die() { printf 'gitlab-watch: %s\n' "$*" >&2; exit 1; }
 log() { printf '%s gitlab-watch: %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
@@ -53,6 +75,12 @@ while [ $# -gt 0 ]; do
 	--lines) lines="${2:?--lines needs a count}" && shift 2 ;;
 	--from) SELF="${2:?--from needs an address}" && shift 2 ;;
 	--state) state="${2:?--state needs a directory}" && shift 2 ;;
+	--ignore-job) ignore_jobs+=("${2:?--ignore-job needs a pattern}") && shift 2 ;;
+	--only-job) only_jobs+=("${2:?--only-job needs a pattern}") && shift 2 ;;
+	--ignore-stage) ignore_stages+=("${2:?--ignore-stage needs a pattern}") && shift 2 ;;
+	--ignore-thread) ignore_paths+=("${2:?--ignore-thread needs a pattern}") && shift 2 ;;
+	--ignore-author) ignore_authors+=("${2:?--ignore-author needs a name}") && shift 2 ;;
+	--allow-warned) allow_warned=1 && shift ;;
 	--once) once=1 && shift ;;
 	--dry-run) dry=1 && shift ;;
 	-h | --help)
@@ -143,20 +171,63 @@ resolve_mr() {
 # unindented and becomes the digest's numbered heading; everything after is indented.
 # A key must be stable while the event is unchanged, and different when it is new again.
 
+# --- filters ----------------------------------------------------------------------------
+#
+# One rule per question, so the collectors read as the list of what they keep. A glob that
+# matches nothing is not an error: filters are written against a pipeline template, not
+# against one run of it.
+
+matches_any() {
+	local value=$1 pattern
+	shift
+	for pattern in "$@"; do
+		# shellcheck disable=SC2053 # a glob here is the point: the caller may pass "lint*".
+		[[ $value == $pattern ]] && return 0
+	done
+	return 1
+}
+
+job_wanted() {
+	local name=$1 stage=$2 status=$3 allow=$4
+	if matches_any "$name" "${ignore_jobs[@]+"${ignore_jobs[@]}"}"; then return 1; fi
+	if matches_any "$stage" "${ignore_stages[@]+"${ignore_stages[@]}"}"; then return 1; fi
+	if [ "${#only_jobs[@]}" -gt 0 ] &&
+		! matches_any "$name" "${only_jobs[@]+"${only_jobs[@]}"}"; then return 1; fi
+	if [ "$allow_warned" = 1 ] && [ "$status" != failed ]; then return 1; fi
+	if [ "$allow_warned" = 1 ] && [ "$allow" = true ]; then return 1; fi
+	return 0
+}
+
+# A thread is matched on either path it may carry, and on its basename, so a filter can name
+# a file without knowing which directory it lives in. The author is exact: it is a username.
+thread_wanted() {
+	local path=$1 author=$2
+	if [ -n "$path" ] && [ "$path" != null ]; then
+		if matches_any "$path" "${ignore_paths[@]+"${ignore_paths[@]}"}" ||
+			matches_any "${path##*/}" "${ignore_paths[@]+"${ignore_paths[@]}"}"; then
+			return 1
+		fi
+	fi
+	if matches_any "$author" "${ignore_authors[@]+"${ignore_authors[@]}"}"; then return 1; fi
+	return 0
+}
+
 collect_pipeline() {
-	local pid sha jobs trace total jid name stage secs
+	local pid sha jobs trace total jid name stage secs status allow
 	pid=$(glab api "projects/:id/merge_requests/$mr/pipelines?per_page=1" 2>/dev/null |
 		jq -r '.[0].id // empty') || return 0
 	[ -n "$pid" ] || return 0
 	sha=$(glab api "projects/:id/pipelines/$pid" 2>/dev/null | jq -r '.sha // empty') || sha=""
 	jobs=$(glab api "projects/:id/pipelines/$pid/jobs?per_page=100" 2>/dev/null |
-		jq -r '.[] | select(.status == "failed") | [.id, .name, .stage, (.duration // 0)] | @tsv') || return 0
+		jq -r '.[] | select(.status == "failed") |
+			[.id, .name, .stage, (.duration // 0), .status, (.allow_failure // false)] | @tsv') || return 0
 	[ -n "$jobs" ] || return 0
 
 	# The sha is what re-arms the same job: a new commit is a new failure, a retry that fails
 	# the same way is not.
-	while IFS=$'\t' read -r jid name stage secs; do
+	while IFS=$'\t' read -r jid name stage secs status allow; do
 		[ -n "$jid" ] || continue
+		job_wanted "$name" "$stage" "$status" "$allow" || continue
 		printf 'KEY pipeline:!%s@%s:%s\n' "$mr" "$sha" "$name"
 		printf 'pipeline #%s failed: job "%s" (stage %s, %ss)\n' \
 			"$pid" "$name" "$stage" "${secs%%.*}"
@@ -166,6 +237,7 @@ collect_pipeline() {
 		glab api "projects/:id/jobs/$jid/trace" 2>/dev/null >"$trace" || true
 		total=$(wc -l <"$trace" | tr -d ' ')
 		if [ "${total:-0}" -gt 0 ]; then
+			# A trace ends with the runner's job log, which is where a real failure is.
 			printf '  last %s of %s lines:\n' "$lines" "$total"
 			tail -n "$lines" "$trace" |
 				sed $'s/\033\\[[0-9;]*m//g' |
@@ -184,7 +256,8 @@ collect_threads() {
 			| select(any(.notes[]?; .resolvable == true and .resolved == false))
 			| ([.notes[]? | select(.system != true)] | last) as $n
 			| select($n != null)
-			| "KEY thread:!\($mr)#\(.id)@\($n.id)\n"
+			| "THREAD\t\($n.position.new_path // $n.position.old_path // "")\t\($n.author.username)\n"
+			  + "KEY thread:!\($mr)#\(.id)@\($n.id)\n"
 			  + "unresolved thread by @\($n.author.username) on "
 			  + "\($n.position.new_path // $n.position.old_path // "no position"):"
 			  + "\($n.position.new_line // $n.position.old_line // "?")\n"
@@ -192,7 +265,28 @@ collect_threads() {
 			  + "  answer: glab api -X POST projects/:id/merge_requests/\($mr)/discussions/\(.id)/notes -f body=\"...\"\n"
 			  + ([$n.body | split("\n")[] | select(length > 0)][0:3]
 			     | map("  \"" + (.[0:160]) + "\"") | join("\n"))
-		' || return 0
+		' | thread_filter
+}
+
+# Threads are emitted one block at a time, prefixed with the two fields the filter needs, so
+# the jq query above stays about GitLab's shape and the rules stay in bash with the rest.
+thread_filter() {
+	local head path author
+	while IFS= read -r head; do
+		case "$head" in
+		THREAD$'\t'*)
+			IFS=$'\t' read -r _ path author <<<"$head" || true
+			if thread_wanted "${path:-}" "${author:-}"; then
+				thread_keep=1
+				continue
+			fi
+			thread_keep=0
+			;;
+		*)
+			[ "${thread_keep:-1}" = 1 ] && printf '%s\n' "$head"
+			;;
+		esac
+	done
 }
 
 # --- one cycle --------------------------------------------------------------------------
