@@ -222,7 +222,7 @@ One thing is worth knowing when you write more:
 
 ```json
   "pi": {
-    "extensions": ["./index.ts"],
+    "extensions": ["./msgq.ts"],
     "skills": ["./skills"]
   }
 ```
@@ -255,7 +255,9 @@ cli/            Rust. The bus and its protocol.
   tests/cli.rs  integration tests, driving the real binary
 protocol/       the fixtures both implementations are checked against
 extension/      TypeScript. The pi side.
-  index.ts      entry point: flags, lifecycle, delivery, presence, acknowledgements
+  msgq.ts       entry point: flags, lifecycle, delivery, presence, acknowledgements. The file
+                name is the extension's name in pi's loaded list ("extension" when it was
+                index.ts), so it stays the package's name rather than a generic one.
   src/          consumer.ts     the bus, subscriptions, consumer cursors
                 delivery.ts     the policy decision, and the content the model reads
                 render*.ts      what a human sees, kept separate from the content

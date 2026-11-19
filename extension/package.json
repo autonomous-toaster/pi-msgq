@@ -6,7 +6,7 @@
   "type": "module",
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./msgq.ts"
     ],
     "skills": [
       "./skills"

@@ -32,7 +32,8 @@ From the repository root:
 pi -e ./extension
 ```
 
-Any path works — `pi -e` accepts a directory containing `index.ts`:
+Any path works — `pi -e` accepts a directory containing the entry point the manifest
+declares (`msgq.ts`):
 
 ```bash
 pi -e /path/to/pi-msgq/extension
