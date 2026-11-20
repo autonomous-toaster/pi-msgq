@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use hkdf::Hkdf;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::address;
 use crate::config;
@@ -22,6 +24,13 @@ pub const ALG: &str = "ed25519";
 
 /// Domain separation: a signature made for this purpose can never be replayed as another.
 const DOMAIN: &[u8] = b"msgq.sig.v1";
+
+/// The same, for a record that carries an agreement key. A v1 signature stays v1: stored records are
+/// never re-signed, and stripping the agreement key from a v2 record cannot turn it into a valid v1 one.
+const DOMAIN_AGREE: &[u8] = b"msgq.sig.v2";
+
+/// The label the agreement key is derived under, so it is independent of the signing seed it comes from.
+const AGREE_INFO: &[u8] = b"msgq/agree/v1";
 
 /// Prefix on a stored private key, so a mistaken file is refused rather than used.
 const KEY_PREFIX: &str = "msgq-ed25519:";
@@ -49,6 +58,26 @@ pub fn principal_name() -> String {
 pub struct Claim {
     pub key: VerifyingKey,
     pub fingerprint: String,
+    /// The key this sender agrees content keys with, when the record advertises one.
+    pub agreement: Option<PublicKey>,
+}
+
+/// The X25519 secret this principal agrees content keys with.
+///
+/// Derived from the signing seed under its own label: one file holds the root, neither key is the
+/// root, and a compromise of one purpose at run time does not hand over the other.
+pub fn agreement_secret(signing: &SigningKey) -> StaticSecret {
+    let seed = signing.to_bytes();
+    let info = Hkdf::<Sha256>::new(None, &seed);
+    let mut scalar = [0u8; 32];
+    info.expand(AGREE_INFO, &mut scalar)
+        .expect("32 bytes is a valid HKDF output length");
+    StaticSecret::from(scalar)
+}
+
+/// The public half of the agreement key, as it travels in `meta.sig.agree`.
+pub fn agreement_public(signing: &SigningKey) -> PublicKey {
+    PublicKey::from(&agreement_secret(signing))
 }
 
 /// The directory this user's key material lives in.
@@ -201,10 +230,22 @@ pub fn claim(value: &Value) -> Option<Claim> {
         return None;
     }
     let key = parse_public(sig.get("key")?.as_str()?).ok()?;
+    let agreement = sig
+        .get("agree")
+        .and_then(Value::as_str)
+        .and_then(parse_agreement_public);
     Some(Claim {
         fingerprint: fingerprint(&key),
         key,
+        agreement,
     })
+}
+
+/// Parse an agreement public key from its transmitted form.
+pub fn parse_agreement_public(raw: &str) -> Option<PublicKey> {
+    let bytes = STANDARD_NO_PAD.decode(raw.trim()).ok()?;
+    let array: [u8; 32] = bytes.try_into().ok()?;
+    Some(PublicKey::from(array))
 }
 
 /// The signature bytes a record carries, if it carries one.
@@ -230,11 +271,29 @@ pub fn signed_bytes(value: &Value) -> Result<Vec<u8>, Error> {
     let to = address::canonicalize(&text("to")?)?;
     let kind = text("type")?;
 
+    // A record that advertises an agreement key signs over it, under its own domain. The presence of
+    // the field selects the format, which is safe: stripping it invalidates a v2 signature and adding
+    // it invalidates a v1 one, and neither can be produced without the key.
+    let agree = value
+        .get("meta")
+        .and_then(|meta| meta.get("sig"))
+        .and_then(|sig| sig.get("agree"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
     let mut out = Vec::new();
-    out.extend_from_slice(DOMAIN);
+    out.extend_from_slice(if agree.is_some() {
+        DOMAIN_AGREE
+    } else {
+        DOMAIN
+    });
     for field in [from.as_bytes(), to.as_bytes(), kind.as_bytes()] {
         out.extend_from_slice(&(field.len() as u32).to_be_bytes());
         out.extend_from_slice(field);
+    }
+    if let Some(agree) = agree {
+        out.extend_from_slice(&(agree.len() as u32).to_be_bytes());
+        out.extend_from_slice(agree.as_bytes());
     }
     let digest = Sha256::digest(body_bytes(value));
     out.extend_from_slice(&digest);
@@ -256,20 +315,33 @@ fn body_bytes(value: &Value) -> Vec<u8> {
 
 /// Sign a record in place, or say why it cannot be signed.
 pub fn sign_value(value: &mut Value, signing: &SigningKey) -> Result<(), Error> {
-    let bytes = signed_bytes(value)?;
-    let signature = signing.sign(&bytes);
-    let sig = serde_json::json!({
+    // The agreement key is placed first, because the signature has to cover it.
+    let claim = serde_json::json!({
         "alg": ALG,
         "key": public(&signing.verifying_key()),
-        "sig": STANDARD_NO_PAD.encode(signature.to_bytes()),
+        "agree": STANDARD_NO_PAD.encode(agreement_public(signing).to_bytes()),
     });
     match value.get_mut("meta").and_then(Value::as_object_mut) {
         Some(meta) => {
-            meta.insert("sig".to_string(), sig);
+            meta.insert("sig".to_string(), claim);
         }
         None => {
-            value["meta"] = serde_json::json!({ "sig": sig });
+            value["meta"] = serde_json::json!({ "sig": claim });
         }
+    }
+
+    let bytes = signed_bytes(value)?;
+    let signature = signing.sign(&bytes);
+    if let Some(sig) = value
+        .get_mut("meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|meta| meta.get_mut("sig"))
+        .and_then(Value::as_object_mut)
+    {
+        sig.insert(
+            "sig".to_string(),
+            Value::String(STANDARD_NO_PAD.encode(signature.to_bytes())),
+        );
     }
     Ok(())
 }
@@ -314,146 +386,4 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn record() -> Value {
-        json!({
-            "v": 1,
-            "type": "message",
-            "from": "session/alice-1",
-            "to": "group/red",
-            "message": "hello",
-        })
-    }
-
-    #[test]
-    fn a_claim_survives_a_signature() {
-        let signing = SigningKey::from_bytes(&[7u8; 32]);
-        let mut value = record();
-        sign_value(&mut value, &signing).unwrap();
-        let claim = claim(&value).expect("a claim");
-        assert_eq!(claim.fingerprint, fingerprint(&signing.verifying_key()));
-        assert!(verify_claim(&value, &claim).is_ok());
-    }
-
-    #[test]
-    fn a_tampered_body_fails() {
-        let signing = SigningKey::from_bytes(&[7u8; 32]);
-        let mut value = record();
-        sign_value(&mut value, &signing).unwrap();
-        let claim = claim(&value).unwrap();
-        value["message"] = json!("goodbye");
-        assert!(verify_claim(&value, &claim).is_err());
-    }
-
-    #[test]
-    fn a_restamped_sender_fails() {
-        let signing = SigningKey::from_bytes(&[7u8; 32]);
-        let mut value = record();
-        sign_value(&mut value, &signing).unwrap();
-        let claim = claim(&value).unwrap();
-        value["from"] = json!("session/mallory");
-        assert!(verify_claim(&value, &claim).is_err());
-    }
-
-    #[test]
-    fn a_moved_address_fails() {
-        let signing = SigningKey::from_bytes(&[7u8; 32]);
-        let mut value = record();
-        sign_value(&mut value, &signing).unwrap();
-        let claim = claim(&value).unwrap();
-        value["to"] = json!("group/blue");
-        assert!(verify_claim(&value, &claim).is_err());
-    }
-
-    #[test]
-    fn two_spellings_of_one_sender_sign_the_same_bytes() {
-        let plain = record();
-        let mut other = record();
-        other["from"] = json!("  session/alice-1  ");
-        other["to"] = json!("red");
-        assert_eq!(signed_bytes(&plain).unwrap(), signed_bytes(&other).unwrap());
-    }
-
-    #[test]
-    fn a_field_cannot_shift_into_its_neighbour() {
-        let mut a = record();
-        a["from"] = json!("session/a");
-        a["to"] = json!("group/bc");
-        let mut b = record();
-        b["from"] = json!("session/ab");
-        b["to"] = json!("group/c");
-        assert_ne!(signed_bytes(&a).unwrap(), signed_bytes(&b).unwrap());
-    }
-
-    #[test]
-    fn an_unknown_algorithm_is_no_claim() {
-        let signing = SigningKey::from_bytes(&[7u8; 32]);
-        let mut value = record();
-        sign_value(&mut value, &signing).unwrap();
-        value["meta"]["sig"]["alg"] = json!("something-else");
-        assert!(claim(&value).is_none());
-    }
-
-    #[test]
-    fn an_unsigned_record_is_no_claim() {
-        assert!(claim(&record()).is_none());
-    }
-
-    #[test]
-    fn a_fingerprint_is_comparable_in_three_spellings() {
-        let signing = SigningKey::from_bytes(&[3u8; 32]);
-        let canonical = fingerprint(&signing.verifying_key());
-        let bare = canonical.strip_prefix("SHA256:").unwrap().to_string();
-        let hex: String = Sha256::digest(signing.verifying_key().to_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(normalize_fingerprint(&canonical).unwrap(), canonical);
-        assert_eq!(normalize_fingerprint(&bare).unwrap(), canonical);
-        assert_eq!(normalize_fingerprint(&hex).unwrap(), canonical);
-    }
-
-    /// The pinned public key of the fixture key, so the fixtures are byte vectors and not prose.
-    const FIXTURE_KEY: &str = "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE";
-
-    fn fixture(name: &str) -> Value {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../protocol/fixtures")
-            .join(name);
-        let raw =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        serde_json::from_str(&raw).expect("a fixture is JSON")
-    }
-
-    #[test]
-    fn the_signed_fixture_verifies_against_its_pinned_key() {
-        let value = fixture("17-signed-record.json");
-        let claim = claim(&value).expect("the fixture carries a claim");
-        assert_eq!(claim.key, parse_public(FIXTURE_KEY).unwrap());
-        assert!(verify_claim(&value, &claim).is_ok());
-    }
-
-    #[test]
-    fn the_tampered_fixture_fails_against_the_same_key() {
-        let value = fixture("19-signature-tampered.json");
-        let claim = claim(&value).expect("the fixture carries a claim");
-        assert!(verify_claim(&value, &claim).is_err());
-    }
-
-    #[test]
-    fn the_unknown_algorithm_fixture_is_no_claim() {
-        let value = fixture("18-signature-unknown-alg.json");
-        assert!(claim(&value).is_none());
-    }
-
-    #[test]
-    fn a_principal_name_is_not_a_path() {
-        assert!(key_path("alice").is_ok());
-        assert!(key_path("session/alice").is_err());
-        assert!(key_path("").is_err());
-        assert!(key_path("..").is_err());
-    }
-}
+mod tests;

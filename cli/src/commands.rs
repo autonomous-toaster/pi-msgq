@@ -12,9 +12,11 @@ use crate::address;
 use crate::card;
 use crate::config::resolve_retention;
 use crate::error::Error;
+use crate::keys;
 use crate::presence::{self, Roster};
 use crate::record;
 use crate::store::{Bus, Store, StoredRecord};
+use ed25519_dalek::SigningKey;
 
 /// Advisory lock lifetime for a follow; renewed while running.
 const LOCK_TTL_S: i64 = 60;
@@ -51,6 +53,10 @@ pub struct PublishArgs {
     pub reply_to: Option<String>,
     /// Print the record's id instead of its offset.
     pub print_id: bool,
+    /// Addresses to seal the body to, whatever the target address is.
+    pub seal_to: Vec<String>,
+    /// Store the body unsealed even when a recipient is known.
+    pub plaintext: bool,
     pub await_ack: bool,
     pub timeout: u64,
 }
@@ -175,15 +181,182 @@ fn sign_as_principal(value: &mut Value, store: &Store) -> Result<(), Error> {
     crate::keys::sign_value(value, &signing)
 }
 
+/// Seal the body by rule, and say which rule applied.
+///
+/// A record addressed to one participant is sealed for that participant and for its sender, so a
+/// session can still read what it sent. A group is not a participant: it keeps the bus key and the
+/// client says so, because a membership list is a surface this change does not invent.
+fn seal_by_rule(
+    value: &mut Value,
+    args: &PublishArgs,
+    store: &Store,
+    canonical: &str,
+    signing: &SigningKey,
+) -> Result<(), Error> {
+    if args.plaintext {
+        if crate::seal::Key::from_env()?.is_some() {
+            eprintln!(
+                "msgq: --plaintext given; the body is stored unsealed even though a bus key is configured"
+            );
+        } else {
+            eprintln!("msgq: --plaintext given; the body is stored unsealed");
+        }
+        return Ok(());
+    }
+
+    let sender = value
+        .get("from")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    // A group keeps the bus key: the recipients of a group are not a list this bus can answer, and
+    // inventing one is a change of its own.
+    let explicit = !args.seal_to.is_empty();
+    if !explicit && canonical.starts_with("group/") {
+        return seal_with_bus_key(value, "a group address has no recipient list");
+    }
+
+    let targets: Vec<String> = if explicit {
+        args.seal_to.clone()
+    } else {
+        vec![canonical.to_string()]
+    };
+
+    let mut recipients = vec![crate::envelope::Recipient::this_machine(&sender, signing)];
+    let mut unknown: Vec<String> = Vec::new();
+    for target in &targets {
+        match agreement_key_of(store, target)? {
+            Some(agreement) => recipients.push(crate::envelope::Recipient {
+                address: target.clone(),
+                key: agreement,
+            }),
+            // An explicit recipient that cannot be found is the caller's mistake, and is refused.
+            None if explicit => {
+                return Err(Error::usage(format!(
+                    "no agreement key known for {target}: a record from it would carry one, or pass --plaintext to store this unsealed"
+                )));
+            }
+            // A first-contact publish is not a mistake: nobody has met yet. Fall back, and say so.
+            None => unknown.push(target.clone()),
+        }
+    }
+
+    if unknown.is_empty() {
+        recipients.dedup_by(|a, b| a.key.as_bytes() == b.key.as_bytes());
+        crate::envelope::seal_for(value, &recipients)?;
+        if recipients.len() > 1 {
+            eprintln!(
+                "msgq: sealed to {}",
+                recipients
+                    .iter()
+                    .map(|r| r.address.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    // Not sealed to the peer: the bus key, or plaintext. On a bus with no key material anywhere,
+    // plaintext is the state of the world rather than a decision, and saying so every publish is noise.
+    seal_with_bus_key(
+        value,
+        &format!(
+            "no key is known for {}; it would have one after a record from it",
+            unknown.join(", ")
+        ),
+    )
+}
+
+/// Seal with the bus key when one is configured, and say what happened when one is.
+fn seal_with_bus_key(value: &mut Value, why: &str) -> Result<(), Error> {
+    if let Some(key) = crate::seal::Key::from_env()? {
+        crate::seal::seal_body(value, &key)?;
+        eprintln!("msgq: sealed with the bus key ({why})");
+    }
+    Ok(())
+}
+
+/// The agreement key of whoever writes at an address, found on the newest record they signed.
+///
+/// No directory and no lookup service: the key travels inside the bytes the signature covers, so any
+/// record that address ever wrote answers this, including one written long before this session.
+fn agreement_key_of(
+    store: &Store,
+    address: &str,
+) -> Result<Option<x25519_dalek::PublicKey>, Error> {
+    let wanted = address::canonicalize(address)?;
+
+    // The roster is the cheap path: a live peer advertises its key on every presence renewal, and one
+    // stream is a small read. A peer that is not live is the reason the key also rides on every record
+    // it ever wrote, so the fallback is a bounded scan of what the bus still retains.
+    let presence = presence::address(crate::config::scope().as_deref());
+    if let Some(found) = newest_agreement_for(store, &presence, &wanted)? {
+        return Ok(Some(found));
+    }
+    for topic in store.list_topics_names()? {
+        if topic == presence {
+            continue;
+        }
+        if let Some(found) = newest_agreement_for(store, &topic, &wanted)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+/// The agreement key of `wanted`, from the newest record it signed in one stream.
+fn newest_agreement_for(
+    store: &Store,
+    topic: &str,
+    wanted: &str,
+) -> Result<Option<x25519_dalek::PublicKey>, Error> {
+    let head = store.max_offset(topic)?;
+    if head == 0 {
+        return Ok(None);
+    }
+    let window = 200i64;
+    let events = store.read_since(topic, (head - window).max(0), window)?;
+    for event in events.iter().rev() {
+        let value: Value = match serde_json::from_slice(&event.payload) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let Some(from) = value.get("from").and_then(Value::as_str) else {
+            continue;
+        };
+        if address::canonicalize(from).ok().as_deref() != Some(wanted) {
+            continue;
+        }
+        if let Some(agreement) = keys::claim(&value).and_then(|claim| claim.agreement) {
+            return Ok(Some(agreement));
+        }
+    }
+    Ok(None)
+}
+
 /// Publish one message to an address.
 pub fn publish(db: &crate::config::Target, args: PublishArgs) -> Result<(), Error> {
     let canonical = address::canonicalize(&args.address)?;
     let mut value = build_record(&canonical, &args)?;
-    if let Some(key) = crate::seal::Key::from_env()? {
-        crate::seal::seal_body(&mut value, &key)?;
-    }
     let (store, _) = Store::open(db)?;
-    sign_as_principal(&mut value, &store)?;
+
+    // Sealing needs the store: a recipient's key is found on a record, not in a directory.
+    let principal = signing_principal(&store)?;
+    let signing = match crate::keys::load_or_generate(&principal)? {
+        (signing, Some(made)) => {
+            eprintln!(
+                "msgq: created a signing key for {principal} at {}",
+                made.path.display()
+            );
+            eprintln!("msgq: fingerprint {}", made.fingerprint);
+            signing
+        }
+        (signing, None) => signing,
+    };
+    seal_by_rule(&mut value, &args, &store, &canonical, &signing)?;
+    crate::keys::sign_value(&mut value, &signing)?;
 
     // When awaiting, record where the reply stream ends *before* publishing, so an
     // acknowledgement that arrives immediately is still reported.
@@ -359,9 +532,21 @@ fn await_reply(
 
         for event in events {
             cursor = event.offset;
-            let record: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
+            let mut record: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
             if record.get("reply_to").and_then(Value::as_i64) != Some(reply_to) {
                 continue;
+            }
+
+            // A reply is sealed like any other record, and the asker is a recipient: it sealed to
+            // itself when it asked, so what comes back is its to open.
+            if crate::envelope::is_envelope(&record) {
+                let opened = match crate::keys::load(&keys::principal_name())? {
+                    Some(signing) => crate::envelope::open_for(&mut record, &signing),
+                    None => Ok(crate::envelope::Opened::Elsewhere(Vec::new())),
+                };
+                if !matches!(opened, Ok(crate::envelope::Opened::Body)) {
+                    continue;
+                }
             }
 
             // Acknowledgements share the reply reference, so they are told apart by shape.
@@ -644,7 +829,7 @@ pub fn read(
         .iter()
         .map(|e| reader.verdict(&stored_value(e)))
         .collect();
-    let failures = decrypt_events(&mut events)?;
+    let failures = decrypt_events(&mut events, db)?;
     let mut refused: Vec<String> = Vec::new();
     let mut unsigned: Vec<String> = Vec::new();
     let mut strangers = 0usize;
@@ -903,6 +1088,136 @@ fn today_utc() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Open the bodies of records handed in on standard input, one outcome per record.
+///
+/// This exists so that a client which reads the bus itself obtains an opened body from one
+/// implementation, exactly as it obtains a verdict from `verify`. Three outcomes, and only one of them
+/// is a failure: opened, sealed to somebody else, or an encoding this build cannot honour.
+pub fn open_records(db: &crate::config::Target, json: bool) -> Result<(), Error> {
+    let principal = signing_principal_of(db)?;
+    let signing = crate::keys::load(&principal)?;
+    let passphrase = crate::seal::Key::from_env()?;
+
+    for line in read_stdin()?.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let outcome = open_one(line, signing.as_ref(), passphrase.as_ref());
+        if json {
+            println!("{outcome}");
+        } else {
+            println!("{}", human_open(&outcome));
+        }
+    }
+    Ok(())
+}
+
+/// Open one record, and say what happened in a form a caller can branch on.
+fn open_one(
+    line: &str,
+    signing: Option<&SigningKey>,
+    passphrase: Option<&crate::seal::Key>,
+) -> Value {
+    let mut value: Value = match serde_json::from_str(line) {
+        Ok(value @ Value::Object(_)) => value,
+        _ => {
+            return json!({
+                "cannot_open": { "alg": "", "reason": "the line is not a record" }
+            });
+        }
+    };
+
+    if value.get("meta").and_then(|m| m.get("enc")).is_none() {
+        // Nothing to open: a plaintext record is already what it says it is.
+        return json!({ "opened": value });
+    }
+
+    if crate::envelope::is_envelope(&value) {
+        let Some(signing) = signing else {
+            return json!({
+                "cannot_open": {
+                    "alg": crate::envelope::ALG_ENVELOPE,
+                    "reason": format!(
+                        "no key for {}, so nothing sealed to it can be opened",
+                        principal_hint()
+                    )
+                }
+            });
+        };
+        return match crate::envelope::open_for(&mut value, signing) {
+            Ok(crate::envelope::Opened::Body) => json!({ "opened": value }),
+            Ok(crate::envelope::Opened::Elsewhere(for_whom)) => json!({ "sealed_to": for_whom }),
+            Ok(crate::envelope::Opened::UnknownAlgorithm(alg)) => json!({
+                "cannot_open": { "alg": alg, "reason": "this build does not implement it" }
+            }),
+            Err(error) => json!({
+                "cannot_open": { "alg": crate::envelope::ALG_ENVELOPE, "reason": error.to_string() }
+            }),
+        };
+    }
+
+    // The passphrase scheme, unchanged: old records must open exactly as they did.
+    match passphrase {
+        Some(key) => match crate::seal::open_body(&mut value, key) {
+            Ok(()) => json!({ "opened": value }),
+            Err(error) => {
+                json!({ "cannot_open": { "alg": crate::seal::ALG, "reason": error.to_string() } })
+            }
+        },
+        None => json!({
+            "cannot_open": {
+                "alg": crate::seal::ALG,
+                "reason": format!("no passphrase is configured; set {}", crate::seal::PASSPHRASE_ENV)
+            }
+        }),
+    }
+}
+
+fn principal_hint() -> String {
+    crate::keys::principal_name()
+}
+
+/// The same outcome as one line, for a person.
+fn human_open(outcome: &Value) -> String {
+    if let Some(record) = outcome.get("opened") {
+        let body = record
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                record
+                    .get("event")
+                    .map(|event| event.to_string())
+                    .unwrap_or_default()
+            });
+        return body;
+    }
+    if let Some(sealed_to) = outcome.get("sealed_to") {
+        let who: Vec<String> = sealed_to
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        return format!("sealed to {}", who.join(", "));
+    }
+    let alg = outcome
+        .get("cannot_open")
+        .and_then(|c| c.get("alg"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let reason = outcome
+        .get("cannot_open")
+        .and_then(|c| c.get("reason"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    format!("cannot open ({alg}): {reason}")
+}
+
 /// Verify records handed in on standard input, one verdict per record.
 ///
 /// This exists so that a client which reads the bus itself — the pi extension does — obtains the same
@@ -934,7 +1249,10 @@ pub fn verify(db: &crate::config::Target, json: bool) -> Result<(), Error> {
 ///
 /// Returns one line per record that could not be opened. A body that does not open is removed rather
 /// than printed: an unopenable body is an error, never content.
-fn decrypt_events(events: &mut [StoredRecord]) -> Result<Vec<String>, Error> {
+fn decrypt_events(
+    events: &mut [StoredRecord],
+    db: &crate::config::Target,
+) -> Result<Vec<String>, Error> {
     let key = crate::seal::Key::from_env()?;
     let mut failures = Vec::new();
     for event in events.iter_mut() {
@@ -942,6 +1260,29 @@ fn decrypt_events(events: &mut [StoredRecord]) -> Result<Vec<String>, Error> {
         if crate::seal::enc_info(&value).is_none() {
             continue;
         }
+
+        // An envelope addressed to recipients is opened when this session is one of them. When it is
+        // not, the body is left exactly as stored: it is somebody else's record, not a failure, and
+        // it has to survive the read so that whoever holds the key can open it through `msgq open`.
+        if crate::envelope::is_envelope(&value) {
+            // The principal this invocation signs as, so a shared bus opens what its identity was
+            // sealed for rather than what this machine's shell name would have been.
+            let Some(signing) = crate::keys::load(&signing_principal_of(db)?)? else {
+                continue;
+            };
+            match crate::envelope::open_for(&mut value, &signing) {
+                Ok(crate::envelope::Opened::Body) => event.payload = serde_json::to_vec(&value)?,
+                Ok(crate::envelope::Opened::Elsewhere(_))
+                | Ok(crate::envelope::Opened::UnknownAlgorithm(_)) => {}
+                Err(reason) => {
+                    crate::seal::blank_body(&mut value);
+                    event.payload = serde_json::to_vec(&value)?;
+                    failures.push(format!("{}#{}: {reason}", event.topic, event.offset));
+                }
+            }
+            continue;
+        }
+
         let outcome = match &key {
             Some(key) => crate::seal::open_body(&mut value, key).map_err(|error| error.to_string()),
             None => Err(
@@ -1070,7 +1411,7 @@ pub fn follow(
             continue;
         }
 
-        for failure in decrypt_events(&mut batch)? {
+        for failure in decrypt_events(&mut batch, db)? {
             eprintln!("msgq: {failure}");
         }
         for event in batch {

@@ -17,9 +17,14 @@ rather than store the body unsealed, unless the caller asks for plaintext explic
 - **THEN** the body SHALL be sealed under the bus key when one is configured, and the client SHALL say
   which of the two happened
 
-#### Scenario: An unknown recipient stops the publish
-- **WHEN** a client publishes to a participant whose key it does not hold
+#### Scenario: An unknown recipient is refused when it was named
+- **WHEN** the caller names a recipient whose key the client does not hold
 - **THEN** the publish SHALL fail, naming the address and the flag that would store it unsealed
+
+#### Scenario: A first contact falls back and says so
+- **WHEN** a client publishes to a participant whose key it does not hold, and the caller named nobody
+- **THEN** the body SHALL be sealed with the bus key when one is configured, or stored unsealed when
+  none is, and the client SHALL say which when any key is in play
 
 #### Scenario: Plaintext has to be meant
 - **WHEN** the caller asks for plaintext explicitly

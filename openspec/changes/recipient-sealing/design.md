@@ -126,8 +126,18 @@ exactly as they did. A reader switches on `alg`, which it already does.
   --plaintext           -> store unsealed, and say so
 ```
 
-The error on an unknown recipient is the point: a first-contact message on a shared bus cannot be
-sealed, and silently storing it in plaintext is the exact outcome this change exists to prevent.
+The error is for a recipient the caller **named**: that is a mistake worth stopping.
+
+A publish that names nobody is a different case, and implementing this changed the rule. Refusing
+every first contact broke `msgq ask` (which publishes to a peer nobody has met), the project's own
+behavioural fixtures, and every script that writes to a session address for the first time — because
+nobody can have a key before they have ever been heard from. So a first contact falls back to the bus
+key, or to plaintext when there is none, and *says which* whenever any key is in play. On a bus with no
+key material at all, plaintext is the state of the world rather than a decision, and announcing it on
+every publish would be noise.
+
+What the change still refuses is a silent downgrade: whenever a key is configured, the report says
+whether the record was sealed for its recipients or with the bus key.
 
 ### Opening is one verb, and the extension delegates
 

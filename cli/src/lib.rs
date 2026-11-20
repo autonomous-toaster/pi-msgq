@@ -10,6 +10,7 @@ pub mod cli;
 pub mod commands;
 pub mod completion;
 pub mod config;
+pub mod envelope;
 pub mod error;
 pub mod keys;
 pub mod pg;
