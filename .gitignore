@@ -8,3 +8,4 @@ extension/node_modules/
 *.db
 *.db-wal
 *.db-shm
+.kata.local.toml
