@@ -95,8 +95,15 @@ pub enum CursorAction {
 ///
 /// Deliberately takes no bus: making a key trusts nobody, so it needs no cooperation and cannot be
 /// made to depend on one.
-pub fn keygen(principal: Option<String>, force: bool) -> Result<(), Error> {
-    let principal = principal.unwrap_or_else(crate::keys::principal_name);
+pub fn keygen(
+    db: &crate::config::Target,
+    principal: Option<String>,
+    force: bool,
+) -> Result<(), Error> {
+    let principal = match principal {
+        Some(name) => name,
+        None => signing_principal_of(db)?,
+    };
     let path = crate::keys::key_path(&principal)?;
     if path.exists() && !force {
         return Err(Error::usage(format!(
@@ -112,9 +119,25 @@ pub fn keygen(principal: Option<String>, force: bool) -> Result<(), Error> {
     Ok(())
 }
 
+/// The principal this invocation signs as, asking the bus only when it knows.
+///
+/// A shared bus names the caller, and that name is what a peer pins — so a key made here belongs to
+/// it. A local bus names nobody, and this machine names itself; asking it would open a file to learn
+/// nothing.
+fn signing_principal_of(db: &crate::config::Target) -> Result<String, Error> {
+    if crate::config::credential().is_none() {
+        return Ok(crate::keys::principal_name());
+    }
+    let (store, _) = Store::open(db)?;
+    signing_principal(&store)
+}
+
 /// Print a principal's fingerprint, in the form a peer compares out of band.
-pub fn fingerprint(principal: Option<String>) -> Result<(), Error> {
-    let principal = principal.unwrap_or_else(crate::keys::principal_name);
+pub fn fingerprint(db: &crate::config::Target, principal: Option<String>) -> Result<(), Error> {
+    let principal = match principal {
+        Some(name) => name,
+        None => signing_principal_of(db)?,
+    };
     let signing = crate::keys::load(&principal)?.ok_or_else(|| {
         Error::runtime(format!(
             "no key for {principal}; run 'msgq keygen {principal}' first"

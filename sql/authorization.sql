@@ -170,8 +170,10 @@ $$;
 -- Who the stored record says wrote it.
 --
 -- The identity is the default. A record may name an address inside the identity's own scopes,
--- which is how one credential serves several sessions: each process speaks as itself, and none of
--- them can speak as somebody else.
+-- which is how one credential serves several sessions. What the scope check buys is authorization,
+-- not authorship: every session of one principal holds the same credential, so the bus cannot tell
+-- them apart, and one of them can name another's address. Telling sessions apart needs a signature
+-- the reader checks, which lives in the client and not here.
 CREATE OR REPLACE FUNCTION msgq.sender_of(record JSONB, ident msgq.identity)
 RETURNS TEXT
 LANGUAGE plpgsql

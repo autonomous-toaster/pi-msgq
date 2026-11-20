@@ -55,9 +55,9 @@
 
 ## 7. Integration
 
-- [ ] 7.1 Run the end-to-end scenarios and verify a signed publish reads as trusted on a peer that pinned the fingerprint, as unverified on one that did not, and as refused after rotation.
-- [ ] 7.2 Verify the same scenarios pass against both storage engines, per the conformance requirement.
-- [ ] 7.3 Correct the `sender_of` comment in `sql/authorization.sql` so it no longer claims a session cannot speak as a sibling, and verify the spec wording and the comment agree.
+- [x] 7.1 Run the end-to-end scenarios and verify a signed publish reads as trusted on a peer that pinned the fingerprint, as unverified on one that did not, and as refused after rotation.
+- [x] 7.2 Verify the same scenarios pass against both storage engines, per the conformance requirement.
+- [x] 7.3 Correct the `sender_of` comment in `sql/authorization.sql` so it no longer claims a session cannot speak as a sibling, and verify the spec wording and the comment agree.
 
 ## Workflow follow-up
 

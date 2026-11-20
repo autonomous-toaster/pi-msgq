@@ -203,8 +203,8 @@ fn run(cli: Cli) -> Result<(), Error> {
                 fingerprint,
             } => commands::trust_rotate(&db, &principal, &fingerprint),
         },
-        Command::Keygen { principal, force } => commands::keygen(principal, force),
-        Command::Fingerprint { principal } => commands::fingerprint(principal),
+        Command::Keygen { principal, force } => commands::keygen(&db, principal, force),
+        Command::Fingerprint { principal } => commands::fingerprint(&db, principal),
         Command::Db { action } => match action {
             DbCmd::Info => commands::db_info(&db),
         },
