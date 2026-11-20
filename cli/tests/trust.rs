@@ -606,3 +606,83 @@ fn the_session_layer_outranks_the_keyring_but_yields_to_the_environment() {
     );
     assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "trusted");
 }
+
+#[test]
+fn the_keyring_round_trips_and_leaves_no_half_written_file() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let old = fingerprint(&home, &db);
+
+    // A rotation writes current and retired together, which is the case a partial write would ruin.
+    assert_eq!(
+        run(&home, &db, &["trust", "add", "alice", &old], &[]).code,
+        0
+    );
+    assert_eq!(run(&home, &db, &["keygen", "--force"], &[]).code, 0);
+    let new = fingerprint(&home, &db);
+    assert_eq!(
+        run(&home, &db, &["trust", "rotate", "alice", &new], &[]).code,
+        0
+    );
+
+    let dir = home.join(".config/msgq/trust");
+    let files: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flat_map(|entry| std::fs::read_dir(entry.unwrap().path()).unwrap().flatten())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(files.iter().any(|name| name == "anchors.json"), "{files:?}");
+    assert!(
+        !files.iter().any(|name| name.ends_with(".tmp")),
+        "a temporary file was left behind: {files:?}"
+    );
+
+    // What was written is what is read back, retired entry included.
+    let listing = run(&home, &db, &["trust", "list", "--json"], &[]);
+    let value = wrapped(listing.stdout.trim());
+    let alice = value["durable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["principal"] == "alice")
+        .unwrap();
+    assert_eq!(alice["current"], new.as_str());
+    assert_eq!(alice["retired"][0]["fingerprint"], old.as_str());
+}
+
+#[test]
+fn an_anchor_from_the_environment_is_never_written_down() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let fp = fingerprint(&home, &db);
+
+    let env = format!("alice:{fp}");
+    let trusted = run(
+        &home,
+        &db,
+        &["read", "group/a", "--from-start", "--json"],
+        &[("MSGQ_TRUST", &env)],
+    );
+    assert_eq!(
+        wrapped(trusted.stdout.trim())["verdict"]["state"],
+        "trusted"
+    );
+
+    // Nothing was recorded, so the next invocation trusts nobody again.
+    assert!(
+        !home.join(".config/msgq/trust").exists(),
+        "the environment wrote a keyring"
+    );
+    let after = run(
+        &home,
+        &db,
+        &["read", "group/a", "--from-start", "--json"],
+        &[],
+    );
+    assert_eq!(
+        wrapped(after.stdout.trim())["verdict"]["state"],
+        "unverified"
+    );
+}

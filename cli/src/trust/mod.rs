@@ -244,14 +244,32 @@ pub fn bus_id(target: &Target) -> Result<String, Error> {
 }
 
 fn absolute(path: &std::path::Path) -> Result<String, Error> {
-    match std::fs::canonicalize(path) {
-        Ok(resolved) => Ok(resolved.display().to_string()),
-        Err(_) => {
-            let cwd = std::env::current_dir()
-                .map_err(|e| Error::runtime(format!("cannot resolve the bus path: {e}")))?;
-            Ok(cwd.join(path).display().to_string())
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return Ok(resolved.display().to_string());
+    }
+    // The bus may not exist yet — a keyring is written before the first publish — so the path has to
+    // be settled without asking the filesystem, and two spellings of it have to land on one name.
+    let cwd = std::env::current_dir()
+        .map_err(|e| Error::runtime(format!("cannot resolve the bus path: {e}")))?;
+    Ok(lexical(&cwd.join(path)).display().to_string())
+}
+
+/// Resolve `.` and `..` without touching the filesystem.
+fn lexical(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
         }
     }
+    out
 }
 
 /// Drop any password from a connection string before it becomes part of a directory name.

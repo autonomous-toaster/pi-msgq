@@ -135,6 +135,37 @@ fn a_bus_name_is_stable_and_differs_between_buses() {
     let b = Target::Local(PathBuf::from("/tmp/two.db"));
     assert_eq!(bus_id(&a).unwrap(), bus_id(&a).unwrap());
     assert_ne!(bus_id(&a).unwrap(), bus_id(&b).unwrap());
+
+    // Two spellings of one path are one bus, or an anchor would stop applying after a cd.
+    let spelled_differently = Target::Local(PathBuf::from("/tmp/./one.db"));
+    assert_eq!(bus_id(&a).unwrap(), bus_id(&spelled_differently).unwrap());
+}
+
+#[test]
+fn several_anchors_can_be_given_at_once() {
+    let two = format!(
+        "alice:{},bob:{}",
+        hex_fingerprint('a'),
+        hex_fingerprint('b')
+    );
+    let parsed = parse_layer(TRUST_ENV, &two, Layer::Environment).unwrap();
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].anchor.principal, "alice");
+    assert_eq!(parsed[1].anchor.principal, "bob");
+    assert!(parsed.iter().all(|l| l.layer == Layer::Environment));
+
+    // A shell may quote the value with spaces instead of commas.
+    let spaced = format!(
+        "alice:{} bob:{}",
+        hex_fingerprint('a'),
+        hex_fingerprint('b')
+    );
+    assert_eq!(
+        parse_layer(TRUST_ENV, &spaced, Layer::Environment)
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]
