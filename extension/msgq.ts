@@ -65,6 +65,16 @@ import {
 } from "./src/delivery.ts";
 import { type CommandDeps, registerCommands } from "./src/commands.ts";
 import {
+	clientRunner,
+	emptySessionTrust,
+	formatTrustReport,
+	parseTrustRequest,
+	sessionEnv,
+	type SessionTrust,
+	verdictLine,
+	verifyRecord,
+} from "./src/trust.ts";
+import {
 	type Card,
 	type CardOverrides,
 	CARD_MAX_BYTES,
@@ -131,6 +141,8 @@ export default function (pi: ExtensionAPI) {
 	let bus: Bus | null = null;
 	let subscriptions: Subscription[] = [];
 	let coalescer = new Coalescer();
+	// What this conversation believes, as opposed to what the keyring on disk believes.
+	let sessionTrust: SessionTrust = emptySessionTrust();
 	let context: ExtensionContext | undefined;
 	let presence: Presence | undefined;
 	let renewTimer: ReturnType<typeof setInterval> | undefined;
@@ -555,11 +567,13 @@ export default function (pi: ExtensionAPI) {
 			if (turn) trackInFlight(record, offset, phases);
 		}
 
+		const verdict = verdictOf(record);
+
 		try {
 			pi.sendMessage(
 				{
 					customType: MESSAGE_TYPE,
-					content: formatMessage(record, address, reference),
+					content: formatMessage(record, address, reference, verdict),
 					display: true,
 					details: { items: [itemOf(record, address)] } satisfies MsgqDetails,
 				},
@@ -618,6 +632,26 @@ export default function (pi: ExtensionAPI) {
 
 	// The agent-facing surface: one tool that delegates, so the wire lives in the CLI.
 	const msgqBin = process.env.MSGQ_BIN?.trim() || "msgq";
+
+	/** The client, asked what one record is worth. */
+	const trustRunner = clientRunner(msgqBin);
+
+	/**
+	 * The verdict line a delivered record carries, and the tally of who has not been pinned.
+	 *
+	 * The answer comes from the client, never from this module: a second implementation of the
+	 * signature would be a second answer to the same question.
+	 */
+	function verdictOf(record: unknown): string {
+		const verdict = verifyRecord(trustRunner, record, sessionTrust);
+		if (verdict.state === "unverified") sessionTrust.unverified += 1;
+		return verdictLine(verdict);
+	}
+
+	/** Run a trust verb through the client, with this session's layer in its environment. */
+	function runTrust(args: string[]): string {
+		return clientRunner(msgqBin)(args, undefined, sessionEnv(sessionTrust));
+	}
 
 	function toolText(content: string, details?: unknown) {
 		return { content: [{ type: "text" as const, text: content }], details };
@@ -826,6 +860,7 @@ export default function (pi: ExtensionAPI) {
 		msgqBin: () => msgqBin,
 		lastInbound: () => lastInbound,
 		answered: noteAnswered,
+		trust: () => ({ session: sessionTrust, run: runTrust }),
 	};
 	registerCommands(pi, commandDeps);
 

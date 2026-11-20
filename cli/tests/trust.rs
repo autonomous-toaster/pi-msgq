@@ -572,3 +572,37 @@ fn the_listing_names_the_bus_and_says_where_each_anchor_came_from() {
         allowed.stdout
     );
 }
+
+#[test]
+fn the_session_layer_outranks_the_keyring_but_yields_to_the_environment() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let real = fingerprint(&home, &db);
+    assert_eq!(
+        run(&home, &db, &["trust", "add", "alice", &real], &[]).code,
+        0
+    );
+
+    let other = format!("alice:SHA256:{}", "c".repeat(64));
+    // Recorded durably at one fingerprint, the session naming another: the session decides, and says so.
+    let out = run(
+        &home,
+        &db,
+        &["read", "group/a", "--from-start", "--json"],
+        &[("MSGQ_TRUST_SESSION", &other)],
+    );
+    let value = wrapped(out.stdout.trim());
+    assert_ne!(value["verdict"]["state"], "trusted", "{value}");
+    assert!(out.stderr.contains("disagree"), "{}", out.stderr);
+
+    // The environment is more transient still, so it wins over both.
+    let env = format!("alice:{real}");
+    let out = run(
+        &home,
+        &db,
+        &["read", "group/a", "--from-start", "--json"],
+        &[("MSGQ_TRUST", &env), ("MSGQ_TRUST_SESSION", &other)],
+    );
+    assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "trusted");
+}

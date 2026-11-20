@@ -203,11 +203,15 @@ export function formatMessage(
 	record: MsgqRecord,
 	address: string,
 	reference?: ReferencedRecord,
+	verdict?: string,
 ): string {
 	const body = recordBody(record);
 	const about = reference ? [formatReference(reference)] : [];
+	// The verdict travels with the message, never inside it: the renderer above shows the record,
+	// and this is what the model is told about who sent it.
+	const trust = verdict ? [`[msgq] ${verdict}`] : [];
 	if (!wantsReply(record)) {
-		return [`[msgq] from ${record.from} on ${address}`, ...about, body].join("\n");
+		return [`[msgq] from ${record.from} on ${address}`, ...trust, ...about, body].join("\n");
 	}
 	// A soft parenthetical at the end gets ignored: the peer answers into its own
 	// transcript and the asker waits in vain. State the expected action, first, with
@@ -215,6 +219,7 @@ export function formatMessage(
 	return [
 		`[msgq] ${record.from} asks you a question through session ${address}`,
 		'Answer them using the peers tool: {"action":"reply","message":"<your answer>"}',
+		...trust,
 		...about,
 		"",
 		body,

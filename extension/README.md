@@ -389,6 +389,47 @@ That line is part of the rendering and never part of the content the model reads
 an ordinary record from `session/<self>` — the same identity your agent uses, so a peer that trusts
 this session answers you both.
 
+## Trust: who a message is really from
+
+The bus says who *wrote* a record; it cannot say who sent it, because whoever runs the database could
+stamp anything. So the reader decides, from a key it was given out of band. Every delivered record
+carries its verdict, and the model is told:
+
+```
+[msgq] from session/api-worker on session/planner
+[msgq] verdict: unverified SHA256:9fA2c3d4 — no anchor for this key
+build is green
+```
+
+`unverified` is a normal state, not a fault: a peer you have not pinned is still readable, and stays
+unverified however many times it speaks. Only you can change that, with a command:
+
+| Command | What it does |
+|---|---|
+| `/msgq-trust` | what is trusted: the bus, the keyring, and this conversation's own anchors |
+| `/msgq-trust add <principal> <fingerprint>` | pin a peer you compared a fingerprint with |
+| `/msgq-trust add <principal> <fingerprint> --session` | trust them for this conversation only |
+| `/msgq-trust revoke <principal>` | stop trusting them |
+| `/msgq-trust rotate <principal> <fingerprint>` | replace their key; reports how many records that refuses |
+
+- **It is a command, not a tool, on purpose.** A record cannot talk the session into trusting its
+  sender: nothing the model can call writes an anchor, and nothing arriving on the bus does either.
+- **Three layers, most transient first.** `MSGQ_TRUST` for one invocation, then this conversation's
+  own anchors, then the keyring on disk. The extension hands its layer to the client as
+  `MSGQ_TRUST_SESSION` rather than reimplementing the rule; when two layers name different keys for
+  one principal, the client uses the transient one and reports the disagreement.
+- **Session anchors die with the conversation.** `--session` is a separate word rather than a
+  default because an anchor that outlives the conversation and one that does not are different
+  promises. A second session on the same machine inherits none of the first's.
+- **The verdict comes from the client.** The extension asks `msgq verify` about each record it
+  delivers rather than carrying its own copy of the signature check, so there is one answer to what a
+  record is. It also means a session costs one short-lived process per delivered message.
+- **Rotation refuses history.** A record signed by a retired key is `refused` rather than quietly
+  demoted, which is what makes rotation mean something.
+
+One thing this deliberately does not do: tell two sessions of the same principal apart. One key
+belongs to a principal, so a sibling session holding it can still speak as its neighbour.
+
 ## Configuration
 
 | Setting | Flag | Environment | Default |

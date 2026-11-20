@@ -19,6 +19,11 @@ import {
 } from "./commands-text.ts";
 import { runPlanned } from "./run.ts";
 import { isError, planPeerAction } from "./tools.ts";
+import {
+	formatTrustReport,
+	parseTrustRequest,
+	type SessionTrust,
+} from "./trust.ts";
 
 /** Everything a command needs to know about the session it speaks for. */
 export interface CommandDeps {
@@ -30,6 +35,13 @@ export interface CommandDeps {
 	lastInbound(): { from: string; offset: number } | undefined;
 	/** A reply went out for the message at this offset, so nothing is owed for it. */
 	answered(offset: number): void;
+	/**
+	 * This conversation's own trust layer, and the client that answers questions about it.
+	 *
+	 * The extension never decides what a record is worth and never writes a keyring itself: it holds
+	 * the session's anchors in memory and hands them to the client as a layer.
+	 */
+	trust(): { session: SessionTrust; run(args: string[]): string };
 }
 
 /** A command needs a dialog, and this session cannot show one. */
@@ -264,6 +276,68 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
 				return;
 			}
 			await sendReply(pi, ctx, deps, message);
+		},
+	});
+
+	// Trusting a peer is a command, never a tool: a model reading a message must not be able to make
+	// the session believe something about who sent it.
+	pi.registerCommand("msgq-trust", {
+		description:
+			"Pin a peer's key, rotate or revoke one: /msgq-trust [list | add <principal> <fingerprint> | " +
+			"revoke <principal> | rotate <principal> <fingerprint>] [--session]",
+		handler: async (args, ctx) => {
+			const request = parseTrustRequest(args);
+			const { session, run } = deps.trust();
+
+			if (request.action === "error") {
+				say(ctx, request.message, "warning");
+				return;
+			}
+
+			if (request.action === "list") {
+				try {
+					const listing = run(request.json ? ["trust", "list", "--json"] : ["trust"]);
+					say(ctx, request.json ? listing.trimEnd() : formatTrustReport(listing, session));
+				} catch (error) {
+					say(ctx, `could not read the trust keyring: ${String(error)}`, "warning");
+				}
+				return;
+			}
+
+			// The session layer lives in memory and dies with the conversation, which is the whole
+			// difference between it and the keyring: one is a promise, the other is a note to self.
+			if (request.session) {
+				if (request.action === "add") {
+					session.anchors.set(request.principal, request.fingerprint);
+					say(ctx, `trusting ${request.principal} for this conversation only; nothing was written`);
+					return;
+				}
+				if (request.action === "revoke") {
+					const had = session.anchors.delete(request.principal);
+					say(
+						ctx,
+						had
+							? `forgot ${request.principal} for this conversation`
+							: `${request.principal} was not trusted for this conversation`,
+						had ? undefined : "warning",
+					);
+					return;
+				}
+				say(ctx, "a rotation always writes the keyring; drop --session to rotate", "warning");
+				return;
+			}
+
+			const verb =
+				request.action === "add"
+					? ["trust", "add", request.principal, request.fingerprint]
+					: request.action === "revoke"
+						? ["trust", "revoke", request.principal]
+						: ["trust", "rotate", request.principal, request.fingerprint];
+			try {
+				say(ctx, run(verb).trimEnd());
+			} catch (error) {
+				say(ctx, `the keyring refused: ${String(error)}`, "warning");
+			}
 		},
 	});
 }
