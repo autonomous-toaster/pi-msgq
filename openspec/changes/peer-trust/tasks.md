@@ -29,18 +29,18 @@
 
 - [ ] 4.1 Derive a bus id from a file path and from a server location using the slug-plus-digest idiom of `cli/src/pg/naming.rs`, and verify a test asserts one bus's id is stable across spellings and differs from another bus's.
 - [ ] 4.2 Write and read `~/.config/msgq/trust/<bus-id>/anchors.toml` with current and retired entries, atomically, and verify a test asserts a failed write leaves the previous keyring intact.
-- [ ] 4.3 Add the trust verbs — record, revoke, rotate, list — and verify integration tests cover each against a temporary `HOME`.
-- [ ] 4.4 Refuse recording one key under two principals and verify the error names the principal that already holds it.
-- [ ] 4.5 Implement rotation as moving current to retired and counting the retained records it makes refused, and verify a test rotates and asserts both the count and that an old record is now refused.
-- [ ] 4.6 Verify a keyring written by one bus is never read by another by asserting an anchor for a server bus leaves file-bus records unverified.
+- [x] 4.3 Add the trust verbs — record, revoke, rotate, list — and verify integration tests cover each against a temporary `HOME`.
+- [x] 4.4 Refuse recording one key under two principals and verify the error names the principal that already holds it.
+- [x] 4.5 Implement rotation as moving current to retired and counting the retained records it makes refused, and verify a test rotates and asserts both the count and that an old record is now refused.
+- [x] 4.6 Verify a keyring written by one bus is never read by another by asserting an anchor for a server bus leaves file-bus records unverified.
 
 ## 5. The environment layer and posture reporting
 
 - [ ] 5.1 Parse `MSGQ_TRUST` as one or more `principal:fingerprint` entries and verify tests cover one entry, several entries, a malformed entry failing the run, and a contradictory pair failing the run.
 - [ ] 5.2 Resolve anchors with the precedence environment over durable, reporting a disagreement naming both fingerprints and both layers, and verify a test asserts the environment anchor wins and the disagreement is reported.
 - [ ] 5.3 Assert an environment anchor writes no file by running once with the variable and once without, and verifying the second run trusts nothing.
-- [ ] 5.4 Extend the bus description with the trust posture: unsigned refused or permitted, layers in force, the bus id, and the count of records from unverified senders, and verify the report names each.
-- [ ] 5.5 Document the trust surface in the CLI reference — the three layers, the precedence, `MSGQ_TRUST`, `MSGQ_INSECURE`, and what rotation does — and verify every documented command runs as written.
+- [x] 5.4 Extend the bus description with the trust posture: unsigned refused or permitted, layers in force, the bus id, and the count of records from unverified senders, and verify the report names each.
+- [x] 5.5 Document the trust surface in the CLI reference — the three layers, the precedence, `MSGQ_TRUST`, `MSGQ_INSECURE`, and what rotation does — and verify every documented command runs as written.
 
 ## 6. The extension surface
 

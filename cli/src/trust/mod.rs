@@ -520,5 +520,7 @@ impl Reader {
     }
 }
 
+pub mod verbs;
+
 #[cfg(test)]
 mod tests;

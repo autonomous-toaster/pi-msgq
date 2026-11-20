@@ -172,8 +172,8 @@ verdict for a record it read by itself.
 ### Requirement: The trust posture is reportable
 
 The client's description of the bus SHALL report the trust posture: whether unsigned records are
-refused, which trust layers are in force, the identity of the bus the anchors belong to, and how many
-records seen in this invocation came from unverified senders.
+refused, which trust layers are in force, and the identity of the bus the anchors belong to. A read
+SHALL report how many of the records it showed came from senders the reader holds no anchor for.
 
 #### Scenario: The posture is named
 
@@ -185,7 +185,7 @@ records seen in this invocation came from unverified senders.
 - **WHEN** an operator asks about the bus
 - **THEN** the report SHALL name the bus its anchors apply to
 
-#### Scenario: Unverified senders are counted
+#### Scenario: Unverified senders are counted where the records are seen
 
-- **WHEN** an operator asks about the bus after reading
-- **THEN** the report SHALL state how many records came from unverified senders
+- **WHEN** a read shows records from senders with no anchor
+- **THEN** that read SHALL say how many of them there were

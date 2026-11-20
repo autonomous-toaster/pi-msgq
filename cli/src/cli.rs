@@ -248,6 +248,11 @@ pub enum Command {
         /// The principal whose key to name (default: this user at this host).
         principal: Option<String>,
     },
+    /// Record, revoke and list what this reader believes about a peer.
+    Trust {
+        #[command(subcommand)]
+        action: Option<TrustCmd>,
+    },
     /// Database information.
     Db {
         #[command(subcommand)]
@@ -296,6 +301,28 @@ pub enum CursorCmd {
     },
     /// Clear a consumer's offset.
     Reset { consumer: String, topic: String },
+}
+
+#[derive(Subcommand)]
+pub enum TrustCmd {
+    /// Show what is trusted on this bus, and where each anchor came from.
+    List {
+        /// Emit one JSON object instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Trust a principal at a fingerprint you obtained out of band.
+    Add {
+        principal: String,
+        fingerprint: String,
+    },
+    /// Stop trusting a principal.
+    Revoke { principal: String },
+    /// Replace a principal's key, retiring the old one and refusing its records.
+    Rotate {
+        principal: String,
+        fingerprint: String,
+    },
 }
 
 #[derive(Subcommand)]

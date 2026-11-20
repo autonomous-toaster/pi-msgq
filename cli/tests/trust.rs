@@ -358,3 +358,217 @@ fn a_conflicting_layer_is_reported_rather_than_resolved_silently() {
     assert_eq!(value["verdict"]["state"], "trusted");
     assert!(out.stderr.contains("disagree"), "{}", out.stderr);
 }
+
+/// The fingerprint this machine signs with, as a peer would be told it.
+fn fingerprint(home: &Path, db: &Path) -> String {
+    run(home, db, &["fingerprint"], &[])
+        .stdout
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn a_recorded_anchor_makes_the_next_read_trusted() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let fp = fingerprint(&home, &db);
+
+    let added = run(&home, &db, &["trust", "add", "alice", &fp], &[]);
+    assert_eq!(added.code, 0, "{}", added.stderr);
+    assert!(added.stdout.contains("trusted alice"), "{}", added.stdout);
+
+    let out = run(
+        &home,
+        &db,
+        &["read", "group/a", "--from-start", "--json"],
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let value = wrapped(out.stdout.trim());
+    assert_eq!(value["verdict"]["state"], "trusted");
+    assert_eq!(value["verdict"]["principal"], "alice");
+}
+
+#[test]
+fn recording_the_same_anchor_twice_changes_nothing() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    let fp = fingerprint(&home, &db).to_string();
+    // A key is only written on a publish, so make one first.
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let fp = if fp.is_empty() {
+        fingerprint(&home, &db)
+    } else {
+        fp
+    };
+
+    assert_eq!(
+        run(&home, &db, &["trust", "add", "alice", &fp], &[]).code,
+        0
+    );
+    let again = run(&home, &db, &["trust", "add", "alice", &fp], &[]);
+    assert_eq!(again.code, 0);
+    assert!(again.stdout.contains("already trusted"), "{}", again.stdout);
+}
+
+#[test]
+fn one_key_cannot_be_trusted_for_two_principals() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let fp = fingerprint(&home, &db);
+    assert_eq!(
+        run(&home, &db, &["trust", "add", "alice", &fp], &[]).code,
+        0
+    );
+
+    let second = run(&home, &db, &["trust", "add", "bob", &fp], &[]);
+    assert_eq!(second.code, 2);
+    assert!(
+        second.stderr.contains("already trusted for alice"),
+        "{}",
+        second.stderr
+    );
+}
+
+#[test]
+fn recording_over_a_current_key_is_a_rotation_not_a_second_anchor() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let first = fingerprint(&home, &db);
+    assert_eq!(
+        run(&home, &db, &["trust", "add", "alice", &first], &[]).code,
+        0
+    );
+
+    let replacement = format!("SHA256:{}", "b".repeat(64));
+    let out = run(&home, &db, &["trust", "add", "alice", &replacement], &[]);
+    assert_eq!(out.code, 2);
+    assert!(out.stderr.contains("rotate"), "{}", out.stderr);
+}
+
+#[test]
+fn rotation_retires_the_key_and_says_how_much_history_it_breaks() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "one"], &[]).code, 0);
+    assert_eq!(run(&home, &db, &["publish", "group/a", "two"], &[]).code, 0);
+    let old = fingerprint(&home, &db);
+    assert_eq!(
+        run(&home, &db, &["trust", "add", "alice", &old], &[]).code,
+        0
+    );
+
+    // A new key signs from here on; the old records are the ones rotation costs.
+    assert_eq!(run(&home, &db, &["keygen", "--force"], &[]).code, 0);
+    let new = fingerprint(&home, &db);
+    assert_ne!(new, old);
+
+    let rotated = run(&home, &db, &["trust", "rotate", "alice", &new], &[]);
+    assert_eq!(rotated.code, 0, "{}", rotated.stderr);
+    assert!(
+        rotated
+            .stdout
+            .contains("2 retained record(s) are now refused"),
+        "{}",
+        rotated.stdout
+    );
+
+    let out = run(
+        &home,
+        &db,
+        &["read", "group/a", "--from-start", "--json"],
+        &[],
+    );
+    assert_eq!(out.code, 1, "a retired key is not a successful read");
+    for line in out.stdout.trim().lines() {
+        let value = wrapped(line);
+        assert_eq!(value["verdict"]["state"], "refused");
+        assert!(
+            value["verdict"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("retired"),
+            "{value}"
+        );
+    }
+
+    // The retired fingerprint is kept, which is what makes the refusal explainable.
+    let listing = run(&home, &db, &["trust", "list", "--json"], &[]);
+    let value = wrapped(listing.stdout.trim());
+    let alice = value["durable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["principal"] == "alice")
+        .expect("alice is still recorded");
+    assert_eq!(alice["retired"][0]["fingerprint"], old.as_str());
+}
+
+#[test]
+fn revoking_returns_a_principal_to_unverified() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let fp = fingerprint(&home, &db);
+    assert_eq!(
+        run(&home, &db, &["trust", "add", "alice", &fp], &[]).code,
+        0
+    );
+    assert_eq!(run(&home, &db, &["trust", "revoke", "alice"], &[]).code, 0);
+
+    let out = run(
+        &home,
+        &db,
+        &["read", "group/a", "--from-start", "--json"],
+        &[],
+    );
+    assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "unverified");
+}
+
+#[test]
+fn an_anchor_belongs_to_one_bus_and_not_another() {
+    let home = temp_dir();
+    let one = home.join("one.db");
+    let two = home.join("two.db");
+    assert_eq!(run(&home, &one, &["publish", "group/a", "hi"], &[]).code, 0);
+    let fp = fingerprint(&home, &one);
+    assert_eq!(
+        run(&home, &one, &["trust", "add", "alice", &fp], &[]).code,
+        0
+    );
+
+    // The same key publishes on a second bus, where nothing was recorded for it.
+    assert_eq!(run(&home, &two, &["publish", "group/a", "hi"], &[]).code, 0);
+    let out = run(
+        &home,
+        &two,
+        &["read", "group/a", "--from-start", "--json"],
+        &[],
+    );
+    assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "unverified");
+}
+
+#[test]
+fn the_listing_names_the_bus_and_says_where_each_anchor_came_from() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    let fp = fingerprint(&home, &db);
+
+    let env = format!("alice:{fp}");
+    let out = run(&home, &db, &["trust"], &[("MSGQ_TRUST", &env)]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("bus:"), "{}", out.stdout);
+    assert!(out.stdout.contains("environment"), "{}", out.stdout);
+    assert!(out.stdout.contains("unsigned:   refused"), "{}", out.stdout);
+
+    let allowed = run(&home, &db, &["trust"], &[("MSGQ_INSECURE", "1")]);
+    assert!(
+        allowed.stdout.contains("unsigned:   read"),
+        "{}",
+        allowed.stdout
+    );
+}

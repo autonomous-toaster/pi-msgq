@@ -382,6 +382,49 @@ msgq read group/standup --from-start                     # opened for you, trans
 - A stream may hold plaintext and sealed records side by side, so turning encryption on does not
   orphan the history that came before it.
 
+## Trusting a sender
+
+A bus can say who *wrote* a record — on a shared server it checks the caller's scopes and stamps the
+sender itself. It cannot say who a sender *is*, because whoever runs the database could stamp
+anything. So the reader decides, and it decides from a key it was given out of band:
+
+```bash
+msgq keygen                              # a key for this machine; prints its fingerprint
+msgq fingerprint                         # the short form a peer compares
+msgq trust add alice SHA256:9fA2...       # pin a peer you have spoken to
+msgq trust                               # what is trusted here, and where each anchor came from
+msgq trust rotate alice SHA256:1c3d...    # replace a key; the old one stops being believed
+msgq trust revoke alice
+```
+
+Every record is printed with a verdict beside it — `trusted`, `unverified`, or `refused` with a
+reason — and the record itself stays exactly the bytes the bus stored:
+
+```json
+{ "topic": "group/standup", "offset": 4, "created_at": 1763...,
+  "verdict": { "state": "unverified", "fingerprint": "SHA256:...", "reason": "no anchor for this key" },
+  "record": { "v": 1, "type": "prompt", "from": "session/alice-1", "to": "group/standup", ... } }
+```
+
+- `unverified` is a settled state, not a defect: a peer you have not pinned is still readable, and
+  stays unverified however many times it speaks. Only `msgq trust` changes that, and nothing on the
+  bus can ask for it.
+- Trust is recorded against one bus. An anchor for the shared server does not travel to a file bus,
+  and `msgq trust` names the bus it is talking about.
+- Three layers decide, most transient first: `MSGQ_TRUST` for one invocation, the pi session's own
+  anchors, then the keyring on disk (`~/.config/msgq/trust/<bus-id>/anchors.json`). When two layers
+  name different fingerprints for one principal, the more transient one is used and the disagreement
+  is reported — never resolved quietly.
+- `msgq trust rotate` counts the retained records it makes unreadable, because rotation is the one
+  trust act that destroys value: a record signed by a retired key is `refused`, not quietly demoted.
+- `MSGQ_INSECURE=1` permits reading records that carry no signature at all, for one invocation.
+  Records with no usable signature are refused by default; presence and acknowledgement records are
+  exempt, because they are the bus's own progress and no client signs them.
+
+One thing this deliberately does not do: tell two sessions of the same principal apart. A key belongs
+to a principal, so a sibling session that holds the same key can still speak as its neighbour. Trust
+is about peers, not about yourself.
+
 ## Completion
 
 zsh, and zsh only: the script a tab runs calls back into the CLI for the names it cannot know.

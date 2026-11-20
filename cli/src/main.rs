@@ -7,7 +7,7 @@ use serde_json::json;
 
 use msgq::address;
 use msgq::card::{self, PathMode};
-use msgq::cli::{Cli, Command, ConsumersCmd, CursorCmd, DbCmd, Shell};
+use msgq::cli::{Cli, Command, ConsumersCmd, CursorCmd, DbCmd, Shell, TrustCmd};
 use msgq::commands::{self, AskArgs, ConsumersAction, CursorAction, FromSpec, PublishArgs};
 use msgq::completion;
 use msgq::error::Error;
@@ -191,6 +191,18 @@ fn run(cli: Cli) -> Result<(), Error> {
             Ok(())
         }
         Command::Verify { json } => commands::verify(&db, json),
+        Command::Trust { action } => match action.unwrap_or(TrustCmd::List { json: false }) {
+            TrustCmd::List { json } => commands::trust_list(&db, json),
+            TrustCmd::Add {
+                principal,
+                fingerprint,
+            } => commands::trust_add(&db, &principal, &fingerprint),
+            TrustCmd::Revoke { principal } => commands::trust_revoke(&db, &principal),
+            TrustCmd::Rotate {
+                principal,
+                fingerprint,
+            } => commands::trust_rotate(&db, &principal, &fingerprint),
+        },
         Command::Keygen { principal, force } => commands::keygen(principal, force),
         Command::Fingerprint { principal } => commands::fingerprint(principal),
         Command::Db { action } => match action {

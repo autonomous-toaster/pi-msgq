@@ -622,9 +622,25 @@ pub fn read(
     let failures = decrypt_events(&mut events)?;
     let mut refused: Vec<String> = Vec::new();
     let mut unsigned: Vec<String> = Vec::new();
+    let mut strangers = 0usize;
     for (event, verdict) in events.iter().zip(&verdicts) {
         render(event, verdict, json);
         refuse(verdict, event, &mut refused, &mut unsigned);
+        if matches!(
+            verdict,
+            crate::trust::Verdict::Unverified {
+                fingerprint: Some(_),
+                ..
+            }
+        ) {
+            strangers += 1;
+        }
+    }
+    if strangers > 0 {
+        // Counted where the records are seen: a posture printed by another invocation could not know.
+        eprintln!(
+            "msgq: {strangers} record(s) came from senders with no anchor; 'msgq trust list' shows whom you trust"
+        );
     }
     verdict_failures(&failures, &refused, &unsigned)
 }
@@ -724,6 +740,102 @@ fn report_conflicts(db: &crate::config::Target) -> Result<(), Error> {
         );
     }
     Ok(())
+}
+
+/// Show what is trusted on this bus.
+pub fn trust_list(db: &crate::config::Target, json: bool) -> Result<(), Error> {
+    let listing = crate::trust::verbs::list(db)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&crate::trust::verbs::describe_json(
+                &listing,
+                crate::trust::insecure()
+            ))?
+        );
+        return Ok(());
+    }
+    for line in crate::trust::verbs::describe(&listing, crate::trust::insecure()) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Record that a principal is trusted at a fingerprint obtained out of band.
+pub fn trust_add(
+    db: &crate::config::Target,
+    principal: &str,
+    fingerprint: &str,
+) -> Result<(), Error> {
+    let recorded = crate::trust::verbs::add(db, principal, fingerprint)?;
+    if recorded.unchanged {
+        println!(
+            "{} is already trusted at {}",
+            recorded.anchor.principal, recorded.anchor.current
+        );
+        return Ok(());
+    }
+    println!(
+        "trusted {} at {} on bus {}",
+        recorded.anchor.principal,
+        recorded.anchor.current,
+        crate::trust::bus_id(db)?
+    );
+    println!("keyring: {}", recorded.path.display());
+    Ok(())
+}
+
+/// Stop trusting a principal.
+pub fn trust_revoke(db: &crate::config::Target, principal: &str) -> Result<(), Error> {
+    let path = crate::trust::verbs::revoke(db, principal)?;
+    println!(
+        "revoked {} on bus {}",
+        principal.trim(),
+        crate::trust::bus_id(db)?
+    );
+    println!("keyring: {}", path.display());
+    Ok(())
+}
+
+/// Replace a principal's key, and say how much history that stops being trusted.
+pub fn trust_rotate(
+    db: &crate::config::Target,
+    principal: &str,
+    fingerprint: &str,
+) -> Result<(), Error> {
+    let today = today_utc();
+    let rotated = crate::trust::verbs::rotate(db, principal, fingerprint, &today)?;
+    println!(
+        "rotated {} from {} to {}",
+        rotated.anchor.principal, rotated.previous, rotated.anchor.current
+    );
+    println!("keyring: {}", rotated.path.display());
+    println!(
+        "{} retained record(s) are now refused: they are signed by the retired key",
+        rotated.refused_records
+    );
+    Ok(())
+}
+
+/// The date, without taking a dependency on the calendar for one line of output.
+fn today_utc() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = seconds / 86_400;
+    // Civil-from-days, the same arithmetic a date library would do.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Verify records handed in on standard input, one verdict per record.
@@ -1433,6 +1545,46 @@ pub fn db_info(db: &crate::config::Target) -> Result<(), Error> {
         resolve_retention(None).unwrap_or(crate::config::DEFAULT_RETENTION_S)
     );
     println!("credential:       {}", store.credential()?);
+    println!("trust_bus:        {}", crate::trust::bus_id(db)?);
+    println!(
+        "trust_unsigned:   {}",
+        if crate::trust::insecure() {
+            "read (MSGQ_INSECURE is set)"
+        } else {
+            "refused"
+        }
+    );
+    let listing = crate::trust::verbs::list(db)?;
+    let layers: Vec<String> = listing
+        .in_force
+        .iter()
+        .map(|l| l.layer.name().to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    println!(
+        "trust_anchors:    {} in force{}",
+        listing.in_force.len(),
+        if layers.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", layers.join(", "))
+        }
+    );
+    for conflict in &listing.conflicts {
+        let claims: Vec<String> = conflict
+            .claims
+            .iter()
+            .map(|(layer, fingerprint)| {
+                format!("{} says {}", layer.name(), crate::trust::short(fingerprint))
+            })
+            .collect();
+        println!(
+            "trust_conflict:   the layers disagree about {}: {}",
+            conflict.principal,
+            claims.join(", ")
+        );
+    }
     println!("encryption:       {}", crate::seal::describe()?);
     if let Some((principal, scopes)) = store.identity()? {
         println!(
