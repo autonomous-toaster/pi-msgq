@@ -770,13 +770,69 @@ pub fn trust_list(db: &crate::config::Target, json: bool) -> Result<(), Error> {
     Ok(())
 }
 
+/// Who a trust anchor is for, and at which fingerprint.
+///
+/// With `--self` both come from this machine: the principal publish would sign as, and that key's
+/// fingerprint. Trusting yourself needs no out-of-band channel — the key file is the claim and the
+/// answer — so a fingerprint naming some other key is refused rather than recorded: a session whose
+/// own records read unverified is a mistake dressed as a decision.
+fn resolve_self(
+    db: &crate::config::Target,
+    principal: Option<&str>,
+    fingerprint: Option<&str>,
+    this_machine: bool,
+) -> Result<(String, String), Error> {
+    if !this_machine {
+        let principal = principal.ok_or_else(|| {
+            Error::usage("a trust anchor needs a principal: trust add <principal> <fingerprint>")
+        })?;
+        let fingerprint = fingerprint.ok_or_else(|| {
+            Error::usage("a trust anchor needs a fingerprint: trust add <principal> <fingerprint>")
+        })?;
+        return Ok((principal.to_string(), fingerprint.to_string()));
+    }
+
+    // With --self there is no principal to name, so one positional is the fingerprint. Two would be
+    // an attempt to pin somebody else through the back door.
+    let named = match (principal, fingerprint) {
+        (Some(_), Some(_)) => {
+            return Err(Error::usage(
+                "--self takes at most one fingerprint: trust add --self [<fingerprint>]",
+            ));
+        }
+        (Some(one), None) | (None, Some(one)) => Some(one),
+        (None, None) => None,
+    };
+
+    let principal = signing_principal_of(db)?;
+    let key = crate::keys::load(&principal)?.ok_or_else(|| {
+        Error::usage(format!(
+            "no key for {principal} yet; publish once and it will be made, or name a fingerprint"
+        ))
+    })?;
+    let own = crate::keys::fingerprint(&key.verifying_key());
+    if let Some(given) = named {
+        let given = crate::keys::normalize_fingerprint(given)?;
+        if given != own {
+            return Err(Error::usage(format!(
+                "--self trusts the key this machine signs with, which is {own}; {given} is another key"
+            )));
+        }
+    } else {
+        eprintln!("msgq: this machine signs as {principal} at {own}");
+    }
+    Ok((principal, own))
+}
+
 /// Record that a principal is trusted at a fingerprint obtained out of band.
 pub fn trust_add(
     db: &crate::config::Target,
-    principal: &str,
-    fingerprint: &str,
+    principal: Option<&str>,
+    fingerprint: Option<&str>,
+    this_machine: bool,
 ) -> Result<(), Error> {
-    let recorded = crate::trust::verbs::add(db, principal, fingerprint)?;
+    let (principal, fingerprint) = resolve_self(db, principal, fingerprint, this_machine)?;
+    let recorded = crate::trust::verbs::add(db, &principal, &fingerprint)?;
     if recorded.unchanged {
         println!(
             "{} is already trusted at {}",

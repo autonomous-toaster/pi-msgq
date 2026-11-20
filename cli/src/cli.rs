@@ -313,8 +313,13 @@ pub enum TrustCmd {
     },
     /// Trust a principal at a fingerprint you obtained out of band.
     Add {
-        principal: String,
-        fingerprint: String,
+        /// The principal to trust. Omitted with --self, which trusts this machine's own key.
+        principal: Option<String>,
+        /// The fingerprint to trust. With --self, defaults to this machine's own key.
+        fingerprint: Option<String>,
+        /// Trust the key this machine signs with, resolved the way publish resolves it.
+        #[arg(long = "self")]
+        this_machine: bool,
     },
     /// Stop trusting a principal.
     Revoke { principal: String },

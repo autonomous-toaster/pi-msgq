@@ -740,3 +740,78 @@ fn a_question_is_signed_like_any_other_record() {
     assert_eq!(value["record"]["meta"]["reply"], true);
     assert_eq!(value["record"]["meta"]["ack"], true);
 }
+
+#[test]
+fn trusting_this_machine_needs_no_fingerprint_typed_by_hand() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(
+        run(&home, &db, &["publish", "group/a", "mine"], &[]).code,
+        0
+    );
+
+    let added = run(&home, &db, &["trust", "add", "--self"], &[]);
+    assert_eq!(added.code, 0, "{}", added.stderr);
+    // The principal publish signs as, and the key's own fingerprint, reported so it can be compared.
+    assert!(
+        added.stderr.contains("this machine signs as"),
+        "{}",
+        added.stderr
+    );
+    let own = fingerprint(&home, &db);
+    assert!(added.stdout.contains(&own), "{}", added.stdout);
+
+    let out = run(
+        &home,
+        &db,
+        &["read", "group/a", "--from-start", "--json"],
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "trusted");
+}
+
+#[test]
+fn trusting_this_machine_accepts_its_own_fingerprint_and_refuses_another() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    assert_eq!(
+        run(&home, &db, &["publish", "group/a", "mine"], &[]).code,
+        0
+    );
+    let own = fingerprint(&home, &db);
+
+    let named = run(&home, &db, &["trust", "add", "--self", &own], &[]);
+    assert_eq!(named.code, 0, "{}", named.stderr);
+
+    let other = format!("SHA256:{}", "d".repeat(64));
+    let refused = run(&home, &db, &["trust", "add", "--self", &other], &[]);
+    assert_eq!(
+        refused.code, 2,
+        "trusting yourself at the wrong key is a mistake, not a decision"
+    );
+    assert!(refused.stderr.contains(&own), "{}", refused.stderr);
+    assert!(refused.stderr.contains("another key"), "{}", refused.stderr);
+}
+
+#[test]
+fn a_trust_anchor_needs_a_principal_unless_it_is_this_machine() {
+    let home = temp_dir();
+    let db = home.join("bus.db");
+
+    let nothing = run(&home, &db, &["trust", "add"], &[]);
+    assert_eq!(nothing.code, 2);
+    assert!(
+        nothing.stderr.contains("needs a principal"),
+        "{}",
+        nothing.stderr
+    );
+
+    let two = run(&home, &db, &["trust", "add", "alice", "bob", "--self"], &[]);
+    assert_eq!(two.code, 2);
+    assert!(
+        two.stderr.contains("at most one fingerprint"),
+        "{}",
+        two.stderr
+    );
+}

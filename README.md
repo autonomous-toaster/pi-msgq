@@ -428,6 +428,11 @@ reason — and the record itself stays exactly the bytes the bus stored:
   msgq read group/standup --from-start --json | jq -c .record | msgq verify --json
   ```
 
+- **Trusting yourself** needs no out-of-band channel: `msgq trust add --self` reads the key this
+  machine signs with, records it, and prints the principal and fingerprint so you can compare them. A
+  fingerprint naming any other key is refused — a session whose own records read unverified is a
+  mistake dressed as a decision. Anchors are per bus, so pin yourself on each bus you use.
+
 One thing this deliberately does not do: tell two sessions of the same principal apart. A key belongs
 to a principal, so a sibling session that holds the same key can still speak as its neighbour. Trust
 is about peers, not about yourself.

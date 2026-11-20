@@ -72,6 +72,9 @@
 - [x] 8.8 Update `cli/README.md`, `maki/README.md` and the maki plugin for the record shape and the removed `--with-offset`, and verify every documented command runs as written.
 - [x] 8.9 Remove the last references to the old allowlist name (`scripts/gitlab-watch.sh`, the notify skill, the end-to-end driver) and add `/msgq-trust` to the command-surface expectation.
 
+- [x] 8.10 Add `msgq trust add --self [<fingerprint>]` so this machine can pin itself without knowing the principal name, and verify tests cover the derived case, its own fingerprint, a fingerprint naming another key, and two positionals.
+- [x] 8.11 Document self-trust in both READMEs and verify the commands run as written.
+
 ## Workflow follow-up
 
 - Archive the change after the project's review requirements are satisfied.

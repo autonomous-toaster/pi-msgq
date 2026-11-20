@@ -176,7 +176,7 @@ msgq [--db <PATH>] <COMMAND>
 | `cursor reset <CONSUMER> <TOPIC>` | clear an offset |
 | `keygen [PRINCIPAL] [--force]` | create this machine's signing key; never touches a bus |
 | `fingerprint [PRINCIPAL]` | print a key's `SHA256:` fingerprint, to compare out of band |
-| `trust [list\|add\|revoke\|rotate]` | record, rotate, revoke and show what this reader believes about a peer |
+| `trust [list\|add\|revoke\|rotate]` | record, rotate, revoke and show what this reader believes about a peer; `add --self` pins this machine |
 | `verify [--json]` | reach a verdict about records handed in on standard input, one per line |
 | `db info` | path, size, contents, protocol version, per-consumer lag, record ages |
 | `prune --older-than <AGE> [--apply]` | remove records older than an age, never one a consumer has not passed |
@@ -284,6 +284,10 @@ msgq trust revoke alice
 - `msgq trust` never invents an anchor. Recording requires a principal and a fingerprint typed by a
   person, and one key belongs to one principal: recording somebody else's key is refused and names
   who already holds it.
+- `msgq trust add --self [<fingerprint>]` is the one exception, and only because there is no other
+  party to be wrong about: it names the principal this machine signs as and reads the fingerprint
+  from that key, printing both. A fingerprint naming any other key is refused, so the flag cannot
+  become a way to pin a peer without saying whose key it is.
 - Recording over a current key is refused rather than done silently; `trust rotate` is that act, and
   it moves the old fingerprint to a retired list, reports how many retained records it makes refused,
   and keeps the retired fingerprint so a refusal can say why.

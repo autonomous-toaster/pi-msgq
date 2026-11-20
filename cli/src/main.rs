@@ -196,7 +196,13 @@ fn run(cli: Cli) -> Result<(), Error> {
             TrustCmd::Add {
                 principal,
                 fingerprint,
-            } => commands::trust_add(&db, &principal, &fingerprint),
+                this_machine,
+            } => commands::trust_add(
+                &db,
+                principal.as_deref(),
+                fingerprint.as_deref(),
+                this_machine,
+            ),
             TrustCmd::Revoke { principal } => commands::trust_revoke(&db, &principal),
             TrustCmd::Rotate {
                 principal,

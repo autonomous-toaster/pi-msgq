@@ -88,6 +88,11 @@ run as part of any other command.
 - **WHEN** a client publishes, reads, follows or lists without an explicit trust verb
 - **THEN** no anchor SHALL be written
 
+#### Scenario: This machine can be trusted without naming a principal
+- **WHEN** an operator records a trust anchor for the key this machine signs with
+- **THEN** the client SHALL resolve the principal and the fingerprint itself, report both, and SHALL
+  refuse a fingerprint naming any other key
+
 #### Scenario: Rotation states what it breaks
 
 - **WHEN** an operator rotates a principal's anchor
