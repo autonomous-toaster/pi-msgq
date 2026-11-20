@@ -2,13 +2,14 @@
   "v": 1,
   "type": "prompt",
   "from": "session/alice-1",
-  "to": "group/red",
+  "to": "session/red",
   "message": "hello",
   "meta": {
     "sig": {
+      "agree": "XnpGxUMLEKvv4KqrRPv45n2dY5gXKFPTv8M01yfN7g8",
       "alg": "ed25519",
       "key": "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE",
-      "sig": "vLCRJMnxyRuhmuGrSxKOPL2/jxuzE4qqBUQnNf2U/7nCN4a3kaM7JcW0yZ8dHRuJmgXCnpBebugTXpuz6ipSCA"
+      "sig": "qsTQ8tQFp+ni9uCN0e+CMf2eY1t4pXRDNMYupXoZ8xoUlbARF9RUVUd8radbLqptaosH2JWmh9POW7Vq/PGlBQ"
     }
   }
 }

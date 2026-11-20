@@ -40,13 +40,13 @@ function publish(db: string, address: string, message: string): number {
 
 test("first attach delivers only new records, never the retained history", async () => {
 	const db = tempDb();
-	publish(db, "group/a", "old-1");
-	publish(db, "group/a", "old-2");
+	publish(db, "session/a", "old-1");
+	publish(db, "session/a", "old-2");
 
 	const bus = new HonkerBus(db, INTERVAL);
 	const seen: string[] = [];
 	const sub = bus.subscribe(
-		"group/a",
+		"session/a",
 		"c1",
 		(event) => seen.push((event.payload as any).message),
 		(error) => {
@@ -57,7 +57,7 @@ test("first attach delivers only new records, never the retained history", async
 	await wait(300);
 	assert.deepEqual(seen, [], "retained history must not be delivered");
 
-	publish(db, "group/a", "new-1");
+	publish(db, "session/a", "new-1");
 	await wait(400);
 	assert.deepEqual(seen, ["new-1"]);
 
@@ -73,11 +73,11 @@ test("the cursor advances only when the caller saves", async () => {
 	let delivered = -1;
 	let cursorAtDelivery = -1;
 	const sub = bus.subscribe(
-		"group/a",
+		"session/a",
 		"c1",
 		(event) => {
 			delivered = event.offset;
-			cursorAtDelivery = reader.stream("group/a").getOffset("c1");
+			cursorAtDelivery = reader.stream("session/a").getOffset("c1");
 		},
 		(error) => {
 			throw error;
@@ -85,7 +85,7 @@ test("the cursor advances only when the caller saves", async () => {
 	);
 
 	await wait(200);
-	const published = publish(db, "group/a", "one");
+	const published = publish(db, "session/a", "one");
 	await wait(400);
 
 	assert.equal(delivered, published, "the record is delivered");
@@ -93,7 +93,7 @@ test("the cursor advances only when the caller saves", async () => {
 
 	sub.save(delivered);
 	assert.equal(
-		reader.stream("group/a").getOffset("c1"),
+		reader.stream("session/a").getOffset("c1"),
 		published,
 		"saving persists progress",
 	);
@@ -110,7 +110,7 @@ test("two consumers advance independently", async () => {
 	const b: string[] = [];
 
 	const subA = bus.subscribe(
-		"group/a",
+		"session/a",
 		"a",
 		(event) => a.push((event.payload as any).message),
 		(error) => {
@@ -118,7 +118,7 @@ test("two consumers advance independently", async () => {
 		},
 	);
 	const subB = bus.subscribe(
-		"group/a",
+		"session/a",
 		"b",
 		(event) => b.push((event.payload as any).message),
 		(error) => {
@@ -127,7 +127,7 @@ test("two consumers advance independently", async () => {
 	);
 
 	await wait(200);
-	publish(db, "group/a", "m1");
+	publish(db, "session/a", "m1");
 	await wait(400);
 
 	assert.deepEqual(a, ["m1"]);
@@ -142,14 +142,14 @@ test("a single record can be read at a known offset without consuming", () => {
 	const db = tempDb();
 	// Offsets are global to the database, so a stream's are sparse: publishing to another
 	// stream in between is what makes the offset check below mean something.
-	const first = publish(db, "group/a", "the question");
-	publish(db, "group/b", "unrelated");
-	const later = publish(db, "group/a", "later");
+	const first = publish(db, "session/a", "the question");
+	publish(db, "session/b", "unrelated");
+	const later = publish(db, "session/a", "later");
 	assert.notEqual(later, first + 1, "the offsets in this fixture must be sparse");
 
 	const bus = new HonkerBus(db, INTERVAL);
 	const sub = bus.subscribe(
-		"group/a",
+		"session/a",
 		"c1",
 		() => {},
 		(error) => {
@@ -157,17 +157,17 @@ test("a single record can be read at a known offset without consuming", () => {
 		},
 	);
 	const reader = native.open(db, { watcherPollIntervalMs: INTERVAL });
-	const before = reader.stream("group/a").getOffset("c1");
+	const before = reader.stream("session/a").getOffset("c1");
 
-	const found = bus.readOne("group/a", first);
+	const found = bus.readOne("session/a", first);
 	assert.equal((found?.payload as any).message, "the question");
 
 	// An offset that belongs to another stream, or to no record at all, is not this
 	// stream's record, and must not be mistaken for the one that was asked for.
-	assert.equal(bus.readOne("group/a", first + 1), undefined);
-	assert.equal(bus.readOne("group/b", first), undefined);
+	assert.equal(bus.readOne("session/a", first + 1), undefined);
+	assert.equal(bus.readOne("session/b", first), undefined);
 	assert.equal(
-		reader.stream("group/a").getOffset("c1"),
+		reader.stream("session/a").getOffset("c1"),
 		before,
 		"reading must not advance a cursor",
 	);
@@ -184,7 +184,7 @@ test("resumes from the saved cursor after reopening", async () => {
 	const first: string[] = [];
 	let lastOffset = 0;
 	const sub1 = bus1.subscribe(
-		"group/a",
+		"session/a",
 		"c1",
 		(event) => {
 			first.push((event.payload as any).message);
@@ -195,19 +195,19 @@ test("resumes from the saved cursor after reopening", async () => {
 		},
 	);
 	await wait(200);
-	publish(db, "group/a", "while-running");
+	publish(db, "session/a", "while-running");
 	await wait(400);
 	assert.deepEqual(first, ["while-running"]);
 	sub1.save(lastOffset);
 	sub1.close();
 	bus1.close();
 
-	publish(db, "group/a", "while-away");
+	publish(db, "session/a", "while-away");
 
 	const bus2 = new HonkerBus(db, INTERVAL);
 	const second: string[] = [];
 	const sub2 = bus2.subscribe(
-		"group/a",
+		"session/a",
 		"c1",
 		(event) => second.push((event.payload as any).message),
 		(error) => {
@@ -226,7 +226,7 @@ test("an unsaved record is redelivered after reopening", async () => {
 	const bus1 = new HonkerBus(db, INTERVAL);
 	const seen: string[] = [];
 	const sub1 = bus1.subscribe(
-		"group/a",
+		"session/a",
 		"c1",
 		(event) => seen.push((event.payload as any).message),
 		(error) => {
@@ -234,7 +234,7 @@ test("an unsaved record is redelivered after reopening", async () => {
 		},
 	);
 	await wait(200);
-	publish(db, "group/a", "not-acted-on");
+	publish(db, "session/a", "not-acted-on");
 	await wait(400);
 	assert.deepEqual(seen, ["not-acted-on"]);
 	// Deliberately no save: the record was never acted on.
@@ -244,7 +244,7 @@ test("an unsaved record is redelivered after reopening", async () => {
 	const bus2 = new HonkerBus(db, INTERVAL);
 	const again: string[] = [];
 	const sub2 = bus2.subscribe(
-		"group/a",
+		"session/a",
 		"c1",
 		(event) => again.push((event.payload as any).message),
 		(error) => {
@@ -261,7 +261,7 @@ test("close is idempotent", () => {
 	const db = tempDb();
 	const bus = new HonkerBus(db, INTERVAL);
 	const sub = bus.subscribe(
-		"group/a",
+		"session/a",
 		"c1",
 		() => {},
 		() => {},
@@ -277,7 +277,7 @@ test("the log is emptied on the way out, with another handle still open", () => 
 	const db = tempDb();
 	const writer = native.open(db, { watcherPollIntervalMs: INTERVAL });
 	const payload = "x".repeat(10_000);
-	for (let i = 0; i < 200; i += 1) writer.stream("group/a").publish({ v: 1, i, payload });
+	for (let i = 0; i < 200; i += 1) writer.stream("session/a").publish({ v: 1, i, payload });
 	const before = walSize(db);
 	assert.ok(before > 1_000_000, `expected a grown log, got ${before}`);
 
@@ -287,7 +287,7 @@ test("the log is emptied on the way out, with another handle still open", () => 
 	assert.ok(walSize(db) < before, `expected the log to shrink from ${before}`);
 
 	// The records are in the database now, so the handle that stayed open can still read.
-	assert.equal(writer.stream("group/a").readSince(0, 1).length, 1);
+	assert.equal(writer.stream("session/a").readSince(0, 1).length, 1);
 
 	bus.close();
 	writer.close();

@@ -201,9 +201,9 @@ fn run_case(bus: &Bus, name: &str) -> Result<(), String> {
     match name {
         "ordering" => {
             for i in 0..3 {
-                bus.publish("group/a", &format!("record {i}"));
+                bus.publish("session/a", &format!("record {i}"));
             }
-            let out = bus.ok(&["read", "group/a", "--from-start"]);
+            let out = bus.ok(&["read", "session/a", "--from-start"]);
             let order: Vec<&str> = out
                 .lines()
                 .filter_map(|line| line.split_whitespace().last())
@@ -213,20 +213,20 @@ fn run_case(bus: &Bus, name: &str) -> Result<(), String> {
             }
         }
         "cursor-monotonic" => {
-            bus.publish("group/a", "one");
-            bus.publish("group/a", "two");
-            bus.ok(&["cursor", "set", "worker#c", "group/a", "2"]);
-            bus.ok(&["cursor", "set", "worker#c", "group/a", "1"]);
-            let value = bus.ok(&["cursor", "get", "worker#c", "group/a"]);
+            bus.publish("session/a", "one");
+            bus.publish("session/a", "two");
+            bus.ok(&["cursor", "set", "worker#c", "session/a", "2"]);
+            bus.ok(&["cursor", "set", "worker#c", "session/a", "1"]);
+            let value = bus.ok(&["cursor", "get", "worker#c", "session/a"]);
             if value.trim() != "2" {
                 return Err(format!("the cursor went backwards: {value:?}"));
             }
         }
         "read-is-not-destructive" => {
-            bus.publish("group/a", "one");
-            bus.publish("group/a", "two");
-            let first = bus.ok(&["read", "group/a", "--from-start"]);
-            let second = bus.ok(&["read", "group/a", "--from-start"]);
+            bus.publish("session/a", "one");
+            bus.publish("session/a", "two");
+            let first = bus.ok(&["read", "session/a", "--from-start"]);
+            let second = bus.ok(&["read", "session/a", "--from-start"]);
             if first != second {
                 return Err("two identical reads disagreed".to_string());
             }
@@ -236,8 +236,8 @@ fn run_case(bus: &Bus, name: &str) -> Result<(), String> {
             }
         }
         "retention-window" => {
-            bus.publish("group/a", "old one");
-            bus.publish("group/a", "old two");
+            bus.publish("session/a", "old one");
+            bus.publish("session/a", "old two");
             bus.age_out();
             let out = bus.run(&["prune", "--retention", "1s", "--apply"]);
             if out.code != 0 {
@@ -246,7 +246,7 @@ fn run_case(bus: &Bus, name: &str) -> Result<(), String> {
             if !out.stdout.contains("removed 2 record(s)") {
                 return Err(format!("nothing was removed: {}", out.stdout));
             }
-            let after = bus.ok(&["read", "group/a", "--from-start"]);
+            let after = bus.ok(&["read", "session/a", "--from-start"]);
             if !after.trim().is_empty() {
                 return Err(format!("records survived the window: {after}"));
             }
@@ -255,15 +255,15 @@ fn run_case(bus: &Bus, name: &str) -> Result<(), String> {
             // A consumer that has read nothing is the case the report exists for: everything the
             // window removed is lost to it.
             for i in 0..3 {
-                bus.publish("group/a", &format!("old {i}"));
+                bus.publish("session/a", &format!("old {i}"));
             }
             bus.age_out();
-            bus.publish("group/a", "new");
+            bus.publish("session/a", "new");
             let pruned = bus.run(&["prune", "--retention", "1s", "--apply"]);
             if pruned.code != 0 {
                 return Err(format!("prune failed: {}", pruned.stderr));
             }
-            let positioned = bus.run(&["cursor", "set", "worker#c", "group/a", "0"]);
+            let positioned = bus.run(&["cursor", "set", "worker#c", "session/a", "0"]);
             if positioned.code != 0 {
                 return Err(format!("cursor set failed: {}", positioned.stderr));
             }
@@ -272,14 +272,14 @@ fn run_case(bus: &Bus, name: &str) -> Result<(), String> {
             if !consumers.contains("\"dropped\":3") {
                 return Err(format!("the loss was not reported: {consumers}"));
             }
-            let relaxed = bus.run(&["read", "group/a", "--from-start"]);
+            let relaxed = bus.run(&["read", "session/a", "--from-start"]);
             if !relaxed
                 .stderr
                 .contains("3 record(s) are no longer retained")
             {
                 return Err(format!("no gap warning: {}", relaxed.stderr));
             }
-            let strict = bus.run(&["read", "group/a", "--from-start", "--strict"]);
+            let strict = bus.run(&["read", "session/a", "--from-start", "--strict"]);
             if strict.code != 1 {
                 return Err(format!("--strict did not refuse: {:?}", strict.code));
             }

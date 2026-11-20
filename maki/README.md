@@ -46,10 +46,10 @@ every instance look like every other one and silently drop their traffic as self
 | `name` | none | alias address, followed **in addition** to `session/<session-id>`: `session/<name>`, or a full address when it contains `/` |
 | `policy` | `"honor"` | `honor` acts on the record type; `display` only shows messages and never starts a turn |
 | `trust` | every sender | list (or comma string) of addresses allowed to act; others are display-only |
-| `presence` | `true` | advertise on `group/presence` so `msgq sessions` lists the session |
+| `presence` | `true` | advertise on `bus/presence` so `msgq sessions` lists the session |
 | `bin` | `$MSGQ_BIN` or `msgq` | the CLI to run |
 | `db` | `$MSGQ_DB_URI`, else `$MSGQ_DB`, else the CLI default | bus location |
-| `topics` | none | extra addresses to follow, e.g. `{ "group/ci" }` |
+| `topics` | none | extra addresses to follow, e.g. `{ "session/ci" }` |
 | `ttl` | `30` | presence lease, in seconds |
 | `presence_every_ms` | `10000` | presence renewal interval |
 | `context` | `"auto"` | derive the locator card from the current directory; `"off"` disables it |
@@ -60,7 +60,7 @@ require("msgq").setup({
   name = "planner",
   policy = "honor",
   trust = { "cli/alice@mac", "session/orchestrator" },
-  topics = { "group/ci" },
+  topics = { "session/ci" },
 })
 ```
 
@@ -108,7 +108,7 @@ are terminal and send nothing further.
 | `/reply [message]` | answer the message received most recently |
 
 With no message, the command opens `$EDITOR` on a draft; an empty or abandoned draft sends
-nothing. Addresses that carry a scheme (`cli/`, `group/`, `cwd/`) are passed to the CLI as typed.
+nothing. Addresses that carry a scheme (`cli/`, `session/`, `cwd/`) are passed to the CLI as typed.
 Sending from a command publishes as this session and asks to be told when the peer's run ends.
 
 ## The `msgq` tool
@@ -132,7 +132,7 @@ sender's address.
 
 ## Identity and presence
 
-The session advertises itself on `group/presence` while it runs, so `msgq sessions` lists it with
+The session advertises itself on `bus/presence` while it runs, so `msgq sessions` lists it with
 `idle` / `busy` / `blocked`. The record is published from `session/<session-id>` (the unique
 address) with the configured name as its alias, so several instances sharing one alias stay
 distinguishable. A clean session end retracts the record; a crash ages out after the TTL.

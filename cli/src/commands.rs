@@ -223,7 +223,7 @@ fn seal_by_rule(
     // A group keeps the bus key: the recipients of a group are not a list this bus can answer, and
     // inventing one is a change of its own.
     let explicit = !args.seal_to.is_empty();
-    if !explicit && canonical.starts_with("group/") {
+    if !explicit && canonical.starts_with("session/") {
         return seal_with_bus_key(value);
     }
 

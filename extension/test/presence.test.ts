@@ -244,10 +244,10 @@ test("a renewal that fails leaves the session running and retries later", async 
 });
 
 test("presence is per scope, because the roster is", async () => {
-	assert.equal(presenceAddress(), "group/presence");
-	assert.equal(presenceAddress(""), "group/presence");
-	assert.equal(presenceAddress("red"), "group/red/presence");
-	assert.equal(presenceAddress(" RED/ "), "group/red/presence", "the address grammar decides");
+	assert.equal(presenceAddress(), "bus/presence");
+	assert.equal(presenceAddress(""), "bus/presence");
+	assert.equal(presenceAddress("red"), "bus/red/presence");
+	assert.equal(presenceAddress(" RED/ "), "bus/red/presence", "the address grammar decides");
 });
 
 test("a scoped session publishes to its own scope address", async () => {
@@ -266,7 +266,7 @@ test("a scoped session publishes to its own scope address", async () => {
 	const topics = native.query("SELECT DISTINCT topic FROM _honker_stream ORDER BY topic", []);
 	native.close();
 	const rows = topics.map((row: { topic: string }) => row.topic);
-	assert.deepEqual(rows, ["group/red/presence"]);
+	assert.deepEqual(rows, ["bus/red/presence"]);
 });
 
 test("presence renews a third of its lifetime", () => {

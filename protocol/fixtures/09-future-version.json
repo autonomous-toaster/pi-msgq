@@ -2,6 +2,6 @@
   "v": 2,
   "type": "note",
   "from": "cli/future@host",
-  "to": "group/x",
+  "to": "session/x",
   "message": "from a version this reader does not implement"
 }

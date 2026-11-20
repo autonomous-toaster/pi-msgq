@@ -62,8 +62,8 @@ fn parse_ack(raw: &str) -> Result<String, String> {
 pub enum Command {
     /// Publish one message to an address.
     Publish {
-        /// Target address: session/<id>, cwd/<enc>, group/<name>, cli/<who>,
-        /// or a bare name (shorthand for group/<name>).
+        /// Target address: session/<id>, cli/<who>, bus/presence, or a bare name
+        /// (shorthand for session/<name>).
         address: String,
         /// Message body, or '-' to read it from stdin.
         message: Option<String>,

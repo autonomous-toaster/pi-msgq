@@ -2,12 +2,13 @@
 //!
 //! An address identifies both the recipient and the stream it is written to.
 //! When it contains a `/`, its prefix must be one of the reserved schemes.
-//! A bare name is canonicalized to `group/<name>`.
+//! A bare name is canonicalized to `session/<name>`: an address names one party,
+//! except `bus/`, which names the bus itself.
 
 use crate::error::Error;
 
-/// Reserved address schemes.
-pub const RESERVED_SCHEMES: [&str; 4] = ["session", "cwd", "group", "cli"];
+/// Reserved address schemes. Every one names a party, save `bus` which names the bus.
+pub const RESERVED_SCHEMES: [&str; 3] = ["session", "cli", "bus"];
 
 /// Canonicalize an address, or return a usage error.
 pub fn canonicalize(input: &str) -> Result<String, Error> {
@@ -20,7 +21,7 @@ pub fn canonicalize(input: &str) -> Result<String, Error> {
         Some((scheme, rest)) => {
             if !RESERVED_SCHEMES.contains(&scheme) {
                 return Err(Error::usage(format!(
-                    "unknown address scheme '{scheme}'; expected one of session/, cwd/, group/, cli/"
+                    "unknown address scheme '{scheme}'; expected one of session/, cli/, bus/"
                 )));
             }
             if rest.is_empty() {
@@ -30,7 +31,7 @@ pub fn canonicalize(input: &str) -> Result<String, Error> {
             }
             Ok(format!("{scheme}/{rest}"))
         }
-        None => Ok(format!("group/{trimmed}")),
+        None => Ok(format!("session/{trimmed}")),
     }
 }
 
@@ -86,21 +87,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bare_name_becomes_group() {
-        assert_eq!(canonicalize("build.done").unwrap(), "group/build.done");
+    fn bare_name_becomes_a_session() {
+        // The shorthand has to mean what a person means: one session, the one `/peer reviewer`
+        // reaches. It used to mean a group, which is why the two disagreed.
+        assert_eq!(canonicalize("reviewer").unwrap(), "session/reviewer");
     }
 
     #[test]
     fn reserved_schemes_are_kept() {
         assert_eq!(canonicalize("session/api").unwrap(), "session/api");
-        assert_eq!(
-            canonicalize("cwd/Users-me-proj").unwrap(),
-            "cwd/Users-me-proj"
-        );
-        assert_eq!(canonicalize("group/backend").unwrap(), "group/backend");
         assert_eq!(canonicalize("cli/alice@mac").unwrap(), "cli/alice@mac");
+        assert_eq!(canonicalize("bus/presence").unwrap(), "bus/presence");
     }
 
+    #[test]
+    fn a_set_naming_scheme_is_gone() {
+        for gone in ["group/backend", "cwd/Users-me-proj"] {
+            let error = canonicalize(gone).unwrap_err().to_string();
+            assert!(
+                error.contains("session/, cli/, bus/"),
+                "{gone} was not refused with the schemes that exist: {error}"
+            );
+        }
+    }
     #[test]
     fn whitespace_is_trimmed() {
         assert_eq!(canonicalize("  session/a  ").unwrap(), "session/a");

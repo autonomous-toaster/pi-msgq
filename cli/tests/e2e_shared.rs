@@ -128,7 +128,7 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
         &bob_address,
         "the suite is green",
         "--from",
-        "cwd/somewhere-else",
+        "session/somewhere-else",
     ]);
     assert_eq!(refused.code, 1, "a claim outside the scopes is refused");
     assert!(
@@ -151,7 +151,7 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
         "the sender is the identity, not the claim: {stored}"
     );
     assert!(
-        !stored.contains("cwd/somewhere-else"),
+        !stored.contains("session/somewhere-else"),
         "a refused claim stores nothing: {stored}"
     );
 
@@ -212,12 +212,12 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     ] {
         session.ok(&[
             "publish",
-            &format!("group/{scope}/presence"),
+            &format!("session/{scope}/presence"),
             "--json",
             &serde_json::json!({
                 "v": 1, "type": "event",
                 "from": address,
-                "to": format!("group/{scope}/presence"),
+                "to": format!("session/{scope}/presence"),
                 "event": {"kind": "presence", "state": "idle", "ttl": 60,
                           "participant": participant},
             })

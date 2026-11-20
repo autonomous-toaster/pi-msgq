@@ -28,16 +28,16 @@ test("a record this session writes leaves through the client, whole", () => {
 test("the publisher talks to the bus the session is on", () => {
 	const echoed = clientPublishRunner("/bin/echo", { db: "/tmp/some-bus.db" })([
 		"publish",
-		"group/a",
+		"session/a",
 		"--json",
 		'{"v":1}',
 	]);
-	assert.match(echoed, /^--db \/tmp\/some-bus\.db publish group\/a --json /);
+	assert.match(echoed, /^--db \/tmp\/some-bus\.db publish session\/a --json /);
 });
 
 test("a failing client is an error the caller can act on", () => {
 	const publish = clientPublisher(() => {
 		throw new Error("msgq: the credential is not recognised");
 	});
-	assert.throws(() => publish.publish("group/a", { v: 1 }), /not recognised/);
+	assert.throws(() => publish.publish("session/a", { v: 1 }), /not recognised/);
 });

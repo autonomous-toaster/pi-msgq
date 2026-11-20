@@ -24,7 +24,7 @@ test("tolerates an unknown type and preserves unknown fields", () => {
 		v: 1,
 		type: "future-kind",
 		from: "cli/x",
-		to: "group/a",
+		to: "session/a",
 		message: "hi",
 		custom: { k: 1 },
 	});

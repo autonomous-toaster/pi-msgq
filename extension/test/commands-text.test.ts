@@ -42,7 +42,7 @@ test("a bare name is a session address", () => {
 test("an address that carries a scheme is used as given", () => {
 	assert.equal(address("session/reviewer"), "session/reviewer");
 	assert.equal(address("cli/ci-bot"), "cli/ci-bot");
-	assert.equal(address("group/backend"), "group/backend");
+	assert.equal(address("session/backend"), "session/backend");
 });
 
 test("an unknown scheme is refused with the CLI's explanation", () => {
@@ -203,7 +203,7 @@ test("the identity report names every fact the session holds", () => {
 	const text = formatIdentity({
 		self: "session/planner",
 		bus: "/home/me/.pi/agent/msgq/msgq.db",
-		addresses: ["session/planner", "group/ci"],
+		addresses: ["session/planner", "session/ci"],
 		policy: "honor",
 		presence: "registered",
 		allowed: ["session/parent"],
@@ -213,7 +213,7 @@ test("the identity report names every fact the session holds", () => {
 		[
 			"session/planner",
 			"  bus       /home/me/.pi/agent/msgq/msgq.db",
-			"  follows   session/planner, group/ci",
+			"  follows   session/planner, session/ci",
 			"  policy    honor",
 			"  presence  registered",
 			"  allow     session/parent",

@@ -24,23 +24,23 @@ test("resolveDbPath prefers MSGQ_DB and falls back to the home default", () => {
 });
 
 test("canonicalizeAddress mirrors the CLI rules", () => {
-	assert.equal(canonicalizeAddress("build.done"), "group/build.done");
+	assert.equal(canonicalizeAddress("build.done"), "session/build.done");
 	assert.equal(canonicalizeAddress("session/api-worker"), "session/api-worker");
-	assert.equal(canonicalizeAddress("cwd/Users-me-proj"), "cwd/Users-me-proj");
-	assert.equal(canonicalizeAddress("  group/x  "), "group/x");
+	assert.equal(canonicalizeAddress("session/me-proj"), "session/me-proj");
+	assert.equal(canonicalizeAddress("  session/x  "), "session/x");
 	assert.throws(() => canonicalizeAddress("foo/bar"), ConfigError);
 	assert.throws(() => canonicalizeAddress(""), ConfigError);
 	assert.throws(() => canonicalizeAddress("session/"), ConfigError);
 });
 
 test("parseTopics canonicalizes, trims, and de-duplicates", () => {
-	assert.deepEqual(parseTopics("group/a, build.done , group/a"), [
-		"group/a",
-		"group/build.done",
+	assert.deepEqual(parseTopics("session/a, build.done , session/a"), [
+		"session/a",
+		"session/build.done",
 	]);
 	assert.deepEqual(parseTopics(undefined), []);
 	assert.deepEqual(parseTopics("  "), []);
-	assert.throws(() => parseTopics("group/a, foo/bar"), ConfigError);
+	assert.throws(() => parseTopics("session/a, foo/bar"), ConfigError);
 });
 
 test("parsePolicy defaults to display and rejects unknown values", () => {
@@ -106,8 +106,8 @@ test("consumerId is unique even when two sessions share an alias", () => {
 
 test("subscriptionAddresses always includes self and de-duplicates extras", () => {
 	assert.deepEqual(
-		subscriptionAddresses({ alias: "w", sessionId: "abc" }, ["group/a", "session/w"]),
-		["session/w", "group/a"],
+		subscriptionAddresses({ alias: "w", sessionId: "abc" }, ["session/a", "session/w"]),
+		["session/w", "session/a"],
 	);
 });
 

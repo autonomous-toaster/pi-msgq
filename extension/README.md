@@ -126,7 +126,7 @@ build is green
 ## Presence
 
 While a session runs it advertises itself with a short **record** on the presence address
-(`group/presence`), renewed every 10 seconds and retracted on shutdown. Anyone can then see what is
+(`bus/presence`), renewed every 10 seconds and retracted on shutdown. Anyone can then see what is
 online:
 
 ```bash
@@ -480,11 +480,11 @@ bytes, before the body is opened.
 | Bus location | — | `MSGQ_DB_URI` (a server), else `MSGQ_DB` (a file) | `~/.pi/agent/msgq/msgq.db` |
 
 Flags win over environment variables. Extra addresses are comma-separated and use the same
-address grammar as the CLI (bare names become `group/<name>`).
+address grammar as the CLI (bare names become `session/<name>`).
 
 ```bash
 # Notify-only, but also watch the CI group and this project.
-pi -e ./extension --msgq-topics "group/ci,cwd/Users-me-proj"
+pi -e ./extension --msgq-topics "session/ci,session/me-proj"
 
 # Let scripts start turns in this session.
 pi -e ./extension --msgq-policy honor
@@ -497,7 +497,7 @@ pi -e ./extension --msgq-policy honor
 msgq publish session/api-worker "deploy finished" --type note
 
 # A project-wide broadcast to every session following cwd/<enc>
-msgq publish cwd/Users-me-proj "rebase before you commit" --type note
+msgq publish session/me-proj "rebase before you commit" --type note
 
 # Let a script drive a session (requires --msgq-policy honor)
 msgq publish session/api-worker "Run the test suite and fix failures" --type prompt

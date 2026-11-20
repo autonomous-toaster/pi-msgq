@@ -981,15 +981,15 @@ mod tests {
         let path = temp_db();
         let (store, _) = LocalStore::open(&path).unwrap();
         for i in 0..1_200 {
-            publish(&store, "group/a", &format!("m{i}"));
+            publish(&store, "session/a", &format!("m{i}"));
         }
-        let head = store.max_offset("group/a").unwrap();
+        let head = store.max_offset("session/a").unwrap();
         let removal = store
-            .delete_stream_prefix("group/a", head, &[], 500)
+            .delete_stream_prefix("session/a", head, &[], 500)
             .unwrap();
         assert_eq!(removal.removed, 1_200, "every record is removed");
         assert_eq!(removal.batches, 3, "1200 records at 500 per statement");
-        assert_eq!(store.oldest_offset("group/a").unwrap(), None);
+        assert_eq!(store.oldest_offset("session/a").unwrap(), None);
     }
 
     #[test]
@@ -997,24 +997,24 @@ mod tests {
         let path = temp_db();
         let (store, _) = LocalStore::open(&path).unwrap();
         for i in 0..10 {
-            publish(&store, "group/a", &format!("m{i}"));
+            publish(&store, "session/a", &format!("m{i}"));
         }
-        let cut = store.max_offset("group/a").unwrap() - 4;
+        let cut = store.max_offset("session/a").unwrap() - 4;
         let removal = store
-            .delete_stream_prefix("group/a", cut, &[], 500)
+            .delete_stream_prefix("session/a", cut, &[], 500)
             .unwrap();
         store
-            .retention_record("group/a", cut, removal.removed as i64)
+            .retention_record("session/a", cut, removal.removed as i64)
             .unwrap();
 
-        assert_eq!(store.retention_dropped("group/a", 0).unwrap(), 6);
+        assert_eq!(store.retention_dropped("session/a", 0).unwrap(), 6);
         assert_eq!(
-            store.retention_dropped("group/a", cut).unwrap(),
+            store.retention_dropped("session/a", cut).unwrap(),
             0,
             "a cursor at the watermark lost nothing after it"
         );
         assert_eq!(
-            store.retention_dropped("group/a", cut - 3).unwrap(),
+            store.retention_dropped("session/a", cut - 3).unwrap(),
             6,
             "a cursor inside the pruned range reports the whole removed range"
         );
@@ -1025,26 +1025,26 @@ mod tests {
         let path = temp_db();
         let (store, _) = LocalStore::open(&path).unwrap();
         for i in 0..6 {
-            publish(&store, "group/a", &format!("m{i}"));
+            publish(&store, "session/a", &format!("m{i}"));
         }
-        let first = store.max_offset("group/a").unwrap() - 3;
+        let first = store.max_offset("session/a").unwrap() - 3;
         let r1 = store
-            .delete_stream_prefix("group/a", first, &[], 500)
+            .delete_stream_prefix("session/a", first, &[], 500)
             .unwrap();
         store
-            .retention_record("group/a", first, r1.removed as i64)
+            .retention_record("session/a", first, r1.removed as i64)
             .unwrap();
 
-        let second = store.max_offset("group/a").unwrap();
+        let second = store.max_offset("session/a").unwrap();
         let r2 = store
-            .delete_stream_prefix("group/a", second, &[], 500)
+            .delete_stream_prefix("session/a", second, &[], 500)
             .unwrap();
         store
-            .retention_record("group/a", second, r1.removed as i64 + r2.removed as i64)
+            .retention_record("session/a", second, r1.removed as i64 + r2.removed as i64)
             .unwrap();
 
         assert_eq!(r1.removed + r2.removed, 6);
-        assert_eq!(store.retention_dropped("group/a", 0).unwrap(), 6);
-        assert_eq!(store.retention_dropped("group/a", first).unwrap(), 3);
+        assert_eq!(store.retention_dropped("session/a", 0).unwrap(), 6);
+        assert_eq!(store.retention_dropped("session/a", first).unwrap(), 3);
     }
 }

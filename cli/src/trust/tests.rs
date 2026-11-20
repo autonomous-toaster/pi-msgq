@@ -10,7 +10,7 @@ fn record() -> Value {
         "v": 1,
         "type": "prompt",
         "from": "session/alice-1",
-        "to": "group/red",
+        "to": "session/red",
         "message": "hello",
     })
 }

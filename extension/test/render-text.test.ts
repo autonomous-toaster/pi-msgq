@@ -22,7 +22,7 @@ test("single message shows label, type, route, and body", () => {
 
 test("a body-less record still renders a header and route", () => {
 	const text = composeMsgqText(
-		{ items: [{ from: "cli/x", address: "group/a", type: "event", body: "" }] },
+		{ items: [{ from: "cli/x", address: "session/a", type: "event", body: "" }] },
 		plain,
 	);
 	assert.match(text, /^msgq event$/m);
@@ -51,7 +51,7 @@ test("multiple messages are numbered with a count header", () => {
 
 test("multi-line bodies keep their lines", () => {
 	const text = composeMsgqText(
-		{ items: [{ from: "cli/x", address: "group/a", type: "note", body: "line one\nline two" }] },
+		{ items: [{ from: "cli/x", address: "session/a", type: "note", body: "line one\nline two" }] },
 		plain,
 	);
 	assert.match(text, /line one\nline two/);
@@ -164,7 +164,7 @@ test("a verdict takes its colour from the theme, not from the body", () => {
 
 test("a record with no verdict says nothing about trust", () => {
 	const text = composeMsgqText(
-		{ items: [{ from: "cli/x", address: "group/a", type: "note", body: "plain" }] },
+		{ items: [{ from: "cli/x", address: "session/a", type: "note", body: "plain" }] },
 		tinted,
 	);
 	assert.doesNotMatch(text, /verdict:/);

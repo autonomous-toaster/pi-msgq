@@ -123,12 +123,12 @@ acknowledgement is progress about another record rather than a message to reply 
 Presence is a normal record published to the presence address:
 
 ```json
-{"v":1,"type":"event","from":"session/planner","to":"group/presence",
+{"v":1,"type":"event","from":"session/planner","to":"bus/presence",
  "event":{"kind":"presence","state":"idle","ttl":30,"participant":"01a187d8","alias":"planner",
           "card":{"project":"github.com/org/repo","branch":"main","worktree":"repo","path":"src"}}}
 ```
 
-- The presence address is `group/presence` on an unscoped bus, and `group/<scope>/presence` on a
+- The presence address is `bus/presence` on an unscoped bus, and `session/<scope>/presence` on a
   bus with scopes. Every participant publishes there and the roster reads it; no session subscribes
   to it, and a roster lists only its own scope.
 - A participant is live while its most recent presence record is younger than the `ttl` it declares, as
@@ -160,12 +160,11 @@ An address names a stream and a recipient at once.
 
 | scheme | for | who writes it |
 |---|---|---|
-| `session/<name>` | a live pi session, by alias or session id | the extension |
-| `group/<name>` | a topic any number of participants may read | anyone |
-| `cwd/<encoded-path>` | every session working in one directory | any launcher |
+| `session/<id>` | one live pi session, by alias or session id | the extension |
 | `cli/<who>` | a process that is not a session: a script, a watcher, a CI job | anyone |
+| `bus/presence` | the roster: who is on the bus, and the agreement key to seal to them | any participant |
 
-A bare name is shorthand for `group/<name>`. These four schemes are conventions about meaning; the
+A bare name is shorthand for `session/<name>`. These three schemes are conventions about meaning; the
 wire only requires the `publisher` to agree with the `to` field. A record's **id** is
 `<address>#<offset>` and is derived, never stored.
 

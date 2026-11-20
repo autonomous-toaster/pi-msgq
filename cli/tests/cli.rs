@@ -82,15 +82,15 @@ fn spawn_follow(db: &Path, address: &str, consumer: &str) -> std::process::Child
 #[test]
 fn publish_and_stateless_read() {
     let db = temp_db();
-    assert_eq!(run(&db, &["publish", "group/a", "one"]).code, 0);
-    assert_eq!(run(&db, &["publish", "group/a", "two"]).code, 0);
+    assert_eq!(run(&db, &["publish", "session/a", "one"]).code, 0);
+    assert_eq!(run(&db, &["publish", "session/a", "two"]).code, 0);
 
     // Default read starts at the current end: nothing new to show.
-    assert_eq!(run(&db, &["read", "group/a"]).stdout.trim(), "");
+    assert_eq!(run(&db, &["read", "session/a"]).stdout.trim(), "");
 
     // Reading twice from the start never consumes.
-    let first = run(&db, &["read", "group/a", "--from-start", "--json"]);
-    let second = run(&db, &["read", "group/a", "--from-start", "--json"]);
+    let first = run(&db, &["read", "session/a", "--from-start", "--json"]);
+    let second = run(&db, &["read", "session/a", "--from-start", "--json"]);
     assert_eq!(first.stdout, second.stdout);
     assert_eq!(first.stdout.lines().count(), 2);
     for line in first.stdout.lines() {
@@ -99,21 +99,21 @@ fn publish_and_stateless_read() {
     }
 
     // --from N returns records after N.
-    let after = run(&db, &["read", "group/a", "--from", "1", "--json"]);
+    let after = run(&db, &["read", "session/a", "--from", "1", "--json"]);
     assert_eq!(after.stdout.lines().count(), 1);
 }
 
 #[test]
 fn json_wraps_the_record_with_its_position_and_verdict() {
     let db = temp_db();
-    assert_eq!(run(&db, &["publish", "group/a", "one"]).code, 0);
+    assert_eq!(run(&db, &["publish", "session/a", "one"]).code, 0);
 
-    let out = run(&db, &["read", "group/a", "--from-start", "--json"]);
+    let out = run(&db, &["read", "session/a", "--from-start", "--json"]);
     // The record is signed by a key this bus has no anchor for, and unsigned history is refused by
     // default — so the shape is what this test is about, not the exit status.
     assert_eq!(out.stdout.lines().count(), 1, "{}", out.stderr);
     let value: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
-    assert_eq!(value["topic"], "group/a");
+    assert_eq!(value["topic"], "session/a");
     assert!(value["offset"].as_i64().unwrap() >= 1);
     assert!(value["created_at"].as_i64().unwrap() > 0);
     assert_eq!(value["record"]["message"], "one");
@@ -128,26 +128,26 @@ fn json_wraps_the_record_with_its_position_and_verdict() {
 #[test]
 fn the_removed_with_offset_flag_is_a_usage_error() {
     let db = temp_db();
-    let out = run(&db, &["read", "group/a", "--with-offset"]);
+    let out = run(&db, &["read", "session/a", "--with-offset"]);
     assert_eq!(out.code, 2);
 }
 
 #[test]
 fn follow_with_offset_reports_the_record_position() {
     let db = temp_db();
-    run(&db, &["publish", "group/a", "old"]);
+    run(&db, &["publish", "session/a", "old"]);
 
     let child = Command::new(bin())
         .arg("--db")
         .arg(&db)
-        .args(["follow", "group/a", "--consumer", "c1", "--json"])
+        .args(["follow", "session/a", "--consumer", "c1", "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
 
     thread::sleep(Duration::from_millis(1200));
-    let published = run(&db, &["publish", "group/a", "new"]);
+    let published = run(&db, &["publish", "session/a", "new"]);
     let offset: i64 = published.stdout.trim().parse().unwrap();
     thread::sleep(Duration::from_millis(1200));
 
@@ -162,7 +162,7 @@ fn follow_with_offset_reports_the_record_position() {
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let line = text.lines().next().expect("one record");
     let value: serde_json::Value = serde_json::from_str(line).unwrap();
-    assert_eq!(value["topic"], "group/a");
+    assert_eq!(value["topic"], "session/a");
     assert_eq!(value["offset"], offset);
     assert_eq!(value["record"]["message"], "new");
 }
@@ -170,7 +170,7 @@ fn follow_with_offset_reports_the_record_position() {
 #[test]
 fn topics_and_cursors() {
     let db = temp_db();
-    run(&db, &["publish", "group/a", "one"]);
+    run(&db, &["publish", "session/a", "one"]);
     run(&db, &["publish", "session/b", "two"]);
 
     let topics = run(&db, &["topics", "--json"]);
@@ -178,39 +178,47 @@ fn topics_and_cursors() {
     assert_eq!(parsed.as_array().unwrap().len(), 2);
 
     assert_eq!(
-        run(&db, &["cursor", "get", "c1", "group/a"]).stdout.trim(),
+        run(&db, &["cursor", "get", "c1", "session/a"])
+            .stdout
+            .trim(),
         "0"
     );
     assert_eq!(
-        run(&db, &["cursor", "set", "c1", "group/a", "5"])
+        run(&db, &["cursor", "set", "c1", "session/a", "5"])
             .stdout
             .trim(),
         "ok"
     );
     assert_eq!(
-        run(&db, &["cursor", "get", "c1", "group/a"]).stdout.trim(),
+        run(&db, &["cursor", "get", "c1", "session/a"])
+            .stdout
+            .trim(),
         "5"
     );
     // Monotonic: a lower offset is ignored.
     assert_eq!(
-        run(&db, &["cursor", "set", "c1", "group/a", "2"])
+        run(&db, &["cursor", "set", "c1", "session/a", "2"])
             .stdout
             .trim(),
         "ignored"
     );
     assert_eq!(
-        run(&db, &["cursor", "get", "c1", "group/a"]).stdout.trim(),
+        run(&db, &["cursor", "get", "c1", "session/a"])
+            .stdout
+            .trim(),
         "5"
     );
     // Reset clears it.
-    run(&db, &["cursor", "reset", "c1", "group/a"]);
+    run(&db, &["cursor", "reset", "c1", "session/a"]);
     assert_eq!(
-        run(&db, &["cursor", "get", "c1", "group/a"]).stdout.trim(),
+        run(&db, &["cursor", "get", "c1", "session/a"])
+            .stdout
+            .trim(),
         "0"
     );
 
     // Listing and removal.
-    run(&db, &["cursor", "set", "c2", "group/a", "1"]);
+    run(&db, &["cursor", "set", "c2", "session/a", "1"]);
     run(&db, &["cursor", "set", "c2", "session/b", "1"]);
     assert_eq!(run(&db, &["consumers"]).stdout.lines().count(), 2);
     assert_eq!(run(&db, &["consumers", "rm", "c2"]).stdout.trim(), "2");
@@ -221,9 +229,12 @@ fn topics_and_cursors() {
 fn passthrough_preserves_unknown_fields() {
     let db = temp_db();
     let record =
-        r#"{"v":1,"type":"note","from":"x","to":"group/p","message":"hi","custom":{"k":1}}"#;
-    assert_eq!(run(&db, &["publish", "group/p", "--json", record]).code, 0);
-    let out = run(&db, &["read", "group/p", "--from-start", "--json"]);
+        r#"{"v":1,"type":"note","from":"x","to":"session/p","message":"hi","custom":{"k":1}}"#;
+    assert_eq!(
+        run(&db, &["publish", "session/p", "--json", record]).code,
+        0
+    );
+    let out = run(&db, &["read", "session/p", "--from-start", "--json"]);
     let value: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
     assert_eq!(record_of(&value)["custom"]["k"], 1);
     assert_eq!(record_of(&value)["type"], "note");
@@ -232,12 +243,12 @@ fn passthrough_preserves_unknown_fields() {
 #[test]
 fn multi_address_read_merges_by_offset() {
     let db = temp_db();
-    run(&db, &["publish", "group/a", "a1"]);
-    run(&db, &["publish", "group/b", "b1"]);
-    run(&db, &["publish", "group/a", "a2"]);
+    run(&db, &["publish", "session/a", "a1"]);
+    run(&db, &["publish", "session/b", "b1"]);
+    run(&db, &["publish", "session/a", "a2"]);
     let out = run(
         &db,
-        &["read", "group/a", "group/b", "--from-start", "--json"],
+        &["read", "session/a", "session/b", "--from-start", "--json"],
     );
     let messages: Vec<String> = out
         .stdout
@@ -254,13 +265,13 @@ fn multi_address_read_merges_by_offset() {
 fn usage_errors_exit_two() {
     let db = temp_db();
     assert_eq!(run(&db, &["publish", "foo/bar", "x"]).code, 2);
-    assert_eq!(run(&db, &["publish", "group/a"]).code, 2);
+    assert_eq!(run(&db, &["publish", "session/a"]).code, 2);
     assert_eq!(
         run(
             &db,
             &[
                 "publish",
-                "group/a",
+                "session/a",
                 "--json",
                 r#"{"v":1,"type":"note","from":"x"}"#
             ]
@@ -269,7 +280,7 @@ fn usage_errors_exit_two() {
         2
     );
     assert_eq!(
-        run(&db, &["read", "group/a", "--from", "1", "--from-start"]).code,
+        run(&db, &["read", "session/a", "--from", "1", "--from-start"]).code,
         2
     );
     let unknown = Command::new(bin()).arg("--nope").output().unwrap();
@@ -279,7 +290,7 @@ fn usage_errors_exit_two() {
 #[test]
 fn db_info_reports_fields() {
     let db = temp_db();
-    run(&db, &["publish", "group/a", "one"]);
+    run(&db, &["publish", "session/a", "one"]);
     let out = run(&db, &["db", "info"]);
     for field in [
         "path:",
@@ -358,7 +369,7 @@ fn a_connection_string_selects_the_shared_engine_and_creates_no_file() {
 
     let out = Command::new(bin())
         .current_dir(dir)
-        .args(["--db", dsn, "publish", "group/a", "hi"])
+        .args(["--db", dsn, "publish", "session/a", "hi"])
         .output()
         .unwrap();
     assert!(
@@ -509,7 +520,7 @@ fn publish_print_id_reports_the_record_id() {
         run(&other, &["publish", "build.done", "three", "--print-id"])
             .stdout
             .trim(),
-        "group/build.done#1"
+        "session/build.done#1"
     );
 }
 
@@ -767,11 +778,11 @@ fn acknowledgements_render_as_lifecycle_lines() {
 #[test]
 fn follow_delivers_new_and_skips_history() {
     let db = temp_db();
-    run(&db, &["publish", "group/a", "old"]);
+    run(&db, &["publish", "session/a", "old"]);
 
-    let child = spawn_follow(&db, "group/a", "c1");
+    let child = spawn_follow(&db, "session/a", "c1");
     thread::sleep(Duration::from_millis(1200));
-    run(&db, &["publish", "group/a", "new"]);
+    run(&db, &["publish", "session/a", "new"]);
     thread::sleep(Duration::from_millis(1200));
 
     // Interrupt politely so the process saves its cursor and exits 0.
@@ -788,7 +799,7 @@ fn follow_delivers_new_and_skips_history() {
     assert!(text.contains("new"), "expected new in: {text}");
     assert!(!text.contains("old"), "history should not replay: {text}");
 
-    let cursor = run(&db, &["cursor", "get", "c1", "group/a"]);
+    let cursor = run(&db, &["cursor", "get", "c1", "session/a"]);
     assert!(cursor.stdout.trim().parse::<i64>().unwrap() >= 2);
 }
 
@@ -796,12 +807,12 @@ fn follow_delivers_new_and_skips_history() {
 #[test]
 fn duplicate_follow_is_rejected() {
     let db = temp_db();
-    run(&db, &["publish", "group/a", "one"]);
+    run(&db, &["publish", "session/a", "one"]);
 
-    let first = spawn_follow(&db, "group/a", "c1");
+    let first = spawn_follow(&db, "session/a", "c1");
     thread::sleep(Duration::from_millis(1000));
 
-    let second = run(&db, &["follow", "group/a", "--consumer", "c1"]);
+    let second = run(&db, &["follow", "session/a", "--consumer", "c1"]);
     assert_ne!(second.code, 0);
     assert!(second.stderr.contains("already following"));
 
@@ -818,11 +829,11 @@ fn duplicate_follow_is_rejected() {
 /// Publish one presence record, the way any client would: a JSON event on the presence address.
 fn publish_presence(db: &Path, from: &str, event: serde_json::Value) -> Run {
     let record = serde_json::json!({
-        "v": 1, "type": "event", "from": from, "to": "group/presence", "event": event,
+        "v": 1, "type": "event", "from": from, "to": "bus/presence", "event": event,
     });
     run(
         db,
-        &["publish", "group/presence", "--json", &record.to_string()],
+        &["publish", "bus/presence", "--json", &record.to_string()],
     )
 }
 
@@ -1122,14 +1133,14 @@ fn sessions_keeps_the_newest_record_per_participant() {
 #[test]
 fn sessions_ignores_anything_that_is_not_presence() {
     let db = temp_db();
-    run(&db, &["publish", "group/presence", "just a message"]);
+    run(&db, &["publish", "bus/presence", "just a message"]);
     let ack = serde_json::json!({
-        "v": 1, "type": "event", "from": "session/x", "to": "group/presence",
+        "v": 1, "type": "event", "from": "session/x", "to": "bus/presence",
         "event": {"kind": "ack", "phase": "started"},
     });
     run(
         &db,
-        &["publish", "group/presence", "--json", &ack.to_string()],
+        &["publish", "bus/presence", "--json", &ack.to_string()],
     );
 
     let out = run(&db, &["sessions"]);
@@ -1165,7 +1176,7 @@ fn age_out() {
 fn prune_reports_before_it_removes() {
     let db = temp_db();
     for i in 0..3 {
-        run(&db, &["publish", "group/a", &format!("old {i}")]);
+        run(&db, &["publish", "session/a", &format!("old {i}")]);
     }
     age_out();
 
@@ -1176,9 +1187,9 @@ fn prune_reports_before_it_removes() {
         "{}",
         dry.stdout
     );
-    assert!(dry.stdout.contains("group/a\t3 of 3"), "{}", dry.stdout);
+    assert!(dry.stdout.contains("session/a\t3 of 3"), "{}", dry.stdout);
     assert_eq!(
-        run(&db, &["read", "group/a", "--from-start"])
+        run(&db, &["read", "session/a", "--from-start"])
             .stdout
             .lines()
             .count(),
@@ -1192,7 +1203,9 @@ fn prune_reports_before_it_removes() {
         applied.stdout
     );
     assert_eq!(
-        run(&db, &["read", "group/a", "--from-start"]).stdout.trim(),
+        run(&db, &["read", "session/a", "--from-start"])
+            .stdout
+            .trim(),
         ""
     );
     assert_eq!(
@@ -1206,10 +1219,10 @@ fn prune_reports_before_it_removes() {
 fn prune_does_not_obey_a_lagging_consumer() {
     let db = temp_db();
     for i in 0..3 {
-        run(&db, &["publish", "group/a", &format!("record {i}")]);
+        run(&db, &["publish", "session/a", &format!("record {i}")]);
     }
     age_out();
-    run(&db, &["cursor", "set", "worker#c", "group/a", "2"]);
+    run(&db, &["cursor", "set", "worker#c", "session/a", "2"]);
 
     let out = run(&db, &["prune", "--older-than", "1s", "--apply"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -1226,7 +1239,9 @@ fn prune_does_not_obey_a_lagging_consumer() {
     assert!(out.stderr.contains("worker#c"), "{}", out.stderr);
 
     assert_eq!(
-        run(&db, &["read", "group/a", "--from-start"]).stdout.trim(),
+        run(&db, &["read", "session/a", "--from-start"])
+            .stdout
+            .trim(),
         ""
     );
     let consumers = run(&db, &["consumers", "--json"]);
@@ -1242,16 +1257,16 @@ fn read_reports_a_gap_and_strict_refuses_it() {
     let db = temp_db();
     // Two records age out; two arrive afterwards, so the stream is half retained.
     for i in 0..2 {
-        run(&db, &["publish", "group/a", &format!("old {i}")]);
+        run(&db, &["publish", "session/a", &format!("old {i}")]);
     }
     age_out();
     for i in 0..2 {
-        run(&db, &["publish", "group/a", &format!("new {i}")]);
+        run(&db, &["publish", "session/a", &format!("new {i}")]);
     }
     let pruned = run(&db, &["prune", "--older-than", "1s", "--apply"]);
     assert_eq!(pruned.code, 0, "{}", pruned.stderr);
 
-    let relaxed = run(&db, &["read", "group/a", "--from-start"]);
+    let relaxed = run(&db, &["read", "session/a", "--from-start"]);
     assert_eq!(relaxed.code, 0, "{}", relaxed.stderr);
     assert!(
         relaxed
@@ -1262,7 +1277,7 @@ fn read_reports_a_gap_and_strict_refuses_it() {
     );
     assert!(relaxed.stdout.contains("new 0"), "{}", relaxed.stdout);
 
-    let strict = run(&db, &["read", "group/a", "--from-start", "--strict"]);
+    let strict = run(&db, &["read", "session/a", "--from-start", "--strict"]);
     assert_eq!(
         strict.code, 1,
         "a truncated read is fatal on request: {}",
@@ -1278,14 +1293,14 @@ fn read_reports_a_gap_and_strict_refuses_it() {
 fn consumers_report_lag_and_dropped() {
     let db = temp_db();
     for i in 0..2 {
-        run(&db, &["publish", "group/a", &format!("old {i}")]);
+        run(&db, &["publish", "session/a", &format!("old {i}")]);
     }
     age_out();
     for i in 0..2 {
-        run(&db, &["publish", "group/a", &format!("new {i}")]);
+        run(&db, &["publish", "session/a", &format!("new {i}")]);
     }
     run(&db, &["prune", "--older-than", "1s", "--apply"]);
-    run(&db, &["cursor", "set", "worker#c", "group/a", "1"]);
+    run(&db, &["cursor", "set", "worker#c", "session/a", "1"]);
 
     let out = run(&db, &["consumers", "--json"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -1300,7 +1315,7 @@ fn consumers_report_lag_and_dropped() {
 #[test]
 fn db_info_names_the_backend_window_and_credential() {
     let db = temp_db();
-    run(&db, &["publish", "group/a", "hello"]);
+    run(&db, &["publish", "session/a", "hello"]);
     let out = run(&db, &["db", "info"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(
@@ -1324,7 +1339,7 @@ fn db_info_names_the_backend_window_and_credential() {
 fn retention_flag_and_environment_select_the_window() {
     let db = temp_db();
     for i in 0..2 {
-        run(&db, &["publish", "group/a", &format!("record {i}")]);
+        run(&db, &["publish", "session/a", &format!("record {i}")]);
     }
     age_out();
 
@@ -1403,7 +1418,7 @@ fn prune_returns_the_space_it_freed() {
     let db = temp_db();
     let payload = "x".repeat(8_000);
     for i in 0..20 {
-        run(&db, &["publish", "group/big", &format!("{i} {payload}")]);
+        run(&db, &["publish", "session/big", &format!("{i} {payload}")]);
     }
     age_out();
     let before = on_disk(&db);
@@ -1424,15 +1439,15 @@ fn collection_removes_a_dead_sessions_cursors_and_nothing_else() {
     let dead = "00000000-0000-7000-8000-00000000000a";
     let live = "00000000-0000-7000-8000-00000000000b";
     for i in 0..2 {
-        run(&db, &["publish", "group/a", &format!("record {i}")]);
+        run(&db, &["publish", "session/a", &format!("record {i}")]);
     }
-    run(&db, &["cursor", "set", dead, "group/a", "1"]);
+    run(&db, &["cursor", "set", dead, "session/a", "1"]);
     run(
         &db,
-        &["cursor", "set", &format!("alias#{dead}"), "group/a", "1"],
+        &["cursor", "set", &format!("alias#{dead}"), "session/a", "1"],
     );
-    run(&db, &["cursor", "set", live, "group/a", "1"]);
-    run(&db, &["cursor", "set", "ci-bot", "group/a", "1"]);
+    run(&db, &["cursor", "set", live, "session/a", "1"]);
+    run(&db, &["cursor", "set", "ci-bot", "session/a", "1"]);
     publish_presence(
         &db,
         &format!("session/{live}"),
@@ -1474,9 +1489,9 @@ fn collection_removes_a_dead_sessions_cursors_and_nothing_else() {
 fn db_info_reports_lag_and_record_age() {
     let db = temp_db();
     for i in 0..3 {
-        run(&db, &["publish", "group/a", &format!("record {i}")]);
+        run(&db, &["publish", "session/a", &format!("record {i}")]);
     }
-    run(&db, &["cursor", "set", "worker", "group/a", "1"]);
+    run(&db, &["cursor", "set", "worker", "session/a", "1"]);
 
     let out = run(&db, &["db", "info"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -1489,7 +1504,7 @@ fn db_info_reports_lag_and_record_age() {
     let worker = out
         .stdout
         .lines()
-        .find(|line| line.trim_start().starts_with("worker\tgroup/a"))
+        .find(|line| line.trim_start().starts_with("worker\tsession/a"))
         .unwrap_or_else(|| panic!("no consumer row: {}", out.stdout));
     assert!(
         worker.trim_end().ends_with('2'),
@@ -1498,7 +1513,7 @@ fn db_info_reports_lag_and_record_age() {
     assert_eq!(
         out.stdout
             .lines()
-            .filter(|line| line.starts_with("  group/a\t"))
+            .filter(|line| line.starts_with("  session/a\t"))
             .count(),
         1,
         "streams carry their age: {}",
@@ -1515,10 +1530,10 @@ fn maintenance_bounds_a_bus_with_live_and_dead_participants() {
     let payload = "y".repeat(4_000);
 
     for i in 0..10 {
-        run(&db, &["publish", "group/a", &format!("{i} {payload}")]);
+        run(&db, &["publish", "session/a", &format!("{i} {payload}")]);
     }
-    run(&db, &["cursor", "set", live, "group/a", "10"]);
-    run(&db, &["cursor", "set", dead, "group/a", "10"]);
+    run(&db, &["cursor", "set", live, "session/a", "10"]);
+    run(&db, &["cursor", "set", dead, "session/a", "10"]);
     publish_presence(
         &db,
         &format!("session/{live}"),
@@ -1528,7 +1543,7 @@ fn maintenance_bounds_a_bus_with_live_and_dead_participants() {
 
     let before = run(&db, &["db", "info"]);
     assert!(
-        before.stdout.contains("group/a\t10\t10"),
+        before.stdout.contains("session/a\t10\t10"),
         "{}",
         before.stdout
     );
@@ -1577,14 +1592,14 @@ fn each_scope_reads_only_its_own_roster() {
     ] {
         let record = serde_json::json!({
             "v": 1, "type": "event", "from": address,
-            "to": format!("group/{scope}/presence"),
+            "to": format!("bus/{scope}/presence"),
             "event": {"kind": "presence", "state": "idle", "ttl": 30, "participant": participant},
         });
         let out = run_env(
             &db,
             &[
                 "publish",
-                &format!("group/{scope}/presence"),
+                &format!("bus/{scope}/presence"),
                 "--json",
                 &record.to_string(),
             ],
@@ -1630,7 +1645,7 @@ fn a_sealed_body_needs_the_passphrase_to_read() {
     let pass = "correct horse";
     let published = run_env(
         &db,
-        &["publish", "group/x", "the plan is tomorrow"],
+        &["publish", "session/x", "the plan is tomorrow"],
         &[("MSGQ_PASSPHRASE", pass)],
     );
     assert_eq!(published.code, 0, "{}", published.stderr);
@@ -1642,7 +1657,7 @@ fn a_sealed_body_needs_the_passphrase_to_read() {
         "the plaintext body is in the bus file"
     );
 
-    let sealed = run(&db, &["read", "group/x", "--from-start"]);
+    let sealed = run(&db, &["read", "session/x", "--from-start"]);
     assert_eq!(sealed.code, 1, "a reader without a key must fail");
     assert!(sealed.stderr.contains("no passphrase"), "{}", sealed.stderr);
     assert!(
@@ -1653,7 +1668,7 @@ fn a_sealed_body_needs_the_passphrase_to_read() {
 
     let opened = run_env(
         &db,
-        &["read", "group/x", "--from-start"],
+        &["read", "session/x", "--from-start"],
         &[("MSGQ_PASSPHRASE", pass)],
     );
     assert_eq!(opened.code, 0, "{}", opened.stderr);
@@ -1675,7 +1690,7 @@ fn a_sealed_body_needs_the_passphrase_to_read() {
 #[test]
 fn a_bus_without_a_passphrase_stores_plaintext_and_says_so() {
     let db = temp_db();
-    let published = run(&db, &["publish", "group/x", "in the clear"]);
+    let published = run(&db, &["publish", "session/x", "in the clear"]);
     assert_eq!(published.code, 0, "{}", published.stderr);
     let info = run(&db, &["db", "info"]);
     assert!(
@@ -1683,7 +1698,7 @@ fn a_bus_without_a_passphrase_stores_plaintext_and_says_so() {
         "{}",
         info.stdout
     );
-    let read = run(&db, &["read", "group/x", "--from-start"]);
+    let read = run(&db, &["read", "session/x", "--from-start"]);
     assert!(read.stdout.contains("in the clear"), "{}", read.stdout);
 }
 
@@ -1691,15 +1706,15 @@ fn a_bus_without_a_passphrase_stores_plaintext_and_says_so() {
 fn a_mixed_history_reads_whole() {
     let db = temp_db();
     let pass = "correct horse";
-    run(&db, &["publish", "group/x", "before the key"]);
+    run(&db, &["publish", "session/x", "before the key"]);
     run_env(
         &db,
-        &["publish", "group/x", "after the key"],
+        &["publish", "session/x", "after the key"],
         &[("MSGQ_PASSPHRASE", pass)],
     );
     let opened = run_env(
         &db,
-        &["read", "group/x", "--from-start"],
+        &["read", "session/x", "--from-start"],
         &[("MSGQ_PASSPHRASE", pass)],
     );
     assert_eq!(opened.code, 0, "{}", opened.stderr);
@@ -1711,7 +1726,7 @@ fn a_mixed_history_reads_whole() {
     assert!(opened.stdout.contains("after the key"), "{}", opened.stdout);
 
     // Without the key the plaintext record still reads, and the sealed one refuses.
-    let mixed = run(&db, &["read", "group/x", "--from-start"]);
+    let mixed = run(&db, &["read", "session/x", "--from-start"]);
     assert_eq!(mixed.code, 1);
     assert!(mixed.stdout.contains("before the key"), "{}", mixed.stdout);
     assert!(!mixed.stdout.contains("after the key"), "{}", mixed.stdout);
@@ -1720,7 +1735,7 @@ fn a_mixed_history_reads_whole() {
 #[test]
 fn a_record_type_outside_the_set_is_refused_before_a_write() {
     let db = temp_db();
-    let out = run(&db, &["publish", "group/typed", "hi", "--type", "nosuch"]);
+    let out = run(&db, &["publish", "session/typed", "hi", "--type", "nosuch"]);
     assert_eq!(
         out.code, 2,
         "a closed value is a usage error: {}",
@@ -1734,7 +1749,7 @@ fn a_record_type_outside_the_set_is_refused_before_a_write() {
     let topics = run(&db, &["topics", "--json"]);
     assert_eq!(topics.stdout.trim(), "[]", "a refused write stores nothing");
 
-    let ok = run(&db, &["publish", "group/typed", "hi", "--type", "note"]);
+    let ok = run(&db, &["publish", "session/typed", "hi", "--type", "note"]);
     assert_eq!(ok.code, 0, "{}", ok.stderr);
 }
 
@@ -1762,7 +1777,7 @@ fn the_help_names_the_closed_values() {
 #[test]
 fn an_acknowledgement_phase_outside_the_set_is_refused_before_a_write() {
     let db = temp_db();
-    let bad = run(&db, &["publish", "group/acked", "hi", "--ack", "nosuch"]);
+    let bad = run(&db, &["publish", "session/acked", "hi", "--ack", "nosuch"]);
     assert_eq!(bad.code, 2, "a phase outside the protocol is a usage error");
     assert!(
         bad.stderr.contains("acknowledgement phase"),
@@ -1777,7 +1792,7 @@ fn an_acknowledgement_phase_outside_the_set_is_refused_before_a_write() {
 
     // The two accepted forms still publish.
     assert_eq!(
-        run(&db, &["publish", "group/acked", "one", "--ack"]).code,
+        run(&db, &["publish", "session/acked", "one", "--ack"]).code,
         0
     );
     assert_eq!(
@@ -1785,7 +1800,7 @@ fn an_acknowledgement_phase_outside_the_set_is_refused_before_a_write() {
             &db,
             &[
                 "publish",
-                "group/acked",
+                "session/acked",
                 "two",
                 "--ack",
                 "started,completed"
@@ -1799,16 +1814,16 @@ fn an_acknowledgement_phase_outside_the_set_is_refused_before_a_write() {
 #[test]
 fn a_listing_has_a_names_form() {
     let db = temp_db();
-    assert_eq!(run(&db, &["publish", "group/one", "hi"]).code, 0);
-    assert_eq!(run(&db, &["publish", "group/two", "hi"]).code, 0);
+    assert_eq!(run(&db, &["publish", "session/one", "hi"]).code, 0);
+    assert_eq!(run(&db, &["publish", "session/two", "hi"]).code, 0);
     assert_eq!(
-        run(&db, &["cursor", "set", "reader", "group/one", "1"]).code,
+        run(&db, &["cursor", "set", "reader", "session/one", "1"]).code,
         0
     );
 
     let topics = run(&db, &["topics", "--names"]);
     assert_eq!(topics.code, 0, "{}", topics.stderr);
-    assert_eq!(topics.stdout, "group/one\ngroup/two\n");
+    assert_eq!(topics.stdout, "session/one\nsession/two\n");
     assert!(
         !topics.stdout.contains('\t'),
         "no column separator in a names form"
@@ -1948,12 +1963,12 @@ fn only_zsh_is_described() {
 #[test]
 fn a_listing_has_a_card_form() {
     let db = temp_db();
-    assert_eq!(run(&db, &["publish", "group/standup", "hi"]).code, 0);
+    assert_eq!(run(&db, &["publish", "session/standup", "hi"]).code, 0);
 
     // A topic no participant advertises keeps the two columns and says so.
     let topics = run(&db, &["topics", "--card"]);
     assert_eq!(topics.code, 0, "{}", topics.stderr);
-    assert_eq!(topics.stdout, "group/standup\t-\n");
+    assert_eq!(topics.stdout, "session/standup\t-\n");
 
     // A participant's own card stands beside its address.
     let cwd = std::env::temp_dir().join(format!("msgq-card-{}", std::process::id()));
@@ -1967,7 +1982,7 @@ fn a_listing_has_a_card_form() {
     record["type"] = json!("event");
     // The roster address is the record's sender, so the sender is the address being advertised.
     record["from"] = json!(address);
-    record["to"] = json!("group/presence");
+    record["to"] = json!("bus/presence");
     record["event"] = json!({
         "kind": "presence",
         "address": address,
@@ -1978,7 +1993,7 @@ fn a_listing_has_a_card_form() {
     });
     let published = run(
         &db,
-        &["publish", "group/presence", &record.to_string(), "--json"],
+        &["publish", "bus/presence", &record.to_string(), "--json"],
     );
     assert_eq!(published.code, 0, "{}", published.stderr);
 
@@ -2012,7 +2027,7 @@ fn closing_the_local_bus_folds_the_log_into_the_file() {
     let db = temp_db();
     for i in 0..40 {
         assert_eq!(
-            run(&db, &["publish", "group/log", &format!("record {i}")]).code,
+            run(&db, &["publish", "session/log", &format!("record {i}")]).code,
             0
         );
     }

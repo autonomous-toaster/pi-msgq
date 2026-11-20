@@ -2,7 +2,7 @@
   "v": 1,
   "type": "event",
   "from": "session/planner",
-  "to": "group/presence",
+  "to": "session/presence",
   "event": {
     "kind": "presence",
     "state": "idle",

@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn round_trip_message_record() {
-        let rec = Record::message("prompt", "cli/a@b", "group/x", "hello");
+        let rec = Record::message("prompt", "cli/a@b", "session/x", "hello");
         let value = to_value(&rec).unwrap();
         assert_eq!(value["v"], json!(1));
         assert_eq!(value["type"], json!("prompt"));

@@ -222,10 +222,10 @@ every session at it.
 
 ```bash
 export MSGQ_DB=./msgq.db                                  # local: one file
-msgq publish group/standup "hi"
+msgq publish session/standup "hi"
 
 export MSGQ_DB_URI=postgres://bus@db.internal/msgq        # shared: one server
-msgq publish group/standup "hi"
+msgq publish session/standup "hi"
 ```
 
 `--db` still takes either form when one command needs to say so explicitly. `MSGQ_DB_URI` wins over
@@ -242,7 +242,7 @@ The credential is `MSGQ_TOKEN` or `~/.config/msgq/token`; `msgq db info` says wh
 accepted, and never prints it.
 
 Presence and the roster are per scope: set `MSGQ_SCOPE` and a session advertises on
-`group/<scope>/presence`, so two teams on one server do not read each other's participants.
+`session/<scope>/presence`, so two teams on one server do not read each other's participants.
 
 ### Getting started with SQLite
 
@@ -252,7 +252,7 @@ Five minutes, one file, two sessions on the same machine.
 
 ```bash
 export MSGQ_DB=~/msgq.db
-msgq publish group/standup "hello"
+msgq publish session/standup "hello"
 ```
 
 Nothing else is needed: no server, no schema, no migration. `msgq db info` says what the file is
@@ -274,15 +274,15 @@ for exactly that reason.
 
 ```bash
 export MSGQ_DB=~/msgq.db
-export MSGQ_SCOPE=standup      # optional: presence and the roster become group/standup/presence
+export MSGQ_SCOPE=standup      # optional: presence and the roster become session/standup/presence
 ```
 
 **4. Check it before trusting it.**
 
 ```bash
 msgq db info      # backend: local, credential: none (the local bus trusts file permissions …)
-msgq publish group/standup "hello"
-msgq read group/standup --from-start
+msgq publish session/standup "hello"
+msgq read session/standup --from-start
 msgq sessions     # who advertised themselves, in this scope
 ```
 
@@ -313,11 +313,11 @@ hash. The identity names a **principal** — a user, not an address — and its 
 that user may reach:
 
 ```bash
-psql "$MSGQ_DB_URI" -tAc "SELECT msgq.register_identity('alice', ARRAY['session/alice', 'group/standup'])"
+psql "$MSGQ_DB_URI" -tAc "SELECT msgq.register_identity('alice', ARRAY['session/alice', 'session/standup'])"
 # → the token, printed once. Put it in ~/.config/msgq/token, chmod 600.
 ```
 
-`group/standup` covers everything beneath it, and nothing outside it. A record may speak as any
+`session/standup` covers everything beneath it, and nothing outside it. A record may speak as any
 participant address inside those scopes — `session/alice/sub`, `cli/alice@laptop` — because one
 credential serves every session of that user. A claim outside them is **refused** and stores nothing:
 there is no address the bus could rewrite it to, and a room is not a sender either.
@@ -339,9 +339,9 @@ export MSGQ_SCOPE=standup
 
 ```bash
 msgq db info        # backend: shared, credential: accepted as alice,
-                    # identity: alice (scopes: group/standup, session/alice), retention_s: 3600
-msgq publish group/standup "hello"
-msgq read group/standup --from-start
+                    # identity: alice (scopes: session/standup, session/alice), retention_s: 3600
+msgq publish session/standup "hello"
+msgq read session/standup --from-start
 ```
 
 `credential: none (no identity is registered …)` means the server has no identities yet, so it
@@ -380,7 +380,7 @@ msgq read session/alice-1 --from-start --json | jq -c .record | msgq open --json
   an algorithm this build lacks. A record sealed to somebody else is a fact about the record, not a
   failure of the read. `read` already opens what it can, so this verb is for bytes obtained
   elsewhere — which is exactly the extension's case, and why it is the extension that calls it.
-- **A group keeps the bus key.** A `group/...` address has no recipient list, and inventing one is a
+- **A group keeps the bus key.** A `session/...` address has no recipient list, and inventing one is a
   change of its own. `--seal-to <address>` seals to a named participant instead and refuses when no
   key is known; `--plaintext` stores the body unsealed and says so.
 - **A first contact falls back rather than failing**, to the bus key when one is configured or to
@@ -396,7 +396,7 @@ Set a passphrase and the body is sealed under one key derived from it with scryp
 
 ```bash
 export MSGQ_PASSPHRASE="correct horse battery staple"    # or MSGQ_PASSPHRASE_FILE=/run/secrets/msgq
-msgq publish group/standup "the plan is tomorrow"
+msgq publish session/standup "the plan is tomorrow"
 ```
 
 That is the key the **bus** holds rather than a person's, so everyone with the passphrase — the
@@ -425,9 +425,9 @@ Every record is printed with a verdict beside it — `trusted`, `unverified`, or
 reason — and the record itself stays exactly the bytes the bus stored:
 
 ```json
-{ "topic": "group/standup", "offset": 4, "created_at": 1763...,
+{ "topic": "session/standup", "offset": 4, "created_at": 1763...,
   "verdict": { "state": "unverified", "fingerprint": "SHA256:...", "reason": "no anchor for this key" },
-  "record": { "v": 1, "type": "prompt", "from": "session/alice-1", "to": "group/standup", ... } }
+  "record": { "v": 1, "type": "prompt", "from": "session/alice-1", "to": "session/standup", ... } }
 ```
 
 - `unverified` is a settled state, not a defect: a peer you have not pinned is still readable, and
@@ -448,7 +448,7 @@ reason — and the record itself stays exactly the bytes the bus stored:
   rather than carrying its own copy of the check, so one implementation decides what a record is:
 
   ```bash
-  msgq read group/standup --from-start --json | jq -c .record | msgq verify --json
+  msgq read session/standup --from-start --json | jq -c .record | msgq verify --json
   ```
 
 - **Trusting yourself** needs no out-of-band channel: `msgq trust add --self` reads the key this

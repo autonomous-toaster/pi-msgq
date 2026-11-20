@@ -82,7 +82,7 @@ fn a_fresh_connection_bootstraps_only_the_bus_tables() {
     };
     let _serialised = exclusive(&dsn);
     let mut raw = client(&dsn);
-    let untouched = format!("group/untouched-{}", unique());
+    let untouched = format!("session/untouched-{}", unique());
     let before = footprint(&mut raw, &untouched);
 
     let (store, created) =
@@ -229,7 +229,7 @@ fn the_address_survives_a_long_path_and_a_case_pair() {
 
     // A long cwd address is the case a name cannot be passed through: pgmq lowercases and caps the
     // table name, and a cwd address is neither lower nor short.
-    let long = format!("cwd/Users/Somebody/src/{unique}/very-long-segment-name-here/deeper/still");
+    let long = format!("session/Somebody-src/{unique}/very-long-segment-name-here/deeper/still");
     let (queue, headers) = publish_and_stamp(&dsn, &long);
     assert!(queue.len() <= 47, "{queue} exceeds the engine's limit");
     assert_eq!(
@@ -271,8 +271,8 @@ fn addresses_whose_slugs_collide_still_get_their_own_queue() {
     let unique = unique();
     // The slug maps every non-alphanumeric character to a dot, so these two addresses read the same
     // and only the digest can separate them.
-    let dotted = format!("group/a.b{unique}");
-    let dashed = format!("group/a-b{unique}");
+    let dotted = format!("session/a.b{unique}");
+    let dashed = format!("session/a-b{unique}");
     assert_eq!(
         queue_name(&dotted).len(),
         queue_name(&dashed).len(),
@@ -319,7 +319,7 @@ fn reading_an_unpublished_address_creates_nothing() {
     };
     let _serialised = exclusive(&dsn);
     let store = open(&dsn);
-    let address = format!("group/never-published-{}", unique());
+    let address = format!("session/never-published-{}", unique());
     let mut raw = client(&dsn);
     let queues_before: i64 = raw
         .query_one(
@@ -354,7 +354,7 @@ fn two_first_publishers_both_succeed() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/race-{}", unique());
+    let address = format!("session/race-{}", unique());
     let token = fixture_token(&dsn);
 
     let mut workers = Vec::new();
@@ -404,7 +404,7 @@ fn a_second_publish_runs_no_ddl() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/steady-{}", unique());
+    let address = format!("session/steady-{}", unique());
     let (queue, _) = publish_and_stamp(&dsn, &address);
 
     let mut raw = client(&dsn);
@@ -431,7 +431,7 @@ fn reading_twice_changes_nothing() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/readonly-{}", unique());
+    let address = format!("session/readonly-{}", unique());
     let (queue, _) = publish_and_stamp(&dsn, &address);
     let store = open(&dsn);
     store
@@ -466,7 +466,7 @@ fn a_cursor_never_moves_backwards_and_reading_never_moves_it() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/cursor-{}", unique());
+    let address = format!("session/cursor-{}", unique());
     let (_, _) = publish_and_stamp(&dsn, &address);
     let store = open(&dsn);
     let consumer = format!("cli/cursor-{}", unique());
@@ -494,7 +494,7 @@ fn a_publish_wakes_a_watcher_under_a_second() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/wake-{}", unique());
+    let address = format!("session/wake-{}", unique());
     let store = open(&dsn);
     store.ensure_address(&address).unwrap();
 
@@ -534,7 +534,7 @@ fn a_wake_with_no_publication_returns_after_one_slice() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/quiet-{}", unique());
+    let address = format!("session/quiet-{}", unique());
     let store = open(&dsn);
     store.ensure_address(&address).unwrap();
 
@@ -553,7 +553,7 @@ fn a_prune_reports_its_total_and_keeps_the_presence_pin() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/prune-{}", unique());
+    let address = format!("session/prune-{}", unique());
     let store = open(&dsn);
 
     // Presence records for three participants, interleaved with ordinary ones.
@@ -611,7 +611,7 @@ fn an_address_whose_records_aged_out_is_still_listed() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/aged-{}", unique());
+    let address = format!("session/aged-{}", unique());
     let store = open(&dsn);
     let offset = store
         .publish(
@@ -655,7 +655,7 @@ fn a_summary_reports_records_and_the_age_of_the_oldest() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/summary-{}", unique());
+    let address = format!("session/summary-{}", unique());
     let (_, _) = publish_and_stamp(&dsn, &address);
     let store = open(&dsn);
     store
@@ -687,8 +687,8 @@ fn rust_and_sql_agree_on_a_queue_name() {
     let mut raw = client(&dsn);
     for address in [
         "session/alice",
-        "group/a.b",
-        "cwd/users/somebody/src/very-long-segment-name-here/deeper/still",
+        "session/a.b",
+        "session/somebody-src/very-long-segment-name-here/deeper/still",
         "g",
     ] {
         let from_sql: String = raw
@@ -709,7 +709,7 @@ fn a_credential_is_never_stored() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/secret-{}", unique());
+    let address = format!("session/secret-{}", unique());
     let token = fixture_token(&dsn);
     let mut raw = client(&dsn);
     let digest: String = raw
@@ -766,7 +766,7 @@ fn a_write_outside_the_scopes_is_refused_and_changes_nothing() {
     let mut raw = client(&dsn);
     let token: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group/red','cli'])",
+            "SELECT msgq.register_identity($1, ARRAY['session/red','cli'])",
             &[&format!("red-{}", unique()).as_str()],
         )
         .unwrap()
@@ -774,8 +774,8 @@ fn a_write_outside_the_scopes_is_refused_and_changes_nothing() {
     let store = Store::open_with(&Target::Shared(dsn.clone()), Some(token))
         .expect("open")
         .0;
-    let inside = format!("group/red/sub-{}", unique());
-    let outside = format!("group/redder-{}", unique());
+    let inside = format!("session/red/sub-{}", unique());
+    let outside = format!("session/redder-{}", unique());
 
     // A differently-spelled form of an address inside the scope is still inside it: the bus
     // compares the canonical spelling.
@@ -814,7 +814,7 @@ fn a_missing_or_expired_credential_is_named() {
     };
     let _serialised = exclusive(&dsn);
     let mut raw = client(&dsn);
-    let address = format!("group/cred-{}", unique());
+    let address = format!("session/cred-{}", unique());
 
     // Ensure the bus has an identity, so it is a bus that can authorize.
     raw.execute(
@@ -870,7 +870,7 @@ fn a_runtime_role_cannot_write_a_stream_directly() {
     .unwrap();
 
     // A queue to try against, and a credential the runtime role may use through the function.
-    let address = format!("group/runtime-{}", unique());
+    let address = format!("session/runtime-{}", unique());
     let token: String = raw
         .query_one(
             "SELECT msgq.register_identity($1, ARRAY['group','cli'])",
@@ -1024,7 +1024,7 @@ fn a_sender_may_speak_as_itself_and_no_further() {
     let store = Store::open_with(&Target::Shared(dsn.clone()), Some(token))
         .expect("open")
         .0;
-    let address = format!("group/sender-{}", unique());
+    let address = format!("session/sender-{}", unique());
     let queue = {
         store
             .publish(
@@ -1041,9 +1041,9 @@ fn a_sender_may_speak_as_itself_and_no_further() {
         // Inside the credential's scopes: one credential, several sessions.
         (own.clone(), Some(own.clone())),
         // Another user's namespace: refused, nothing stored.
-        ("cwd/elsewhere".to_string(), None),
+        ("session/elsewhere".to_string(), None),
         // A room is not a sender: refused.
-        ("group/standup".to_string(), None),
+        ("session/standup".to_string(), None),
         // Not an address at all: refused.
         ("not an address".to_string(), None),
     ] {
@@ -1086,7 +1086,7 @@ fn the_engine_holds_no_plaintext_body() {
         return;
     };
     let _serialised = exclusive(&dsn);
-    let address = format!("group/sealed-{}", unique());
+    let address = format!("session/sealed-{}", unique());
     let store = open(&dsn);
     let key = Key::derive("correct horse", msgq::seal::DEFAULT_SALT).unwrap();
     let mut record = json!({
@@ -1123,7 +1123,7 @@ fn a_cross_tenant_read_is_refused_and_the_owner_reads_its_own() {
     };
     let _serialised = exclusive(&dsn);
     let mut raw = client(&dsn);
-    let red = format!("group/red-read-{}", unique());
+    let red = format!("session/red-read-{}", unique());
     let token: String = raw
         .query_one(
             "SELECT msgq.register_identity($1, ARRAY['group','cli'])",
@@ -1172,7 +1172,7 @@ fn a_cross_tenant_read_is_refused_and_the_owner_reads_its_own() {
             "SELECT msgq.register_identity($1, ARRAY[$2])",
             &[
                 &format!("blue-read-{}", unique()).as_str(),
-                &format!("group/blue-{}", unique()).as_str(),
+                &format!("session/blue-{}", unique()).as_str(),
             ],
         )
         .unwrap()
@@ -1198,7 +1198,7 @@ fn a_prune_outside_ownership_is_refused_and_removes_nothing() {
     };
     let _serialised = exclusive(&dsn);
     let mut raw = client(&dsn);
-    let address = format!("group/owned-{}", unique());
+    let address = format!("session/owned-{}", unique());
     let store = open(&dsn);
     let sender = format!("cli/owner@{}", unique());
     for message in ["one", "two"] {
@@ -1253,8 +1253,8 @@ fn a_consumer_name_is_deleted_only_where_the_caller_holds_it() {
     };
     let _serialised = exclusive(&dsn);
     let store = open(&dsn);
-    let first = format!("group/del-one-{}", unique());
-    let second = format!("group/del-two-{}", unique());
+    let first = format!("session/del-one-{}", unique());
+    let second = format!("session/del-two-{}", unique());
     let consumer = format!("reader-{}", unique());
     store.cursor_set(&consumer, &first, 1).unwrap();
     store.cursor_set(&consumer, &second, 2).unwrap();
@@ -1332,7 +1332,7 @@ fn a_names_form_costs_one_catalogue_call_however_many_addresses() {
     let base = unique();
 
     let publish = |store: &Store, i: usize| {
-        let address = format!("group/names-{base}-{i}");
+        let address = format!("session/names-{base}-{i}");
         store
             .publish(
                 &address,
@@ -1378,7 +1378,7 @@ fn a_names_form_names_only_the_callers_consumers() {
     };
     let _serialised = exclusive(&dsn);
     let mut raw = client(&dsn);
-    let address = format!("group/names-scope-{}", unique());
+    let address = format!("session/names-scope-{}", unique());
     let ours = format!("ours-{}", unique());
     let store = open(&dsn);
     store.cursor_set(&ours, &address, 1).unwrap();
@@ -1463,7 +1463,7 @@ fn a_names_listing_asks_for_no_counts() {
     };
     let _serialised = exclusive(&dsn);
     let store = open(&dsn);
-    let address = format!("group/uncounted-{}", unique());
+    let address = format!("session/uncounted-{}", unique());
     for i in 0..5 {
         store
             .publish(

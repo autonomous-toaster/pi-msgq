@@ -10,7 +10,7 @@ import { PROTOCOL_VERSION, type MsgqRecord } from "./record.ts";
 import { type PresenceState } from "./presence-text.ts";
 
 /** The presence address when no scope is configured. */
-export const PRESENCE_ADDRESS = "group/presence";
+export const PRESENCE_ADDRESS = "bus/presence";
 
 /**
  * The presence address for a scope.
@@ -23,7 +23,7 @@ export function presenceAddress(scope?: string): string {
 	const trimmed = scope?.trim().replace(/^\/+|\/+$/g, "").toLowerCase();
 	if (!trimmed) return PRESENCE_ADDRESS;
 	try {
-		return canonicalizeAddress(`group/${trimmed}/presence`);
+		return canonicalizeAddress(`bus/${trimmed}/presence`);
 	} catch {
 		return PRESENCE_ADDRESS;
 	}

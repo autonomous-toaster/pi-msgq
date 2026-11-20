@@ -40,7 +40,7 @@ Requires a Rust toolchain with edition 2024 support (Rust 1.85+; the repo pins `
 ## Quick start
 
 ```bash
-# Publish to a group (bare names are shorthand for group/<name>)
+# Publish to a session (a bare name is shorthand for session/<name>)
 msgq publish build.done "tests are green"          # -> prints the assigned offset
 
 # Read without consuming anything
@@ -55,8 +55,8 @@ msgq publish build.done "deploy finished"
 
 ```text
 $ msgq read build.done --from-start
-      1  2026-10-10T21:27:40Z  group/build.done          prompt     cli/you@host  tests are green
-      2  2026-10-10T21:27:45Z  group/build.done          prompt     cli/you@host  deploy finished
+      1  2026-10-10T21:27:40Z  session/build.done          prompt     cli/you@host  tests are green
+      2  2026-10-10T21:27:45Z  session/build.done          prompt     cli/you@host  deploy finished
 ```
 
 ## Concepts
@@ -70,22 +70,16 @@ concept; a message's `to` field always equals the stream name.
   scheme            example                       meaning
   ----------------  ----------------------------  -------------------------------
   session/<id>      session/api-worker            one pi session's inbox
-  cwd/<enc>         cwd/Users-me-proj             every session in that working dir
-  group/<name>      group/backend                 a named group anyone may join
   cli/<who>         cli/alice@mac                 a non-pi producer
-  <bare-name>       build.done                    shorthand for group/build.done
+  bus/presence      bus/presence                  the roster: everyone on the bus
+  <bare-name>       reviewer                      shorthand for session/reviewer
 ```
 
-If an address contains `/`, its prefix must be one of the reserved schemes. Addresses are
-case-sensitive. Empty addresses and scheme-only addresses (`session/`) are rejected.
+If an address contains `/`, its prefix must be one of those three. Addresses are case-sensitive.
+Empty addresses and scheme-only addresses (`session/`) are rejected. `group/` and `cwd/` no longer
+exist: an address names one party, or it names the bus, and never a set of them.
 
-A bare name here means **`group/<name>`**, not a session — the shorthand predates sessions being
-addressable at all. So `msgq publish reviewer` writes to the fan-out address `group/reviewer`, while
-`/peer reviewer` in the pi extension sends to `session/reviewer`. When you mean one session, say
-`session/reviewer`; when you mean everyone listening on a name, the bare name is the shorthand.
-
-`cwd/<enc>` uses pi's session-directory encoding: strip the leading `/` and replace `/`, `\`,
-and `:` with `-`.
+A bare name means **`session/<name>`**, which is what `/peer reviewer` in the extension already meant.
 
 ### The record
 
@@ -291,16 +285,11 @@ msgq read session/alice-1 --from-start --json | jq -c .record | msgq open --json
   recipients it is sealed to, or an algorithm this build lacks. A record sealed to somebody else is a
   fact about the record, not a failure of the read. `read` opens what it can on its own, so this verb
   exists for bytes a caller obtained elsewhere — the extension is the caller that needs it.
-- A publish to `group/` keeps the bus key when one is configured and says so: a group has no recipient
-  list, and inventing one is a change of its own. `--seal-to <address>` seals to a named participant
-  instead, and refuses if no key is known; `--plaintext` stores the body unsealed and says so.
+- A publish to a `session/` or `cli/` address is sealed to it; a bare name means the same session,
+  and there is no set-naming address left for a bus-wide key to serve.
 - A first contact falls back rather than failing: with no key for the peer, the bus key is used when
-  one is configured, or the body is stored unsealed when none is, and the client says which whenever
-  a key is in play. Refusing outright would break the first message of every relationship, and
-  `msgq ask` with it.
-- A record sealed before this change opens exactly as did, under its own additional data and key
-  identifier; a passphrase still seals a `group/` address with the bus key. `db info` names the
-  sealing mode this invocation would use.
+  one is configured, or the body is stored unsealed when none is. `recipient-only-sealing` removes that
+  fallback and the bus key with it.
 - Replacing a key archives the one it replaces (`<principal>.<date>.key.retired`), because a record
   sealed under it stays sealed under it forever. `msgq open` tries the archive, so history keeps
   opening after a rotation.
@@ -375,7 +364,7 @@ implementation of the check rather than two:
 
 ```bash
 msgq verify --json <<'JSON'
-{"v":1,"type":"prompt","from":"session/a","to":"group/b","message":"hi"}
+{"v":1,"type":"prompt","from":"session/a","to":"session/b","message":"hi"}
 JSON
 # {"fingerprint":null,"reason":"no usable signature","state":"unverified"}
 ```
@@ -412,7 +401,7 @@ record contract and address grammar stay independent of it.
 ## Presence
 
 Live participants advertise themselves with a short **record** on the presence address
-(`group/presence`): renewed while they run, retracted when they stop. `msgq sessions` reads them.
+(`bus/presence`): renewed while they run, retracted when they stop. `msgq sessions` reads them.
 
 ```text
 $ msgq sessions
@@ -474,8 +463,8 @@ Presence is a record, so it is not a pi feature: any process that can publish ca
 nothing but this CLI.
 
 ```bash
-msgq publish group/presence --json '{
-  "v": 1, "type": "event", "from": "cli/nightly-build@host", "to": "group/presence",
+msgq publish bus/presence --json '{
+  "v": 1, "type": "event", "from": "cli/nightly-build@host", "to": "bus/presence",
   "event": {"kind": "presence", "state": "busy", "ttl": 600, "participant": "nightly-build",
             "card": {"project": "github.com/org/repo", "branch": "main", "path": "src"}}
 }'

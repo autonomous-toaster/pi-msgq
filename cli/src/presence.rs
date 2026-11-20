@@ -7,7 +7,7 @@ use serde_json::Value;
 
 /// The address every participant publishes presence to, and the roster reads, when no scope is
 /// configured.
-pub const PRESENCE_ADDRESS: &str = "group/presence";
+pub const PRESENCE_ADDRESS: &str = "bus/presence";
 
 /// The presence address for a scope.
 ///
@@ -19,7 +19,7 @@ pub fn address(scope: Option<&str>) -> String {
         None | Some("") => PRESENCE_ADDRESS.to_string(),
         Some(scope) => {
             let candidate = format!(
-                "group/{}/presence",
+                "bus/{}/presence",
                 scope.trim().trim_matches('/').to_lowercase()
             );
             crate::address::canonicalize(&candidate)

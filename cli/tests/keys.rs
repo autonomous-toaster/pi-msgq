@@ -131,7 +131,7 @@ fn a_first_publish_makes_a_key_and_says_so() {
     let home = temp_home();
     let db = home.join("msgq.db");
 
-    let out = run(&home, &db, &["publish", "group/x", "hello"]);
+    let out = run(&home, &db, &["publish", "session/x", "hello"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
 
     // The offset stays the only thing on standard output, so a script parsing it is unaffected.
@@ -153,12 +153,12 @@ fn a_published_record_carries_a_signature_that_its_fingerprint_verifies() {
     let published = run(
         &home,
         &db,
-        &["publish", "group/x", "hello", "--from", "session/alice-1"],
+        &["publish", "session/x", "hello", "--from", "session/alice-1"],
     );
     assert_eq!(published.code, 0, "{}", published.stderr);
 
     let fingerprint = run(&home, &db, &["fingerprint"]).stdout.trim().to_string();
-    let read = run(&home, &db, &["read", "group/x", "--from-start", "--json"]);
+    let read = run(&home, &db, &["read", "session/x", "--from-start", "--json"]);
     assert_eq!(read.code, 0, "{}", read.stderr);
 
     let line: serde_json::Value = serde_json::from_str(read.stdout.trim()).unwrap();
@@ -177,8 +177,8 @@ fn a_published_record_carries_a_signature_that_its_fingerprint_verifies() {
 fn a_second_publish_does_not_make_a_second_key() {
     let home = temp_home();
     let db = home.join("msgq.db");
-    assert_eq!(run(&home, &db, &["publish", "group/x", "one"]).code, 0);
-    let second = run(&home, &db, &["publish", "group/x", "two"]);
+    assert_eq!(run(&home, &db, &["publish", "session/x", "one"]).code, 0);
+    let second = run(&home, &db, &["publish", "session/x", "two"]);
     assert_eq!(second.code, 0, "{}", second.stderr);
     // Nothing to announce a second time.
     assert!(second.stderr.trim().is_empty(), "{}", second.stderr);

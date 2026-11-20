@@ -62,12 +62,15 @@ fn wrapped(line: &str) -> Value {
 fn a_record_is_wrapped_with_its_position_and_its_verdict() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
 
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     let value = wrapped(out.stdout.trim());
@@ -85,7 +88,10 @@ fn a_record_is_wrapped_with_its_position_and_its_verdict() {
 fn a_pinned_key_makes_a_record_trusted() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fingerprint = run(&home, &db, &["fingerprint"], &[])
         .stdout
         .trim()
@@ -95,7 +101,7 @@ fn a_pinned_key_makes_a_record_trusted() {
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[("MSGQ_TRUST", &trust)],
     );
     let value = wrapped(out.stdout.trim());
@@ -120,12 +126,12 @@ fn a_broken_signature_is_refused_and_names_what_it_claims() {
     .unwrap();
     let target = msgq::config::Target::Local(db.clone());
     let (store, _) = msgq::store::Store::open(&target).unwrap();
-    msgq::store::Bus::publish(&store, "group/red", &tampered).unwrap();
+    msgq::store::Bus::publish(&store, "session/red", &tampered).unwrap();
 
     let out = run(
         &home,
         &db,
-        &["read", "group/red", "--from-start", "--json"],
+        &["read", "session/red", "--from-start", "--json"],
         &[],
     );
     let value = wrapped(out.stdout.trim());
@@ -158,9 +164,9 @@ fn an_unsigned_message_is_refused_until_the_invocation_permits_it() {
     let (store, _) = msgq::store::Store::open(&target).unwrap();
     msgq::store::Bus::publish(
         &store,
-        "group/a",
+        "session/a",
         &serde_json::json!({
-            "v": 1, "type": "note", "from": "cli/foreign", "to": "group/a", "message": "legacy"
+            "v": 1, "type": "note", "from": "cli/foreign", "to": "session/a", "message": "legacy"
         }),
     )
     .unwrap();
@@ -168,7 +174,7 @@ fn an_unsigned_message_is_refused_until_the_invocation_permits_it() {
     let refused = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     assert_eq!(refused.code, 1);
@@ -186,7 +192,7 @@ fn an_unsigned_message_is_refused_until_the_invocation_permits_it() {
     let allowed = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[("MSGQ_INSECURE", "1")],
     );
     assert_eq!(allowed.code, 0, "{}", allowed.stderr);
@@ -206,9 +212,9 @@ fn an_unsigned_event_record_is_refused_like_any_other() {
     let (store, _) = msgq::store::Store::open(&target).unwrap();
     msgq::store::Bus::publish(
         &store,
-        "group/roster",
+        "session/roster",
         &serde_json::json!({
-            "v": 1, "type": "event", "from": "session/a", "to": "group/roster",
+            "v": 1, "type": "event", "from": "session/a", "to": "session/roster",
             "event": { "kind": "presence", "state": "idle", "ttl_s": 60 }
         }),
     )
@@ -217,7 +223,7 @@ fn an_unsigned_event_record_is_refused_like_any_other() {
     let refused = run(
         &home,
         &db,
-        &["read", "group/roster", "--from-start", "--json"],
+        &["read", "session/roster", "--from-start", "--json"],
         &[],
     );
     assert_eq!(
@@ -233,7 +239,7 @@ fn an_unsigned_event_record_is_refused_like_any_other() {
     let allowed = run(
         &home,
         &db,
-        &["read", "group/roster", "--from-start", "--json"],
+        &["read", "session/roster", "--from-start", "--json"],
         &[("MSGQ_INSECURE", "1")],
     );
     assert_eq!(allowed.code, 0, "{}", allowed.stderr);
@@ -247,7 +253,10 @@ fn an_unsigned_event_record_is_refused_like_any_other() {
 fn verify_reports_one_verdict_per_record_in_order() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fingerprint = run(&home, &db, &["fingerprint"], &[])
         .stdout
         .trim()
@@ -256,12 +265,12 @@ fn verify_reports_one_verdict_per_record_in_order() {
     let signed = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     let record = wrapped(signed.stdout.trim())["record"].clone();
     let unsigned = serde_json::json!({
-        "v": 1, "type": "note", "from": "cli/foreign", "to": "group/a", "message": "legacy"
+        "v": 1, "type": "note", "from": "cli/foreign", "to": "session/a", "message": "legacy"
     });
 
     let input = format!(
@@ -314,7 +323,7 @@ fn verify_reports_one_verdict_per_record_in_order() {
     let read = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[("MSGQ_TRUST", &trust)],
     );
     assert_eq!(wrapped(read.stdout.trim())["verdict"]["state"], "trusted");
@@ -358,7 +367,10 @@ fn verify_explains_an_unreadable_line_rather_than_failing() {
 fn a_conflicting_layer_is_reported_rather_than_resolved_silently() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fingerprint = run(&home, &db, &["fingerprint"], &[])
         .stdout
         .trim()
@@ -369,7 +381,7 @@ fn a_conflicting_layer_is_reported_rather_than_resolved_silently() {
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[("MSGQ_TRUST", &real), ("MSGQ_TRUST_SESSION", &other)],
     );
     // The environment wins, and the disagreement is on the record.
@@ -390,7 +402,10 @@ fn fingerprint(home: &Path, db: &Path) -> String {
 fn a_recorded_anchor_makes_the_next_read_trusted() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fp = fingerprint(&home, &db);
 
     let added = run(&home, &db, &["trust", "add", "alice", &fp], &[]);
@@ -400,7 +415,7 @@ fn a_recorded_anchor_makes_the_next_read_trusted() {
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -415,7 +430,10 @@ fn recording_the_same_anchor_twice_changes_nothing() {
     let db = home.join("bus.db");
     let fp = fingerprint(&home, &db).to_string();
     // A key is only written on a publish, so make one first.
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fp = if fp.is_empty() {
         fingerprint(&home, &db)
     } else {
@@ -435,7 +453,10 @@ fn recording_the_same_anchor_twice_changes_nothing() {
 fn one_key_cannot_be_trusted_for_two_principals() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fp = fingerprint(&home, &db);
     assert_eq!(
         run(&home, &db, &["trust", "add", "alice", &fp], &[]).code,
@@ -455,7 +476,10 @@ fn one_key_cannot_be_trusted_for_two_principals() {
 fn recording_over_a_current_key_is_a_rotation_not_a_second_anchor() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let first = fingerprint(&home, &db);
     assert_eq!(
         run(&home, &db, &["trust", "add", "alice", &first], &[]).code,
@@ -472,8 +496,14 @@ fn recording_over_a_current_key_is_a_rotation_not_a_second_anchor() {
 fn rotation_retires_the_key_and_says_how_much_history_it_breaks() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "one"], &[]).code, 0);
-    assert_eq!(run(&home, &db, &["publish", "group/a", "two"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "one"], &[]).code,
+        0
+    );
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "two"], &[]).code,
+        0
+    );
     let old = fingerprint(&home, &db);
     assert_eq!(
         run(&home, &db, &["trust", "add", "alice", &old], &[]).code,
@@ -498,7 +528,7 @@ fn rotation_retires_the_key_and_says_how_much_history_it_breaks() {
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     assert_eq!(out.code, 1, "a retired key is not a successful read");
@@ -530,7 +560,10 @@ fn rotation_retires_the_key_and_says_how_much_history_it_breaks() {
 fn revoking_returns_a_principal_to_unverified() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fp = fingerprint(&home, &db);
     assert_eq!(
         run(&home, &db, &["trust", "add", "alice", &fp], &[]).code,
@@ -541,7 +574,7 @@ fn revoking_returns_a_principal_to_unverified() {
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "unverified");
@@ -552,7 +585,10 @@ fn an_anchor_belongs_to_one_bus_and_not_another() {
     let home = temp_dir();
     let one = home.join("one.db");
     let two = home.join("two.db");
-    assert_eq!(run(&home, &one, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &one, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fp = fingerprint(&home, &one);
     assert_eq!(
         run(&home, &one, &["trust", "add", "alice", &fp], &[]).code,
@@ -560,11 +596,14 @@ fn an_anchor_belongs_to_one_bus_and_not_another() {
     );
 
     // The same key publishes on a second bus, where nothing was recorded for it.
-    assert_eq!(run(&home, &two, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &two, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let out = run(
         &home,
         &two,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "unverified");
@@ -574,7 +613,10 @@ fn an_anchor_belongs_to_one_bus_and_not_another() {
 fn the_listing_names_the_bus_and_says_where_each_anchor_came_from() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fp = fingerprint(&home, &db);
 
     let env = format!("alice:{fp}");
@@ -596,7 +638,10 @@ fn the_listing_names_the_bus_and_says_where_each_anchor_came_from() {
 fn the_session_layer_outranks_the_keyring_but_yields_to_the_environment() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let real = fingerprint(&home, &db);
     assert_eq!(
         run(&home, &db, &["trust", "add", "alice", &real], &[]).code,
@@ -608,7 +653,7 @@ fn the_session_layer_outranks_the_keyring_but_yields_to_the_environment() {
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[("MSGQ_TRUST_SESSION", &other)],
     );
     let value = wrapped(out.stdout.trim());
@@ -620,7 +665,7 @@ fn the_session_layer_outranks_the_keyring_but_yields_to_the_environment() {
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[("MSGQ_TRUST", &env), ("MSGQ_TRUST_SESSION", &other)],
     );
     assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "trusted");
@@ -630,7 +675,10 @@ fn the_session_layer_outranks_the_keyring_but_yields_to_the_environment() {
 fn the_keyring_round_trips_and_leaves_no_half_written_file() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let old = fingerprint(&home, &db);
 
     // A rotation writes current and retired together, which is the case a partial write would ruin.
@@ -674,14 +722,17 @@ fn the_keyring_round_trips_and_leaves_no_half_written_file() {
 fn an_anchor_from_the_environment_is_never_written_down() {
     let home = temp_dir();
     let db = home.join("bus.db");
-    assert_eq!(run(&home, &db, &["publish", "group/a", "hi"], &[]).code, 0);
+    assert_eq!(
+        run(&home, &db, &["publish", "session/a", "hi"], &[]).code,
+        0
+    );
     let fp = fingerprint(&home, &db);
 
     let env = format!("alice:{fp}");
     let trusted = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[("MSGQ_TRUST", &env)],
     );
     assert_eq!(
@@ -697,7 +748,7 @@ fn an_anchor_from_the_environment_is_never_written_down() {
     let after = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     assert_eq!(
@@ -746,7 +797,7 @@ fn trusting_this_machine_needs_no_fingerprint_typed_by_hand() {
     let home = temp_dir();
     let db = home.join("bus.db");
     assert_eq!(
-        run(&home, &db, &["publish", "group/a", "mine"], &[]).code,
+        run(&home, &db, &["publish", "session/a", "mine"], &[]).code,
         0
     );
 
@@ -764,7 +815,7 @@ fn trusting_this_machine_needs_no_fingerprint_typed_by_hand() {
     let out = run(
         &home,
         &db,
-        &["read", "group/a", "--from-start", "--json"],
+        &["read", "session/a", "--from-start", "--json"],
         &[],
     );
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -776,7 +827,7 @@ fn trusting_this_machine_accepts_its_own_fingerprint_and_refuses_another() {
     let home = temp_dir();
     let db = home.join("bus.db");
     assert_eq!(
-        run(&home, &db, &["publish", "group/a", "mine"], &[]).code,
+        run(&home, &db, &["publish", "session/a", "mine"], &[]).code,
         0
     );
     let own = fingerprint(&home, &db);

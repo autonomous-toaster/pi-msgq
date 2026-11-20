@@ -2,7 +2,7 @@
   "v": 1,
   "type": "note",
   "from": "cli/me@host",
-  "to": "group/x",
+  "to": "session/x",
   "message": "hi",
   "meta": { "ack": true, "priority": "low", "whatever": { "nested": [1, 2] } },
   "custom": { "k": [1, 2] }

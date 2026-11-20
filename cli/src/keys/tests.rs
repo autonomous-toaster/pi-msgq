@@ -8,7 +8,7 @@ fn record() -> Value {
         "v": 1,
         "type": "message",
         "from": "session/alice-1",
-        "to": "group/red",
+        "to": "session/red",
         "message": "hello",
     })
 }
@@ -49,7 +49,7 @@ fn a_moved_address_fails() {
     let mut value = record();
     sign_value(&mut value, &signing).unwrap();
     let claim = claim(&value).unwrap();
-    value["to"] = json!("group/blue");
+    value["to"] = json!("session/blue");
     assert!(verify_claim(&value, &claim).is_err());
 }
 
@@ -66,10 +66,10 @@ fn two_spellings_of_one_sender_sign_the_same_bytes() {
 fn a_field_cannot_shift_into_its_neighbour() {
     let mut a = record();
     a["from"] = json!("session/a");
-    a["to"] = json!("group/bc");
+    a["to"] = json!("session/bc");
     let mut b = record();
     b["from"] = json!("session/ab");
-    b["to"] = json!("group/c");
+    b["to"] = json!("session/c");
     assert_ne!(signed_bytes(&a).unwrap(), signed_bytes(&b).unwrap());
 }
 
@@ -185,12 +185,26 @@ fn substituting_the_agreement_key_breaks_the_signature() {
 }
 
 #[test]
-fn a_record_signed_before_this_change_still_verifies() {
-    // The pinned fixture was signed without an agreement key, under the older domain.
-    let value = fixture("17-signed-record.json");
-    assert!(value["meta"]["sig"].get("agree").is_none());
-    let claim = claim(&value).expect("the fixture carries a claim");
-    assert!(claim.agreement.is_none());
+fn a_signature_made_without_an_agreement_key_still_verifies() {
+    // What an older client wrote: the same record, signed under the domain that predates
+    // `meta.sig.agree`. Verification has to keep reaching that shape, because the bytes it covers are
+    // what the older client signed.
+    use ed25519_dalek::Signer;
+
+    let signing = SigningKey::from_bytes(&[21u8; 32]);
+    let mut value = record();
+    let bytes = signed_bytes(&value).unwrap();
+    let signature = signing.sign(&bytes);
+    value["meta"] = json!({
+        "sig": {
+            "alg": ALG,
+            "key": public(&signing.verifying_key()),
+            "sig": STANDARD_NO_PAD.encode(signature.to_bytes()),
+        }
+    });
+
+    let claim = claim(&value).expect("a claim");
+    assert!(claim.agreement.is_none(), "no agreement key was advertised");
     assert!(verify_claim(&value, &claim).is_ok());
 }
 

@@ -71,12 +71,12 @@ test("a record with no body is display-only", () => {
 
 test("a record asking for an answer carries a reply hint", () => {
 	const asking = record({ message: "what is 2+2?", meta: { reply: true } });
-	assert.match(formatMessage(asking, "group/a"), /peers tool/);
+	assert.match(formatMessage(asking, "session/a"), /peers tool/);
 	assert.equal(wantsReply(asking), true);
 
 	const plain = record({ message: "just a note" });
 	assert.equal(wantsReply(plain), false);
-	assert.doesNotMatch(formatMessage(plain, "group/a"), /peers tool/);
+	assert.doesNotMatch(formatMessage(plain, "session/a"), /peers tool/);
 });
 
 test("a reference names the record it refers to, and quotes it", () => {
@@ -115,9 +115,9 @@ test("a quoted body stays on one line", () => {
 });
 
 test("messages carry provenance", () => {
-	const text = formatMessage(record(), "group/a");
+	const text = formatMessage(record(), "session/a");
 	assert.match(text, /cli\/alice@mac/);
-	assert.match(text, /group\/a/);
+	assert.match(text, /session\/a/);
 	assert.match(text, /hello/);
 });
 
@@ -125,9 +125,9 @@ test("the content never carries the human's reply affordance", () => {
 	// The content is what the model reads. How a person answers belongs to the
 	// renderer, and must never leak into this.
 	for (const text of [
-		formatMessage(record(), "group/a"),
-		formatMessage(record({ message: "what is 2+2?", meta: { reply: true } }), "group/a"),
-		formatBatch([{ record: record({ message: "one" }), address: "group/a" }]),
+		formatMessage(record(), "session/a"),
+		formatMessage(record({ message: "what is 2+2?", meta: { reply: true } }), "session/a"),
+		formatBatch([{ record: record({ message: "one" }), address: "session/a" }]),
 	]) {
 		assert.doesNotMatch(text, /\/peer/);
 		assert.doesNotMatch(text, /reply:/);
@@ -137,8 +137,8 @@ test("the content never carries the human's reply affordance", () => {
 test("coalescer drains and empties", () => {
 	const coalescer = new Coalescer();
 	assert.equal(coalescer.empty, true);
-	coalescer.add(record({ message: "one" }), "group/a");
-	coalescer.add(record({ message: "two" }), "group/a");
+	coalescer.add(record({ message: "one" }), "session/a");
+	coalescer.add(record({ message: "two" }), "session/a");
 	assert.equal(coalescer.size, 2);
 	assert.equal(coalescer.empty, false);
 
@@ -150,8 +150,8 @@ test("coalescer drains and empties", () => {
 
 test("batch rendering lists every record with provenance", () => {
 	const text = formatBatch([
-		{ record: record({ message: "one", from: "cli/a@h" }), address: "group/a" },
-		{ record: record({ message: "two", from: "cli/b@h" }), address: "group/a" },
+		{ record: record({ message: "one", from: "cli/a@h" }), address: "session/a" },
+		{ record: record({ message: "two", from: "cli/b@h" }), address: "session/a" },
 	]);
 	assert.match(text, /2 messages/);
 	assert.match(text, /cli\/a@h/);

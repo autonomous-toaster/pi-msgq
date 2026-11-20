@@ -89,7 +89,7 @@ test("a subscription receives what another client publishes", async (t) => {
 		return;
 	}
 	process.env.MSGQ_TOKEN = await credential(DSN);
-	const address = `group/ext-${unique()}`;
+	const address = `session/ext-${unique()}`;
 	const consumer = `session/ext-${unique()}`;
 	const bus = await PgBus.open(DSN, [address]);
 
@@ -126,7 +126,7 @@ test("a cursor moves forward and never back", async (t) => {
 		t.diagnostic("MSGQ_TEST_DB_URI is unset: the cursor was not exercised");
 		return;
 	}
-	const address = `group/ext-cursor-${unique()}`;
+	const address = `session/ext-cursor-${unique()}`;
 	const consumer = `session/ext-cursor-${unique()}`;
 	const bus = await PgBus.open(DSN, [address]);
 	const module = await import("pg");
@@ -159,7 +159,7 @@ test("a renewal extends the lease without minting a second credential", async (t
 		return;
 	}
 	process.env.MSGQ_TOKEN = await credential(DSN);
-	const address = `group/ext-renew-${unique()}`;
+	const address = `session/ext-renew-${unique()}`;
 	const bus = await PgBus.open(DSN, [address]);
 	try {
 		const expiry = await bus.renew();
@@ -177,7 +177,7 @@ test("lost records are reported, not hidden", async (t) => {
 		t.diagnostic("MSGQ_TEST_DB_URI is unset: the gap report was not exercised");
 		return;
 	}
-	const address = `group/ext-gap-${unique()}`;
+	const address = `session/ext-gap-${unique()}`;
 	const bus = await PgBus.open(DSN, [address]);
 	const module = await import("pg");
 	const raw = new module.default.Client({ connectionString: DSN });

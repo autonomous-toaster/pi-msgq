@@ -1,7 +1,7 @@
 //! How an address becomes a queue name.
 //!
 //! pgmq derives table names by lowercasing and prefixing, and caps them, so an address cannot be
-//! passed through: session/Api and session/api would land in one queue and a cwd/ address would be
+//! passed through: session/Api and session/api would land in one queue and a path-like address would be
 //! rejected. The name is therefore derived - a readable slug plus a digest - and the true address
 //! is kept in msgq.address and in every record's headers.
 
@@ -60,7 +60,7 @@ mod tests {
 
     #[test]
     fn a_queue_name_is_bounded_and_stable() {
-        let long = format!("cwd/{}", "very-long-path-segment-".repeat(6));
+        let long = format!("session/{}", "very-long-path-segment-".repeat(6));
         let name = queue_name(&long);
         assert!(
             name.len() <= QUEUE_NAME_MAX,
@@ -79,9 +79,9 @@ mod tests {
     #[test]
     fn colliding_slugs_still_differ() {
         // Same readable portion, different address: only the digest can separate them.
-        let a = "group/a.b";
-        let b = "group/a-b";
+        let a = "session/a.b";
+        let b = "session/a-b";
         assert_ne!(queue_name(a), queue_name(b));
-        assert!(queue_name(a).starts_with("group_a"));
+        assert!(queue_name(a).starts_with("session_a"));
     }
 }

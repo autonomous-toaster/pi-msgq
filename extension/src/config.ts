@@ -7,7 +7,7 @@
 export type Policy = "display" | "honor";
 
 /** Address schemes reserved by the msgq bus. */
-export const RESERVED_SCHEMES = ["session", "cwd", "group", "cli"] as const;
+export const RESERVED_SCHEMES = ["session", "cli", "bus"] as const;
 
 /** A configuration or address problem that should disable the extension. */
 export class ConfigError extends Error {}
@@ -32,20 +32,20 @@ export function resolveDbPath(
 
 /**
  * Canonicalize an address, mirroring the CLI: a bare name becomes
- * `group/<name>`, and a prefixed address must use a reserved scheme.
+ * `session/<name>`, and a prefixed address must use a reserved scheme.
  */
 export function canonicalizeAddress(input: string): string {
 	const trimmed = input.trim();
 	if (!trimmed) throw new ConfigError("address must not be empty");
 
 	const slash = trimmed.indexOf("/");
-	if (slash === -1) return `group/${trimmed}`;
+	if (slash === -1) return `session/${trimmed}`;
 
 	const scheme = trimmed.slice(0, slash);
 	const rest = trimmed.slice(slash + 1);
 	if (!(RESERVED_SCHEMES as readonly string[]).includes(scheme)) {
 		throw new ConfigError(
-			`unknown address scheme '${scheme}'; expected one of session/, cwd/, group/, cli/`,
+			`unknown address scheme '${scheme}'; expected one of session/, cli/, bus/`,
 		);
 	}
 	if (!rest) throw new ConfigError(`address scheme '${scheme}/' requires a name`);

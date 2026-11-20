@@ -2,5 +2,5 @@
   "v": 1,
   "type": "event",
   "from": "cli/me@host",
-  "to": "group/x"
+  "to": "session/x"
 }
