@@ -357,30 +357,53 @@ shared room cannot erase another member's history — and it is the only thing a
 retention watermark. The engine's own tables are not readable or writable by the runtime role at all:
 every operation passes through a function that resolves the credential first.
 
-## Sealing message bodies
+## Sealing a body to a recipient
 
-Both engines store what they are given. Configure a passphrase and the **body** is sealed on the way
-in and opened on the way out; the envelope is left alone so routing still works.
+Both engines store what they are given. A body can be sealed to the people who should read it, and
+the envelope stays readable so routing, the roster and acknowledgements keep working.
+
+```bash
+msgq publish session/alice-1 "the plan is tomorrow"   # sealed to alice, and to you
+msgq read session/alice-1 --from-start --json | jq -c .record | msgq open --json
+```
+
+- **A record is sealed to its recipient and its sender**, so a session reads back what it sent. The
+  body is sealed once with a fresh content key; that key is wrapped once per recipient, under a key
+  agreed with that recipient and its own ephemeral X25519.
+- **The keys come from the file you already have.** The seed in `~/.config/msgq/keys/<principal>.key`
+  derives the ed25519 key that signs and, under its own label, the X25519 key that agrees. One file,
+  one fingerprint to compare.
+- **Every signed record carries its sender's agreement key** in `meta.sig.agree`, inside the bytes the
+  signature covers — so a key is found on any record that principal wrote. No directory, it works
+  with the peer offline, and substituting the key breaks the signature.
+- **`msgq open`** answers one outcome per record: the opened record, the recipients it is sealed to, or
+  an algorithm this build lacks. A record sealed to somebody else is a fact about the record, not a
+  failure of the read. `read` already opens what it can, so this verb is for bytes obtained
+  elsewhere — which is exactly the extension's case, and why it is the extension that calls it.
+- **A group keeps the bus key.** A `group/...` address has no recipient list, and inventing one is a
+  change of its own. `--seal-to <address>` seals to a named participant instead and refuses when no
+  key is known; `--plaintext` stores the body unsealed and says so.
+- **A first contact falls back rather than failing**, to the bus key when one is configured or to
+  plaintext when none is, saying which whenever a key is in play. Nobody can have a key before they
+  have been heard from.
+- **Replacing a key archives it** as `<principal>.<date>.key.retired`, because a record sealed under it
+  stays sealed under it forever; `msgq open` tries the archive, so history keeps opening after a
+  rotation.
+
+### The older scheme, still readable
+
+Set a passphrase and the body is sealed under one key derived from it with scrypt, exactly as before:
 
 ```bash
 export MSGQ_PASSPHRASE="correct horse battery staple"    # or MSGQ_PASSPHRASE_FILE=/run/secrets/msgq
 msgq publish group/standup "the plan is tomorrow"
-msgq read group/standup --from-start                     # opened for you, transparently
 ```
 
-- One key per principal, derived from the passphrase with scrypt. The key is never stored, so a copy
-  of the bus file opens nothing; `MSGQ_KEY_SALT` names the derivation and `db info` prints the first
-  bytes of its hash as the **key identifier**, which tells two keys apart without revealing either.
-- `aes-256-gcm` with a fresh nonce per record. The algorithm and the identifier travel in the
-  record's metadata, so a reader that does not know the algorithm preserves the record and treats the
-  body as opaque rather than guessing.
-- Address, sender, type and offset stay readable, because routing, the roster and acknowledgements
-  need them. Presence and acknowledgement bodies are never sealed.
-- A body that does not open is an error, not content: `msgq read` exits non-zero, prints no body and
-  names the key identifier; the extension reports it, starts no turn and publishes no acknowledgement,
-  and the session keeps running.
-- A stream may hold plaintext and sealed records side by side, so turning encryption on does not
-  orphan the history that came before it.
+That is the key the **bus** holds rather than a person's, so everyone with the passphrase — the
+operator of a shared server included — reads everything. Groups and records written before recipient
+sealing still use it, and those records keep opening unchanged. `MSGQ_KEY_SALT` names the derivation,
+and `db info` prints the sealing mode this invocation would use. Presence and acknowledgement bodies
+are never sealed under either scheme: the roster and the lifecycle read them.
 
 ## Trusting a sender
 
@@ -518,12 +541,16 @@ just completions
 |---|---|
 | Nothing arrives in a session | the wrong address. `msgq consumers` shows what it follows |
 | A message appears but the agent ignores it | the default `display` policy. Start with `--msgq-policy honor` |
-| A peer does nothing when messaged | its trust list excludes you, or its policy is `display` |
+| A peer does nothing when messaged | its allowlist excludes you, or its policy is `display` |
 | `msgq disabled` in the session | the bus could not be opened — check `MSGQ_DB` |
 | `no credential was presented` | the server has identities; set `MSGQ_TOKEN` or write the identity file |
 | `is outside the scopes of` | the credential may not write, read or prune that address |
 | `invalid value ... possible values` | a closed-set argument refused a value; exit 2, nothing written |
 | `belongs to … not …` | a prune of an address another principal opened |
 | `did not open (kid=…)` | the passphrase differs from the one the record was sealed with |
+| `sealed to session/…` | the record is addressed to somebody else; `msgq open` says who |
+| `no agreement key known for …` | a named recipient has never been heard from; `--plaintext`, or wait for a record from it |
+| `the body does not open with this key` | a record sealed to you was altered, or your key is not the one that opens it |
+| `unverified` beside a message | nobody pinned that key; `msgq trust add` or `msgq trust add --self` |
 | `read-only` in `/peers me` | the session can read but its writes are refused |
 | `msgq exited with 1 and said nothing` | it is not on `PATH`. See [DEVELOPMENT.md](DEVELOPMENT.md) |

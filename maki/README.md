@@ -203,4 +203,5 @@ follow lock. `/reload` adopts the running job instead of starting a second one.
 | a message shows but the agent ignores it | `policy = "display"`, or the sender is outside `trust` |
 | `unsupported msgq protocol version` | the record's `v` is not 1 |
 | `follow line has no offset` | an older `msgq` whose `--json` printed the bare record; rebuild/install the CLI |
+| a body shows as base64 | the record is sealed and maki holds no keys; it has no passphrase and no key file, so it shows the bytes it received |
 | follow job keeps restarting | `msgq` is missing or the database is unreadable; check `/peers me` last error |

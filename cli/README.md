@@ -282,14 +282,20 @@ msgq read session/alice-1 --from-start --json | jq -c .record | msgq open --json
 - Every signed record carries its sender's agreement key in `meta.sig.agree`, inside the bytes the
   signature covers. That is where a key is found: no directory, and it works with the peer offline.
   Substituting it breaks the signature.
-- ``msgq open`` reads records on stdin and answers one outcome per line: the opened record, the
+- `msgq open` reads records on stdin and answers one outcome per line: the opened record, the
   recipients it is sealed to, or an algorithm this build lacks. A record sealed to somebody else is a
-  fact about the record, not a failure of the read.
+  fact about the record, not a failure of the read. `read` opens what it can on its own, so this verb
+  exists for bytes a caller obtained elsewhere — the extension is the caller that needs it.
 - A publish to `group/` keeps the bus key when one is configured and says so: a group has no recipient
   list, and inventing one is a change of its own. `--seal-to <address>` seals to a named participant
   instead, and refuses if no key is known; `--plaintext` stores the body unsealed and says so.
+- A first contact falls back rather than failing: with no key for the peer, the bus key is used when
+  one is configured, or the body is stored unsealed when none is, and the client says which whenever
+  a key is in play. Refusing outright would break the first message of every relationship, and
+  `msgq ask` with it.
 - A record sealed before this change opens exactly as did, under its own additional data and key
-  identifier. `db info` names the sealing mode this invocation would use.
+  identifier; a passphrase still seals a `group/` address with the bus key. `db info` names the
+  sealing mode this invocation would use.
 - Replacing a key archives the one it replaces (`<principal>.<date>.key.retired`), because a record
   sealed under it stays sealed under it forever. `msgq open` tries the archive, so history keeps
   opening after a rotation.
