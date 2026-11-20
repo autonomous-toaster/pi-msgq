@@ -237,15 +237,15 @@ export function formatMessage(
 }
 
 /** Render a coalesced batch with each record's provenance. */
-export function formatBatch(messages: PendingMessage[]): string {
+export function formatBatch(messages: PendingMessage[], verdicts: string[] = []): string {
 	if (messages.length === 1) {
-		return formatMessage(messages[0].record, messages[0].address, messages[0].reference);
+		return formatMessage(messages[0].record, messages[0].address, messages[0].reference, verdicts[0]);
 	}
 	const blocks = messages.map(
 		(message, index) =>
 			`[${index + 1}] from ${message.record.from} on ${message.address}${
-				message.reference ? `\n${formatReference(message.reference)}` : ""
-			}\n${recordBody(message.record)}`,
+				verdicts[index] ? `\n[msgq] ${verdicts[index]}` : ""
+			}${message.reference ? `\n${formatReference(message.reference)}` : ""}\n${recordBody(message.record)}`,
 	);
 	return [`[msgq] ${messages.length} messages`, ...blocks].join("\n\n");
 }

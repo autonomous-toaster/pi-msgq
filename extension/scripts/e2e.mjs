@@ -1833,13 +1833,15 @@ async function scenarioAskAnsweredOnce() {
 			entry.message?.role === "toolResult" &&
 			JSON.stringify(entry.message.content ?? []).includes(answer),
 	);
-	const duplicates = all.filter(
+	const dups = all.filter(
 		(entry) => entry.type === "custom_message" && String(entry.content).includes(answer),
-	).length;
+	);
 	report(
 		"ask-answered-once",
-		inTool && duplicates === 0,
-		`inTool=${inTool} duplicates=${duplicates}`,
+		inTool && dups.length === 0,
+		`inTool=${inTool} duplicates=${dups.length} what=${JSON.stringify(
+			dups.map((entry) => String(entry.content).slice(0, 120)),
+		)}`,
 	);
 }
 

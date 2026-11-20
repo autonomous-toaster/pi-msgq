@@ -214,6 +214,14 @@ export default function (pi: ExtensionAPI) {
 	 */
 	let answeredPeers: string[] = [];
 	/**
+	 * The peer a waiting ask is holding this turn open for.
+	 *
+	 * Its answer is coming back through the tool result, so the copy on the stream is not news. This
+	 * has to be known *before* the ask returns, because the delivery loop runs while it waits — the
+	 * ordering that made this work before was luck, not design.
+	 */
+	let awaitingAnswerFrom: string | undefined;
+	/**
 	 * The question this session was asked and may still owe an answer to.
 	 *
 	 * One slot on purpose: the delivery path remembers as little as it can, so a session asked two
@@ -553,6 +561,17 @@ export default function (pi: ExtensionAPI) {
 			waiting.controller.abort();
 		}
 
+		// An answer this session is still waiting for, inside the tool that is waiting for it: the
+		// record is not news, it is the result of a call that has not returned yet.
+		if (
+			awaitingAnswerFrom === record.from &&
+			typeof record.reply_to === "number"
+		) {
+			report(`msgq: the answer from ${record.from} is being returned to the wait that asked for it`);
+			subscription.save(offset);
+			return;
+		}
+
 		// A wait already returned this answer inside the tool result. The record it was carried
 		// in is still on the stream, and delivering it again is the whole answer twice.
 		if (answersConsumedAsk(record, self, answeredPeers, reference)) {
@@ -876,6 +895,7 @@ export default function (pi: ExtensionAPI) {
 			const seconds = waiting ? askWaitSeconds(params.timeoutSeconds) : 0;
 			const timeoutMs = waiting ? seconds * 1000 + 30_000 : undefined;
 			if (entry) waitedOn.set(to, entry);
+			if (waiting) awaitingAnswerFrom = to;
 			let report: { ok: boolean; text: string };
 			try {
 				report = await runPlanned(pi, plan, {
@@ -885,6 +905,7 @@ export default function (pi: ExtensionAPI) {
 				});
 			} finally {
 				if (entry) waitedOn.delete(to);
+				awaitingAnswerFrom = undefined;
 			}
 			if (entry?.abandoned) {
 				// Its question is buffered behind this turn and arrives as soon as the turn ends.
@@ -1062,7 +1083,18 @@ export default function (pi: ExtensionAPI) {
 		const entries: NonNullable<AgentBeforeSettleEventResult["entries"]> = [];
 
 		if (!coalescer.empty) {
-			const batch = coalescer.drain();
+			const drained = coalescer.drain();
+
+			// An answer that a waiting ask already returned is not news a second time, whether it was
+			// delivered directly or held for the end of a run. The buffered path is the one a reply
+			// takes while the agent is busy — which is exactly when an ask is waiting.
+			const batch = drained.filter((item) => {
+				if (!answersConsumedAsk(item.record, self, answeredPeers, item.reference)) return true;
+				report(`msgq: the answer from ${item.record.from} was already returned by the ask that waited for it`);
+				item.commit();
+				return false;
+			});
+			if (batch.length === 0) return undefined;
 
 			// Responsibility is taken here: the batch is about to be injected, so it can
 			// no longer be lost, and its progress is persisted.

@@ -45,7 +45,7 @@
 
 ## 7. Integration
 
-- [ ] 7.1 Run the end-to-end scenarios and verify a sealed publish reads as opened for its recipient, as "sealed to" for a third session, and that verdicts are unchanged by any of it.
+- [x] 7.1 Run the end-to-end scenarios and verify a sealed publish reads as opened for its recipient, as "sealed to" for a third session, and that verdicts are unchanged by any of it.
 - [x] 7.2 Verify the same scenarios pass against both storage engines.
 
 ## Workflow follow-up

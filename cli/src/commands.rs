@@ -552,6 +552,10 @@ fn await_reply(
                 continue;
             }
 
+            // The verdict is reached on the bytes that were signed, before anything opens them: a
+            // sealed reply verified after decryption would read as a forgery of itself.
+            let verdict = reader.verdict(&record);
+
             // A reply is sealed like any other record, and the asker is a recipient: it sealed to
             // itself when it asked, so what comes back is its to open.
             if crate::envelope::is_envelope(&record) {
@@ -586,7 +590,6 @@ fn await_reply(
 
             if json_out {
                 // The reply goes out in the one shape a stored record is printed in, verdict and all.
-                let verdict = reader.verdict(&record);
                 println!(
                     "{}",
                     serde_json::to_string(&json!({
