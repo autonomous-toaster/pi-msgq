@@ -395,6 +395,7 @@ msgq trust add alice SHA256:9fA2...       # pin a peer you have spoken to
 msgq trust                               # what is trusted here, and where each anchor came from
 msgq trust rotate alice SHA256:1c3d...    # replace a key; the old one stops being believed
 msgq trust revoke alice
+msgq verify                              # verdicts for records handed in on stdin
 ```
 
 Every record is printed with a verdict beside it — `trusted`, `unverified`, or `refused` with a
@@ -418,8 +419,14 @@ reason — and the record itself stays exactly the bytes the bus stored:
 - `msgq trust rotate` counts the retained records it makes unreadable, because rotation is the one
   trust act that destroys value: a record signed by a retired key is `refused`, not quietly demoted.
 - `MSGQ_INSECURE=1` permits reading records that carry no signature at all, for one invocation.
-  Records with no usable signature are refused by default; presence and acknowledgement records are
-  exempt, because they are the bus's own progress and no client signs them.
+  Records with no usable signature are refused by default, and nothing is exempt: presence and
+  acknowledgements are signed too, because they are what a reader routes and acknowledges on.
+- A client that reads the bus itself — the pi extension does — asks `msgq verify` for the verdict
+  rather than carrying its own copy of the check, so one implementation decides what a record is:
+
+  ```bash
+  msgq read group/standup --from-start --json | jq -c .record | msgq verify --json
+  ```
 
 One thing this deliberately does not do: tell two sessions of the same principal apart. A key belongs
 to a principal, so a sibling session that holds the same key can still speak as its neighbour. Trust

@@ -190,7 +190,7 @@ test("the identity report names the locator fields", () => {
 		addresses: ["session/planner"],
 		policy: "honor",
 		presence: "registered",
-		trusted: [],
+		allowed: [],
 		card: { project: "org/repo", branch: "main", worktree: "repo", path: "src" },
 	});
 	assert.match(text, /project\s+org\/repo/);
@@ -206,7 +206,7 @@ test("the identity report names every fact the session holds", () => {
 		addresses: ["session/planner", "group/ci"],
 		policy: "honor",
 		presence: "registered",
-		trusted: ["session/parent"],
+		allowed: ["session/parent"],
 	});
 	assert.equal(
 		text,
@@ -216,7 +216,7 @@ test("the identity report names every fact the session holds", () => {
 			"  follows   session/planner, group/ci",
 			"  policy    honor",
 			"  presence  registered",
-			"  trust     session/parent",
+			"  allow     session/parent",
 		].join("\n"),
 	);
 });
@@ -227,7 +227,7 @@ test("the identity report distinguishes off from lost", () => {
 		bus: "db",
 		addresses: ["session/x"],
 		policy: "display",
-		trusted: [],
+		allowed: [],
 	};
 	assert.match(formatIdentity({ ...base, presence: "off" }), /presence\s+off \(disabled\)/);
 	assert.match(formatIdentity({ ...base, presence: "lost" }), /presence\s+not registered/);
@@ -240,11 +240,11 @@ test("the identity report admits a session with no bus address", () => {
 		addresses: [],
 		policy: "display",
 		presence: "off",
-		trusted: [],
+		allowed: [],
 	});
 	assert.match(text, /\(none: the message bus did not start\)/);
 	assert.match(text, /follows\s+\(none\)/);
-	assert.match(text, /trust\s+\(none set: every sender\)/);
+	assert.match(text, /allow\s+\(none set: every sender\)/);
 });
 
 test("a read-only session is not reported as an idle one", () => {
@@ -254,7 +254,7 @@ test("a read-only session is not reported as an idle one", () => {
 		addresses: ["session/a"],
 		policy: "display",
 		presence: "registered",
-		trusted: [],
+		allowed: [],
 		write: "writable",
 	});
 	assert.match(idle, /write\s+writable/);
@@ -265,7 +265,7 @@ test("a read-only session is not reported as an idle one", () => {
 		addresses: ["session/a"],
 		policy: "display",
 		presence: "lost",
-		trusted: [],
+		allowed: [],
 		write: "read-only (the credential is not recognised)",
 	});
 	assert.match(readOnly, /read-only/);

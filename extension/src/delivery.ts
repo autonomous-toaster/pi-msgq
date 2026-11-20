@@ -28,12 +28,12 @@ export function planDelivery(
 	policy: Policy,
 	selfAddress: string,
 	busy: boolean,
-	trusted: string[] = [],
+	allowed: string[] = [],
 ): DeliveryPlan {
 	if (policy === "display") return "display";
 	if (record.from === selfAddress) return "display";
 	// An empty list means no allowlist is configured; a non-empty one admits only those senders.
-	if (trusted.length > 0 && !trusted.includes(record.from)) return "display";
+	if (allowed.length > 0 && !allowed.includes(record.from)) return "display";
 	if (!TURN_TYPES.includes(record.type) && record.type !== "command") return "display";
 	if (!recordBody(record)) return "display";
 	// A command is delivered as input, and is never gathered into a batch: a batch is one message,

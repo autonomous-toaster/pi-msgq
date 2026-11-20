@@ -4,7 +4,6 @@
 // long as the session runs and retracted when it stops. Any participant that can publish can
 // appear, which is the point — the roster is not a pi feature. See `PROTOCOL.md`.
 
-import type { Bus } from "./consumer.ts";
 import { type Card, sameCard } from "./card.ts";
 import { canonicalizeAddress } from "./config.ts";
 import { PROTOCOL_VERSION, type MsgqRecord } from "./record.ts";
@@ -62,8 +61,18 @@ export interface PresenceOptions {
  * contract, so a failure is reported through `error` and the caller decides what to say. A
  * participant that never publishes simply is not listed.
  */
+/**
+ * What presence needs from the thing that carries its records.
+ *
+ * Narrow on purpose: presence writes through the client, so it is signed like every other record,
+ * and this is all it needs from a bus.
+ */
+export interface PresenceTransport {
+	publish(address: string, record: unknown): void | Promise<void>;
+}
+
 export class Presence {
-	private readonly bus: Bus;
+	private readonly bus: PresenceTransport;
 	private readonly address_to_publish_to: string;
 	private readonly participant: string;
 	private readonly options: PresenceOptions;
@@ -75,7 +84,7 @@ export class Presence {
 	private failure: unknown;
 	private published = false;
 
-	constructor(bus: Bus, options: PresenceOptions) {
+	constructor(bus: PresenceTransport, options: PresenceOptions) {
 		this.bus = bus;
 		this.address_to_publish_to = presenceAddress(options.scope);
 		this.options = options;

@@ -174,6 +174,10 @@ msgq [--db <PATH>] <COMMAND>
 | `cursor get <CONSUMER> <TOPIC>` | print a saved offset, or `0` |
 | `cursor set <CONSUMER> <TOPIC> <OFFSET>` | save an offset (monotonic) |
 | `cursor reset <CONSUMER> <TOPIC>` | clear an offset |
+| `keygen [PRINCIPAL] [--force]` | create this machine's signing key; never touches a bus |
+| `fingerprint [PRINCIPAL]` | print a key's `SHA256:` fingerprint, to compare out of band |
+| `trust [list\|add\|revoke\|rotate]` | record, rotate, revoke and show what this reader believes about a peer |
+| `verify [--json]` | reach a verdict about records handed in on standard input, one per line |
 | `db info` | path, size, contents, protocol version, per-consumer lag, record ages |
 | `prune --older-than <AGE> [--apply]` | remove records older than an age, never one a consumer has not passed |
 
@@ -211,7 +215,7 @@ other.
 ### `read`
 
 ```bash
-msgq read <address>... [--from <N> | --from-start] [--limit <N>] [--json [--with-offset]]
+msgq read <address>... [--from <N> | --from-start] [--limit <N>] [--json]
 ```
 
 - Default start position is the **current end** of each stream — reads do not replay history.
@@ -222,7 +226,7 @@ msgq read <address>... [--from <N> | --from-start] [--limit <N>] [--json [--with
 ### `follow`
 
 ```bash
-msgq follow <address>... --consumer <NAME> [--from <N> | --from-start] [--json [--with-offset]]
+msgq follow <address>... --consumer <NAME> [--from <N> | --from-start] [--json]
 ```
 
 - Resumes from the consumer's saved offset.
@@ -240,19 +244,98 @@ address delivers to every follower.
 
 ### `--json`
 
-`--json` is an **input** format for `publish` and an **output** format for `read`, `follow`,
-`topics`, and `consumers`. As output it emits the raw stored record, one JSON object per line,
-so it pipes straight into `jq`.
+`--json` is an **input** format for `publish` and an **output** format for everything that prints a
+record, a listing or a report, one JSON object per line, so it pipes straight into `jq`.
 
-Add `--with-offset` to `read` or `follow` to wrap each line with where the record sits:
+Every command that prints a whole stored record prints the same shape, as `read` does here:
 
 ```json
-{"topic":"session/planner","offset":42,"created_at":1760000000,"record":{"v":1,"type":"prompt"}}
+{"topic":"session/planner","offset":42,"created_at":1760000000,
+ "verdict":{"state":"unverified","fingerprint":"SHA256:...","reason":"no anchor for this key"},
+ "record":{"v":1,"type":"prompt","from":"session/planner"}}
 ```
 
-That is what a client needs to build a record id (`<address>#<offset>`) for `reply_to`, without
-reading the database itself. It is a CLI output convenience, not part of the wire; without the
-flag the output is unchanged.
+- **`record`** is exactly what the bus stored, byte for byte. Nothing a reader adds appears inside it.
+- **`offset`** is what builds a record id (`<address>#<offset>`) for `reply_to`, without reading the
+database yourself.
+- **`verdict`** is the reader's opinion of the sender: `trusted`, `unverified`, or `refused` with a
+reason. See *Trust* below.
+
+`topics`, `sessions`, `card`, `consumers`, `cursor` and `db info` print their own objects, unchanged.
+
+## Trust
+
+The envelope says who *wrote* a record. On a shared bus that is the bus's own stamp, applied after a
+scope check, so it is only as honest as whoever runs the database. A reader that needs more verifies
+a signature against a key it was given out of band:
+
+```bash
+msgq keygen                              # a key for this machine, and its fingerprint
+msgq fingerprint                         # the short form a peer compares
+msgq trust add alice SHA256:9fA2c3d4...  # pin a peer you have spoken to
+msgq trust                               # what is trusted, and where each anchor came from
+msgq trust rotate alice SHA256:1b7e...   # replace a key; reports what that refuses
+msgq trust revoke alice
+```
+
+- A publish signs with the principal's key: on a shared bus the identity the credential belongs to,
+  otherwise `user@host`. A key is created on the first publish and reported on standard error, so
+  the offset on standard output stays parseable.
+- `msgq trust` never invents an anchor. Recording requires a principal and a fingerprint typed by a
+  person, and one key belongs to one principal: recording somebody else's key is refused and names
+  who already holds it.
+- Recording over a current key is refused rather than done silently; `trust rotate` is that act, and
+  it moves the old fingerprint to a retired list, reports how many retained records it makes refused,
+  and keeps the retired fingerprint so a refusal can say why.
+- Trust is scoped to one bus, named in `msgq trust` and in `db info`. The keyring lives at
+  `~/.config/msgq/trust/<bus-id>/anchors.json`, where the bus id is a readable slug plus a digest of
+  the canonical location.
+
+Three layers decide, most transient first:
+
+| Layer | Where it comes from | Lives for |
+|---|---|---|
+| `MSGQ_TRUST` | `principal:fingerprint`, comma- or space-separated | one invocation |
+| `MSGQ_TRUST_SESSION` | the pi session's own anchors | the conversation |
+| keyring | `msgq trust add` | until revoked or rotated |
+
+A malformed entry and one principal given two fingerprints are both fatal: skipping either would turn
+a typo into "trusted nobody", or a conflict into a coin flip. When two layers name different
+fingerprints for one principal, the more transient wins and the disagreement is printed. Neither the
+environment nor a session ever writes the keyring.
+
+### Verdicts
+
+Every record printed by `read`, `follow` or `ask` carries a verdict beside it: `trusted` when the
+signature verifies against a current anchor, `unverified` when there is no usable signature or no
+anchor for the key, and `refused` when the signature is broken or the key was retired. The rules, in
+order:
+
+1. A broken signature is refused whatever the anchors say: a record whose bytes changed is not the
+   record that was signed.
+2. A signature from a current anchor is trusted.
+3. A signature from a retired key is refused, naming the date of retirement.
+4. Anything else is unverified, and stays unverified however many times it speaks.
+
+Verification happens before a sealed body is opened, because the signature covers the bytes that are
+stored rather than the plaintext they become.
+
+A record with no usable signature is refused on read unless the invocation sets `MSGQ_INSECURE=1`.
+Nothing is exempt: presence and acknowledgements are signed too, because a reader routes on them. A
+refused record is still printed, with its reason, and the read exits non-zero.
+
+`msgq verify` answers the same question for a client that reads the bus itself, so there is one
+implementation of the check rather than two:
+
+```bash
+msgq verify --json <<'JSON'
+{"v":1,"type":"prompt","from":"session/a","to":"group/b","message":"hi"}
+JSON
+# {"fingerprint":null,"reason":"no usable signature","state":"unverified"}
+```
+
+It reads one record per line and prints one verdict per line, in order; a line that is not a record
+is reported as unverified with a reason and does not stop the run.
 
 ## Exit codes
 

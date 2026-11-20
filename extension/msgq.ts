@@ -32,7 +32,7 @@ import {
 	parsePolicy,
 	parsePresence,
 	parseTopics,
-	parseTrustList,
+	parseAllowList,
 	parseTtlSeconds,
 	type CardPathMode,
 	type ContextMode,
@@ -64,6 +64,7 @@ import {
 	wantsReply,
 } from "./src/delivery.ts";
 import { type CommandDeps, registerCommands } from "./src/commands.ts";
+import { clientPublisher, clientPublishRunner, type Publisher } from "./src/publish.ts";
 import {
 	clientRunner,
 	emptySessionTrust,
@@ -123,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Register session presence: 'on' (default) or 'off'",
 		type: "string",
 	});
-	pi.registerFlag("msgq-trust", {
+	pi.registerFlag("msgq-allow", {
 		description: "Comma-separated senders allowed to start a turn under 'honor'",
 		type: "string",
 	});
@@ -172,7 +173,7 @@ export default function (pi: ExtensionAPI) {
 	let addresses: string[] = [];
 	let skipped = 0;
 	/** Senders allowed to start a turn under the honour policy. Empty means no allowlist. */
-	let trusted: string[] = [];
+	let allowed: string[] = [];
 	/** Whether presence is configured on, as opposed to actually held. */
 	let presenceConfigured = false;
 	/** Whether the session currently holds its presence lease. */
@@ -356,10 +357,9 @@ export default function (pi: ExtensionAPI) {
 		delivery?: AckDelivery;
 		outcome?: AckOutcome;
 	}): void {
-		const open = bus;
-		if (!open) return;
+		if (!bus) return;
 		publishSafely(
-			() => open.publish(options.to, buildAck({ from: self, ...options })),
+			() => signedPublish.publish(options.to, buildAck({ from: self, ...options })),
 			(error) => report(`msgq could not publish an acknowledgement: ${String(error)}`, "warning"),
 		);
 	}
@@ -515,7 +515,7 @@ export default function (pi: ExtensionAPI) {
 		// An acknowledgement is never itself acknowledged.
 		const phases = isAckRecord(record) ? undefined : parseAckRequest(record.meta);
 		const busy = context ? !context.isIdle() : false;
-		const plan = planDelivery(record, policy, self, busy, trusted);
+		const plan = planDelivery(record, policy, self, busy, allowed);
 		const reference = referenceFor(record);
 
 		// The peer being waited on is asking something. Answering needs the turn the wait is
@@ -633,6 +633,18 @@ export default function (pi: ExtensionAPI) {
 	// The agent-facing surface: one tool that delegates, so the wire lives in the CLI.
 	const msgqBin = process.env.MSGQ_BIN?.trim() || "msgq";
 
+	/**
+	 * How this session writes its own records.
+	 *
+	 * Presence and acknowledgements are records like any other, so they leave through the client and
+	 * carry its signature. A bus where the client's own progress was unsigned would need a reader
+	 * rule saying so, and a rule like that is a hole the moment somebody writes a record that looks
+	 * like progress.
+	 */
+	const signedPublish: Publisher = clientPublisher(
+		clientPublishRunner(msgqBin, { db: busPath }),
+	);
+
 	/** The client, asked what one record is worth. */
 	const trustRunner = clientRunner(msgqBin);
 
@@ -670,7 +682,7 @@ export default function (pi: ExtensionAPI) {
 			addresses,
 			policy,
 			presence: presenceConfigured ? (presenceHeld ? "registered" : "lost") : "off",
-			trusted,
+			allowed,
 			card: currentCard,
 			write: writeState(),
 			encryption: describeKey(sealingKey),
@@ -876,7 +888,7 @@ export default function (pi: ExtensionAPI) {
 			const topicsFlag = pi.getFlag("msgq-topics");
 			const policyFlag = pi.getFlag("msgq-policy");
 			const presenceFlag = pi.getFlag("msgq-presence");
-			const trustFlag = pi.getFlag("msgq-trust");
+			const allowFlag = pi.getFlag("msgq-allow");
 			const contextFlag = pi.getFlag("msgq-context");
 			const cardPathsFlag = pi.getFlag("msgq-card-paths");
 			extra = parseTopics(
@@ -892,9 +904,9 @@ export default function (pi: ExtensionAPI) {
 					process.env.MSGQ_PRESENCE,
 			);
 			presenceTtl = parseTtlSeconds(process.env.MSGQ_PRESENCE_TTL, PRESENCE_TTL_S);
-			trusted = parseTrustList(
-				(typeof trustFlag === "string" ? trustFlag : undefined) ??
-					process.env.MSGQ_TRUST,
+			allowed = parseAllowList(
+				(typeof allowFlag === "string" ? allowFlag : undefined) ??
+					process.env.MSGQ_ALLOW,
 			);
 			contextMode = parseContext(
 				(typeof contextFlag === "string" ? contextFlag : undefined) ??
@@ -948,7 +960,9 @@ export default function (pi: ExtensionAPI) {
 		// here is never fatal.
 		if (presenceConfigured && bus) {
 			currentCard = await deriveCard(currentCwd);
-			presence = new Presence(bus, {
+			// Presence goes out through the client too, so the bus holds no unsigned record this session
+			// wrote: a forged presence is refused like any other forgery.
+			presence = new Presence(signedPublish, {
 				address: self,
 				participant: identity.sessionId,
 				alias: identity.alias,

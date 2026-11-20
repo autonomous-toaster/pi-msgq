@@ -59,6 +59,19 @@
 - [x] 7.2 Verify the same scenarios pass against both storage engines, per the conformance requirement.
 - [x] 7.3 Correct the `sender_of` comment in `sql/authorization.sql` so it no longer claims a session cannot speak as a sibling, and verify the spec wording and the comment agree.
 
+## 8. Making the extension consistent with the trust layer
+
+- [x] 8.1 Rename the extension's sender allowlist so it stops colliding with the trust layer: flag `--msgq-allow`, variable `MSGQ_ALLOW`, `allowed` in the code, and the identity report line renamed. Verified by a test asserting the report says `allow` and by no remaining reference to the old names.
+- [x] 8.2 Assert the collision is gone by checking that setting `MSGQ_TRUST` to an anchor no longer tightens the allowlist, and verify a test covers the parse of each name.
+- [x] 8.3 Publish presence and acknowledgements through the client (`msgq publish --json`) so every record the extension writes is signed, and verify a test asserts the plan carries the record whole and the bus the session is on.
+- [x] 8.4 Remove the exemption that let unsigned presence and acknowledgement records be read, and verify a test asserts an unsigned event record is refused exactly like an unsigned message.
+- [x] 8.5 Rewrite both READMEs against the implemented behaviour: the one shape a record is printed in, `msgq verify`, the trust verbs and layers, the renamed allowlist, and signed presence and acknowledgements.
+
+- [x] 8.6 Sign the records `ask` writes, found by the end-to-end run: a question arrived with no signature because ask builds its own record instead of going through publish. Verified by a test asserting a question reads as trusted once its key is pinned.
+- [x] 8.7 Update the end-to-end driver for the one record shape and for the raw records it writes on purpose, and verify the whole scenario sweep passes except `ack-display`, which fails identically on the tree before this change and is reported rather than papered over.
+- [x] 8.8 Update `cli/README.md`, `maki/README.md` and the maki plugin for the record shape and the removed `--with-offset`, and verify every documented command runs as written.
+- [x] 8.9 Remove the last references to the old allowlist name (`scripts/gitlab-watch.sh`, the notify skill, the end-to-end driver) and add `/msgq-trust` to the command-surface expectation.
+
 ## Workflow follow-up
 
 - Archive the change after the project's review requirements are satisfied.

@@ -174,10 +174,10 @@ session/CgiccyNbdVnFfcih8JHyG
 
 ## How it works
 
-`msgq follow <address>… --consumer maki#<session-id> --json --with-offset` runs as a
-session-scoped job, following `session/<session-id>` and any configured alias. `--with-offset`
-wraps each record with `{topic, offset, created_at, record}`, which is how a reply and an
-acknowledgement can name `<address>#<offset>`. The consumer is unique per session, so two maki
+`msgq follow <address>… --consumer maki#<session-id> --json` runs as a
+session-scoped job, following `session/<session-id>` and any configured alias. Every line carries
+`{topic, offset, created_at, verdict, record}`, which is how a reply and an acknowledgement can
+name `<address>#<offset>` and how the plugin sees who a record is really from. The consumer is unique per session, so two maki
 instances may follow the same alias and each get its own cursor instead of fighting over the
 follow lock. `/reload` adopts the running job instead of starting a second one.
 
@@ -202,5 +202,5 @@ follow lock. `/reload` adopts the running job instead of starting a second one.
 | nothing arrives | wrong name; `/peers me` shows the addresses, `msgq consumers` shows what is followed |
 | a message shows but the agent ignores it | `policy = "display"`, or the sender is outside `trust` |
 | `unsupported msgq protocol version` | the record's `v` is not 1 |
-| `follow line has no offset` | an older `msgq` without `--with-offset`; rebuild/install the CLI |
+| `follow line has no offset` | an older `msgq` whose `--json` printed the bare record; rebuild/install the CLI |
 | follow job keeps restarting | `msgq` is missing or the database is unreadable; check `/peers me` last error |

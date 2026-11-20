@@ -43,6 +43,29 @@ the durable layer, and SHALL write to the session layer only when the caller ask
 - **WHEN** a person records an anchor for the current session only
 - **THEN** it SHALL apply while the session lives and SHALL NOT be reported by a later session
 
+### Requirement: The extension writes nothing it cannot sign
+
+The extension SHALL publish its own records — presence and acknowledgements — through the client, so
+that every record it writes carries a signature from the same key as the messages it sends. The
+extension SHALL NOT write a record directly to a bus, and the reader SHALL need no rule that exempts
+a kind of record from verification.
+
+#### Scenario: Presence is signed
+
+- **WHEN** the session registers or renews its presence
+- **THEN** the presence record SHALL carry the session's signature
+
+#### Scenario: An acknowledgement is signed
+
+- **WHEN** the session reports a lifecycle phase for a delivered record
+- **THEN** the acknowledgement SHALL carry the session's signature
+
+#### Scenario: No record kind is exempt from verification
+
+- **WHEN** a reader meets a record that looks like presence or an acknowledgement and carries no
+  signature
+- **THEN** the reader SHALL apply the same verdict rules it applies to any other record
+
 ### Requirement: The extension consults one bus
 
 The extension SHALL resolve trust against the bus it is connected to and SHALL NOT consult anchors

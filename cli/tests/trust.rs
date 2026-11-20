@@ -196,12 +196,12 @@ fn an_unsigned_message_is_refused_until_the_invocation_permits_it() {
 }
 
 #[test]
-fn bookkeeping_records_are_not_refused() {
+fn an_unsigned_event_record_is_refused_like_any_other() {
     let home = temp_dir();
     let db = home.join("bus.db");
 
-    // Presence and acknowledgements are public metadata about a participant, and no client signs
-    // them. A strict default that refused them would refuse the bus's own progress.
+    // Presence and acknowledgements are records like any other, so nothing is exempt: a record that
+    // looks like progress but carries no signature forges the very thing a reader routes on.
     let target = msgq::config::Target::Local(db.clone());
     let (store, _) = msgq::store::Store::open(&target).unwrap();
     msgq::store::Bus::publish(
@@ -214,14 +214,33 @@ fn bookkeeping_records_are_not_refused() {
     )
     .unwrap();
 
-    let out = run(
+    let refused = run(
         &home,
         &db,
         &["read", "group/roster", "--from-start", "--json"],
         &[],
     );
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(wrapped(out.stdout.trim())["verdict"]["state"], "unverified");
+    assert_eq!(
+        refused.code, 1,
+        "an unsigned presence record reads only on request"
+    );
+    assert!(
+        refused.stderr.contains("no usable signature"),
+        "{}",
+        refused.stderr
+    );
+
+    let allowed = run(
+        &home,
+        &db,
+        &["read", "group/roster", "--from-start", "--json"],
+        &[("MSGQ_INSECURE", "1")],
+    );
+    assert_eq!(allowed.code, 0, "{}", allowed.stderr);
+    assert_eq!(
+        wrapped(allowed.stdout.trim())["verdict"]["state"],
+        "unverified"
+    );
 }
 
 #[test]
@@ -685,4 +704,39 @@ fn an_anchor_from_the_environment_is_never_written_down() {
         wrapped(after.stdout.trim())["verdict"]["state"],
         "unverified"
     );
+}
+
+#[test]
+fn a_question_is_signed_like_any_other_record() {
+    // ask builds its own record rather than going through publish, so it is the one place a record
+    // could leave the client unsigned without anybody noticing.
+    let home = temp_dir();
+    let db = home.join("bus.db");
+    let asked = run(
+        &home,
+        &db,
+        &[
+            "ask",
+            "session/w",
+            "why?",
+            "--no-wait",
+            "--from",
+            "cli/asker",
+        ],
+        &[],
+    );
+    assert_eq!(asked.code, 0, "{}", asked.stderr);
+
+    let fingerprint = fingerprint(&home, &db);
+    let out = run(
+        &home,
+        &db,
+        &["read", "session/w", "--from-start", "--json"],
+        &[("MSGQ_TRUST", &format!("alice:{fingerprint}"))],
+    );
+    let value = wrapped(out.stdout.trim());
+    assert_eq!(value["verdict"]["state"], "trusted", "{value}");
+    // The question still carries the hints that make it a question.
+    assert_eq!(value["record"]["meta"]["reply"], true);
+    assert_eq!(value["record"]["meta"]["ack"], true);
 }

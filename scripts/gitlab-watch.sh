@@ -39,7 +39,7 @@
 # Start the session so it will *act* on the digest rather than merely show it:
 #
 #   pi -e ./extension --msgq-policy honor --name planner \
-#      --msgq-trust "cli/gitlab-watch@$(hostname -s)"
+#      --msgq-allow "cli/gitlab-watch@$(hostname -s)"
 #
 # Three traps, all silent:
 #   - publishing as the session itself. its own address never starts a turn.

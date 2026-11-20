@@ -118,6 +118,21 @@ One boundary is deliberate: `msgq await --json` prints an acknowledgement *summa
 reference, delivery — not a whole record, so it carries no verdict. An acknowledgement is progress
 about somebody else's message, and the record it is progress about is what a reader verifies.
 
+### Nothing on the bus is exempt, so the extension writes through the client
+
+Presence and acknowledgements are records, and a reader routes on them: a forged presence puts a
+participant in a roster, a forged acknowledgement tells a sender its message landed. Exempting them
+from the strict default would therefore leave open exactly the hole the change exists to close.
+
+So the extension stops writing to the bus itself and publishes its own two record kinds through
+`msgq publish --json`, the same path a message takes. Every record the session writes is then signed
+by one key, and `msgq read` needs no kind-based rule — a rule that would be a hole the moment somebody
+published a record that looked like progress.
+
+The cost is one short-lived process per presence renewal and per acknowledgement phase. Presence
+renews on a timer and an acknowledgement is two or three per delivered message, so it is bounded by
+the rate of the conversation, not by its length.
+
 ### Keys and anchors are two different things, with two different consent rules
 
 This distinction carries most of the UX weight:
@@ -219,11 +234,14 @@ and it grants no trust to anyone.
 session, and that telling sessions apart needs a signature — which this change does not provide.
 The overclaim in the `sender_of` comment is corrected as part of the implementation.
 
-**The extension pays a process per delivered record for its verdict.**
+**The extension pays a process per record it writes and per record it delivers.**
 
-→ Bounded by message rate and by the retention window of a conversation. The alternative — a second
-implementation in TypeScript — is the drift the protocol spec already forbids, so the trade is
-deliberate. A persistent verifier is the upgrade path if it ever shows.
+→ Bounded by message rate: presence renews on a timer, acknowledgements are two or three per
+delivered record, and a verdict is one per delivered record. The alternative — a second copy of the
+signature in TypeScript — is the drift the protocol spec already forbids.
+
+
+→ A persistent verifier or signer is the upgrade path if it ever shows, not a second implementation.
 
 **Verifying a sealed body's storage bytes couples the signature to the encryption layer.**
 

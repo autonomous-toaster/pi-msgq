@@ -248,6 +248,9 @@ cli/            Rust. The bus and its protocol.
   src/          address.rs    address grammar and canonicalization
                 config.rs     bus location resolution
                 record.rs     the message record contract, checked against the fixtures
+                keys.rs       ed25519 keys, fingerprints, and the bytes a signature covers
+                trust/        anchors, the layers they come from, and the verdict a reader reaches
+                              (mod.rs) and the verbs that record them (verbs.rs)
                 store.rs      a thin wrapper over honker's durable streams
                 presence.rs   presence records, as the `sessions` listing reads them
                 commands.rs   the verbs: publish, read, follow, await, ask, sessions, prune

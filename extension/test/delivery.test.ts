@@ -42,7 +42,7 @@ test("honor policy maps turn-bearing types by agent state", () => {
 	assert.equal(planDelivery(record({ type: "follow_up" }), "honor", SELF, true), "buffer");
 });
 
-test("a trusted sender allowlist gates the honour policy", () => {
+test("an allowlist of senders gates the honour policy", () => {
 	// Named apart from the helper, which would otherwise shadow it here.
 	const fromPlanner = record({ from: "session/planner" });
 	// A configured list admits only its members.
@@ -183,7 +183,7 @@ test("a command is gated exactly like anything else that acts", () => {
 	assert.equal(
 		planDelivery(command, "honor", SELF, false, ["session/parent"]),
 		"display",
-		"an untrusted sender's command must not run",
+		"a sender outside the allowlist cannot run a command",
 	);
 	assert.equal(
 		planDelivery({ ...command, message: "" }, "honor", SELF, false),

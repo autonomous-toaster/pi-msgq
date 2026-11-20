@@ -297,7 +297,7 @@ pub fn ask(db: &crate::config::Target, args: AskArgs) -> Result<(), Error> {
     // the lifecycle to know the peer finished without ever answering.
     rec.meta = Some(json!({ "ack": true, "reply": true }));
     record::validate(&rec)?;
-    let value = record::to_value(&rec)?;
+    let mut value = record::to_value(&rec)?;
 
     let (store, _) = Store::open(db)?;
     // The answer comes back to the sender, so record where that stream ends before asking.
@@ -307,6 +307,8 @@ pub fn ask(db: &crate::config::Target, args: AskArgs) -> Result<(), Error> {
     };
     let from_offset = store.max_offset(&stream)?;
 
+    // A question is a record like any other: the peer that answers it must be able to tell who asked.
+    sign_as_principal(&mut value, &store)?;
     let offset = store.publish(&canonical, &value)?;
     println!("{offset}");
 
@@ -719,28 +721,12 @@ fn refuse(
         crate::trust::Verdict::Refused { reason, .. } => {
             refused.push(format!("{id}: {reason}"));
         }
-        // Bookkeeping is exempt from the strict default, for the same reason it is exempt from
-        // sealing: presence and acknowledgements are public metadata about a participant, not
-        // content a reader acts on. The record they are about is the one that carries a signature.
-        verdict if verdict.is_unsigned() && !is_bookkeeping(&stored_value(event)) => {
-            unsigned.push(id)
-        }
+        // Nothing is exempt. Presence and acknowledgements are records like any other, and the client
+        // signs them; a kind-based exemption would be a hole the moment somebody writes a record that
+        // looks like progress.
+        verdict if verdict.is_unsigned() => unsigned.push(id),
         _ => {}
     }
-}
-
-/// Whether a record is one of the bus's own progress records rather than content.
-fn is_bookkeeping(value: &Value) -> bool {
-    if value.get("type").and_then(Value::as_str) != Some("event") {
-        return false;
-    }
-    matches!(
-        value
-            .get("event")
-            .and_then(|e| e.get("kind"))
-            .and_then(Value::as_str),
-        Some("presence") | Some("ack")
-    )
 }
 
 /// Name every principal whose trust layers disagree, before any record is shown.

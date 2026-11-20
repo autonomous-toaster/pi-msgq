@@ -90,10 +90,10 @@ export function parsePolicy(raw: string | undefined | null): Policy {
 }
 
 /**
- * Parse a comma-separated list of trusted sender addresses. Entries are compared
+ * Parse a comma-separated list of sender addresses allowed to start a turn. Entries are compared
  * literally against a record's `from`, so write the address as it appears.
  */
-export function parseTrustList(raw: string | undefined | null): string[] {
+export function parseAllowList(raw: string | undefined | null): string[] {
 	if (!raw) return [];
 	const out: string[] = [];
 	for (const part of raw.split(",")) {

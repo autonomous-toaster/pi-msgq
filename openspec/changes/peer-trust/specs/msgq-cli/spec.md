@@ -50,6 +50,27 @@ Generating a key SHALL NOT publish anything and SHALL NOT contact a bus.
 - **WHEN** any command reports a key
 - **THEN** it SHALL print no private key material
 
+### Requirement: Every record the client writes is signed
+
+The client SHALL sign every record it writes to a bus, whichever command writes it, so that no code
+path can leave an unsigned record behind by accident. A record built by a command that does not go
+through the publish path — a question, say — SHALL be signed the same way.
+
+#### Scenario: A publish is signed
+
+- **WHEN** a client publishes a record
+- **THEN** the stored record SHALL carry the session's signature
+
+#### Scenario: A question is signed
+
+- **WHEN** a client asks a peer a question
+- **THEN** the stored question SHALL carry the session's signature, exactly as a published message does
+
+#### Scenario: No command writes around the signature
+
+- **WHEN** any command writes a record to a bus
+- **THEN** that record SHALL carry a signature, and a reader SHALL have no unsigned record to interpret
+
 ### Requirement: Trust is recorded by an explicit verb
 
 The client SHALL offer one verb that records a trust anchor for a principal, one that revokes it,

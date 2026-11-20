@@ -138,11 +138,18 @@ function shutdown(child) {
 }
 
 /** A stream's records, or [] when nothing was ever published to it. */
-function readStream(address, db = DB) {
+// The harness plays every kind of client, including ones that write records with no signature, so it
+// reads them back the way such a client must. The extension under test never sets this itself.
+function readRecords(address, db = DB) {
 	const out = execFileSync(CLI, ["--db", db, "read", address, "--from-start", "--json"], {
 		encoding: "utf8",
+		env: { ...process.env, MSGQ_INSECURE: "1" },
 	}).trim();
-	return out ? out.split("\n").map((line) => JSON.parse(line)) : [];
+	if (!out) return [];
+	return out
+		.split("\n")
+		.map((line) => JSON.parse(line))
+		.map((line) => ({ ...line.record, offset: line.offset, verdict: line.verdict }));
 }
 
 /**
@@ -998,7 +1005,7 @@ async function scenarioCommandSurface() {
 	shutdown(child);
 
 	const ok =
-		JSON.stringify(commands) === JSON.stringify(["peer", "peers", "reply"]) &&
+		JSON.stringify(commands) === JSON.stringify(["msgq-trust", "peer", "peers", "reply"]) &&
 		JSON.stringify(skills) === JSON.stringify(["skill:msgq-delegate", "skill:msgq-notify"]) &&
 		described;
 	report(
@@ -1039,7 +1046,7 @@ async function scenarioCommandPickAndSend() {
 	const disposition = (await pending).data ?? {};
 	await wait(1500);
 
-	const records = readStream("session/reviewer", own);
+	const records = readRecords("session/reviewer", own);
 
 	// Abandoning the composition sends nothing either.
 	const abandoning = session.send({ id: "p2", type: "prompt", message: "/peers" });
@@ -1047,7 +1054,7 @@ async function scenarioCommandPickAndSend() {
 	const abandoned = await answerDialog(session, "editor", { cancelled: true });
 	await abandoning;
 	await wait(1200);
-	const afterAbandon = readStream("session/reviewer", own);
+	const afterAbandon = readRecords("session/reviewer", own);
 	const said = notices(session);
 	shutdown(session.child);
 
@@ -1114,14 +1121,14 @@ async function scenarioCommandPeerCompose() {
 	const composed = await answerDialog(session, "editor", { value: "composed by hand" });
 	await sending;
 	await wait(1500);
-	const afterSend = readStream("session/target", own);
+	const afterSend = readRecords("session/target", own);
 
 	// Abandoning the composition sends nothing.
 	const abandoning = session.send({ id: "p2", type: "prompt", message: "/peer session/target" });
 	const cancelled = await answerDialog(session, "editor", { cancelled: true });
 	await abandoning;
 	await wait(1200);
-	const afterCancel = readStream("session/target", own);
+	const afterCancel = readRecords("session/target", own);
 
 	shutdown(session.child);
 
@@ -1151,7 +1158,7 @@ async function scenarioCommandPeerPick() {
 	const disposition = (await pending).data ?? {};
 	await wait(1500);
 
-	const records = readStream("session/reviewer", own);
+	const records = readRecords("session/reviewer", own);
 	shutdown(session.child);
 
 	const ok =
@@ -1175,7 +1182,7 @@ async function scenarioCommandReply() {
 	// Nothing has been received yet, so there is nothing to answer.
 	const early = await runCommand(session, "/reply too early");
 	const earlySaid = notices(session);
-	const earlyRecords = readStream("cli/e2e@test", own);
+	const earlyRecords = readRecords("cli/e2e@test", own);
 
 	// Now receive one, and answer it.
 	const offset = Number(
@@ -1186,7 +1193,7 @@ async function scenarioCommandReply() {
 	await wait(2000);
 	await runCommand(session, "/reply on it");
 
-	const replies = readStream("cli/e2e@test", own);
+	const replies = readRecords("cli/e2e@test", own);
 	shutdown(session.child);
 
 	const ok =
@@ -1214,7 +1221,7 @@ async function scenarioCommandAbsentRecipient() {
 	const before = session.ui.length;
 	const disposition = await runCommand(session, "/peer session/nobody-here ping");
 	const said = notices(session, before);
-	const records = readStream("session/nobody-here", own);
+	const records = readRecords("session/nobody-here", own);
 
 	const alive = await session.send({ id: "a", type: "get_state" });
 	shutdown(session.child);
@@ -1241,7 +1248,7 @@ async function scenarioCommandMe() {
 	const self = `session/${state.data.sessionId}`;
 
 	const disposition = await runCommand(session, '/peer me "a note to myself"');
-	const records = readStream(self, own);
+	const records = readRecords(self, own);
 	const { data } = await session.send({ id: "e", type: "get_entries" });
 	const { custom, assistants } = split(data.entries);
 	shutdown(session.child);
@@ -1267,7 +1274,7 @@ async function scenarioCommandIdentity() {
 	writeFileSync(blocker, "x");
 	const badPath = resolve(blocker, "msgq.db");
 
-	const session = startPi(["--msgq-policy", "honor", "--msgq-trust", "session/parent"], {
+	const session = startPi(["--msgq-policy", "honor", "--msgq-allow", "session/parent"], {
 		MSGQ_DB: badPath,
 	});
 	const state = await session.send({ id: "s", type: "get_state" });
@@ -1296,7 +1303,7 @@ async function scenarioCommandNoDialog() {
 	const pick = oneShot("/peer", {}, own);
 	const reply = oneShot("/reply hi", {}, own);
 
-	const published = readStream("session/reviewer", own);
+	const published = readRecords("session/reviewer", own);
 	const ok =
 		listing.code === 0 &&
 		listing.err.includes("session/reviewer") &&
@@ -1537,7 +1544,7 @@ async function scenarioDispatchCommand() {
 	// A command is dispatched, not described. `/peers me` is an extension command, so it runs
 	// immediately and starts no turn: the proof that this was input rather than content.
 	const own = resolve(mkdtempSync(resolve(tmpdir(), "msgq-dispatch-")), "msgq.db");
-	const session = startPi(["--msgq-policy", "honor", "--msgq-trust", "session/parent"], {
+	const session = startPi(["--msgq-policy", "honor", "--msgq-allow", "session/parent"], {
 		MSGQ_DB: own,
 	});
 	const state = await session.send({ id: "s", type: "get_state" });
@@ -1673,7 +1680,7 @@ async function waitForRecord(db, address, matches, timeoutMs) {
 	while (Date.now() < deadline) {
 		let records = [];
 		try {
-			records = readStream(address, db);
+			records = readRecords(address, db);
 		} catch {
 			// A stream nobody has written to yet does not exist.
 		}
@@ -1713,10 +1720,10 @@ async function scenarioAskAnsweredOnce() {
 		return;
 	}
 	// Answering is what ends the wait, so the offset comes from the question itself.
-	const question = readStream(peer, own).find((record) => record.meta?.reply === true);
+	const question = readRecords(peer, own).find((record) => record.meta?.reply === true);
 	const offset = execFileSync(
 		CLI,
-		["--db", own, "read", peer, "--from-start", "--json", "--with-offset"],
+		["--db", own, "read", peer, "--from-start", "--json"],
 		{ encoding: "utf8" },
 	)
 		.trim()
@@ -1787,7 +1794,7 @@ async function scenarioAskWakes() {
 	}
 	const offset = execFileSync(
 		CLI,
-		["--db", own, "read", peer, "--from-start", "--json", "--with-offset"],
+		["--db", own, "read", peer, "--from-start", "--json"],
 		{ encoding: "utf8" },
 	)
 		.trim()

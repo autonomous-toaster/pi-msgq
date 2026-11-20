@@ -11,7 +11,7 @@ import {
 	parsePresence,
 	parseTopics,
 	parseTtlSeconds,
-	parseTrustList,
+	parseAllowList,
 	resolveDbPath,
 	selfAddress,
 	subscriptionAddresses,
@@ -52,9 +52,9 @@ test("parsePolicy defaults to display and rejects unknown values", () => {
 });
 
 test("a trust list is comma separated, trimmed, and de-duplicated", () => {
-	assert.deepEqual(parseTrustList(undefined), []);
-	assert.deepEqual(parseTrustList("  "), []);
-	assert.deepEqual(parseTrustList("session/planner, cli/ci@host , session/planner"), [
+	assert.deepEqual(parseAllowList(undefined), []);
+	assert.deepEqual(parseAllowList("  "), []);
+	assert.deepEqual(parseAllowList("session/planner, cli/ci@host , session/planner"), [
 		"session/planner",
 		"cli/ci@host",
 	]);

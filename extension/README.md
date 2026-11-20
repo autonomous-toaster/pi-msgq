@@ -70,7 +70,7 @@ find the address of a session you forgot to name.
 
 ## Delivery policy
 
-The policy **caps** what a message may do. It is the trust dial, and `display` is the default.
+The policy **caps** what a message may do. It is the policy dial, and `display` is the default.
 
 | Policy | Effect |
 |---|---|
@@ -102,8 +102,10 @@ command has to be the whole text.
 
 Worth being plain about what that means: dispatching goes **around the model**. A trusted sender can
 run an extension command's code, without anything deliberating in between, and `/skill:x` is
-dispatched even where that skill is marked as belonging to a human's hands. The trusted set was
-already the gate on what may act here; this makes it considerably more load-bearing.
+dispatched even where that skill is marked as belonging to a human's hands. The allowlist was already
+the gate on what may act here; this makes it considerably more load-bearing. It is also why the
+allowlist is not the trust layer: it scopes what this session will obey, and says nothing about who
+really sent the record.
 
 Messages that arrive while the agent is running are **coalesced**: however many arrive
 during a run, they are delivered as a single message and cause at most one more model request.
@@ -149,6 +151,12 @@ Presence is a record, not an engine primitive, and that is deliberate: any proce
 can appear on the roster with nothing but the CLI, which is why the listing is not a pi feature. It
 is the one stream this extension appends to, and it never appears in a conversation stream.
 
+The extension writes this record through the client — `msgq publish --json` — rather than to the bus
+directly, so presence is signed by the same key as the messages this session sends. Nothing on the
+read side is exempt from verification as a result: a presence record from a peer you have pinned reads
+as `trusted`, one from a stranger as `unverified`, and a forged one as `refused`. The cost is one
+short-lived process per renewal.
+
 Presence is **advisory** — it helps a sender or an operator find sessions, and it never gates
 delivery. A session that crashes stops renewing, so its record ages out on its own after the
 lifetime it declared; a session that shuts down cleanly retracts it. Turn it off with
@@ -156,6 +164,7 @@ lifetime it declared; a session that shuts down cleanly retracts it. Turn it off
 
 ## Acknowledgements
 
+Acknowledgements are written the same way, and are signed the same way.
 Ask to be told what happened to a message by setting `meta.ack`:
 
 ```json
@@ -237,11 +246,12 @@ describe where it works.
 
 Two things make that safe to use:
 
-- **`--msgq-trust <addresses>`** is a comma-separated allowlist. Under `honor`, a record from
-  anyone outside it is delivered display-only and **cannot start a turn**. A session started with a
-  narrow list is what stops a shell-capable agent from being commanded by any process that can
-  write the bus. `from` is unverified, so the allowlist was never authentication; it scopes who a
-  session will *routinely* obey, and the real boundary is who can write the bus file.
+- **`--msgq-allow <addresses>`** (or `MSGQ_ALLOW`) is a comma-separated allowlist. Under `honor`, a
+  record from anyone outside it is delivered display-only and **cannot start a turn**. A session
+  started with a narrow list is what stops a shell-capable agent from being commanded by any process
+  that can write the bus. It is not authentication: it says who this session will *routinely* obey.
+  For knowing who actually sent something, use the trust layer below, which `--msgq-allow` is
+  deliberately not named after.
 - A message that **asks a question** is delivered with an instruction telling the model to answer
   with the `peers` tool. Without it a peer answers into its own transcript and the asker waits in
   vain.
@@ -297,7 +307,7 @@ session/planner
   follows     session/planner
   policy      honor
   presence    registered
-  trust       session/parent
+  allow       session/parent
   project     github.com/org/repo
   branch      main
   worktree    repo
@@ -320,7 +330,7 @@ script, a background job, a CI hook, a watcher. It covers finding a session's ad
 with a message, running something detached that reports when it finishes, asking and answering,
 and asking to be told that a message arrived. It also states the two rules that fail silently: a
 session cannot wake itself, because a record whose sender is its own address never starts a turn;
-and a session with a trust list ignores a sender outside it.
+and a session with an allowlist ignores a sender outside it.
 
 **`msgq-delegate`** is the other direction: delegating work to another session, writing a task a
 fresh process can act on, when to block and when to be woken, running several delegates at once,

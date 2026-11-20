@@ -710,8 +710,9 @@ start_follow = function()
 	end
 	args[#args + 1] = "--consumer"
 	args[#args + 1] = S.consumer
+	-- Every line is wrapped with its position and its trust verdict; the offset comes from
+	-- there, and the verdict is left for a reader that wants it.
 	args[#args + 1] = "--json"
-	args[#args + 1] = "--with-offset"
 
 	local id, err = maki.fn.jobstart(base(args), {
 		name = name,

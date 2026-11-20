@@ -123,6 +123,15 @@ test("the tool surface cannot reach trust", () => {
 	assert.ok(!source.includes("registerCommand"), "a tool registers a command");
 });
 
+test("the allowlist no longer answers to the name of the trust layer", () => {
+	// MSGQ_TRUST names the anchors a reader believes. The allowlist used to read it too, so pinning a
+	// peer would silently have restricted which senders could start a turn — two meanings, one name.
+	const source = readFileSync(new URL("../msgq.ts", import.meta.url), "utf8");
+	assert.ok(source.includes("MSGQ_ALLOW"), "the allowlist does not read MSGQ_ALLOW");
+	assert.ok(!source.includes("process.env.MSGQ_TRUST,"), "the allowlist still reads MSGQ_TRUST");
+	assert.ok(source.includes('"msgq-allow"'), "the flag is not named msgq-allow");
+});
+
 test("a fresh conversation starts with nothing trusted", () => {
 	// Two sessions on one machine must not inherit each other's temporary trust.
 	const first = emptySessionTrust();
