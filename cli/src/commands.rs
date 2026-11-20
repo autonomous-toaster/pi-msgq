@@ -552,6 +552,18 @@ fn await_reply(
                 if !matches!(opened, Ok(crate::envelope::Opened::Body)) {
                     continue;
                 }
+            } else if let Some(alg) = crate::envelope::declared_alg(&record) {
+                // A sealed body that was not opened is never an answer. Echoing the stored bytes hands
+                // the caller ciphertext dressed as content — the failure a mixed pair of clients
+                // produces, and the one this message exists to make legible.
+                eprintln!(
+                    "msgq: the reply from {} is sealed with {alg}, which this build cannot open",
+                    record
+                        .get("from")
+                        .and_then(Value::as_str)
+                        .unwrap_or("somebody")
+                );
+                continue;
             }
 
             // Acknowledgements share the reply reference, so they are told apart by shape.

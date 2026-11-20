@@ -71,6 +71,15 @@ pub fn is_envelope(value: &Value) -> bool {
         == Some(ALG_ENVELOPE)
 }
 
+/// The algorithm a record declares, when it declares an encoding at all.
+pub fn declared_alg(value: &Value) -> Option<&str> {
+    value
+        .get("meta")
+        .and_then(|meta| meta.get("enc"))
+        .and_then(|enc| enc.get("alg"))
+        .and_then(Value::as_str)
+}
+
 /// The fingerprint that names an agreement key, and the form a recipient entry carries.
 pub fn agreement_fingerprint(key: &PublicKey) -> String {
     let digest = Sha256::digest(key.to_bytes());
