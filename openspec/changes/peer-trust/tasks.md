@@ -2,19 +2,19 @@
 
 ## 1. Key material
 
-- [ ] 1.1 Add `ed25519-dalek`, `rand` and `sha2` to `cli/Cargo.toml` and verify `cargo build` succeeds.
-- [ ] 1.2 Add a key module that writes a principal's private key to `~/.config/msgq/keys/<principal>.key` with mode 0600 and verifies the mode with a test on the written file.
-- [ ] 1.3 Derive the public key and an OpenSSH-style `SHA256:` fingerprint from the private key, and verify a unit test matches a fixed key's known fingerprint.
-- [ ] 1.4 Add `msgq keygen` and `msgq fingerprint`, with no bus required, and verify an integration test runs both against a temporary `HOME` and asserts that no bus file is created.
-- [ ] 1.5 Verify no command prints private key material by asserting the private bytes never appear in the output of any of these commands.
+- [x] 1.1 Add `ed25519-dalek`, `rand` and `sha2` to `cli/Cargo.toml` and verify `cargo build` succeeds.
+- [x] 1.2 Add a key module that writes a principal's private key to `~/.config/msgq/keys/<principal>.key` with mode 0600 and verifies the mode with a test on the written file.
+- [x] 1.3 Derive the public key and an OpenSSH-style `SHA256:` fingerprint from the private key, and verify a unit test matches a fixed key's known fingerprint.
+- [x] 1.4 Add `msgq keygen` and `msgq fingerprint`, with no bus required, and verify an integration test runs both against a temporary `HOME` and asserts that no bus file is created.
+- [x] 1.5 Verify no command prints private key material by asserting the private bytes never appear in the output of any of these commands.
 
 ## 2. Signing on publish
 
-- [ ] 2.1 Add the `meta.sig` object to the record vocabulary in `cli/src/record.rs`, preserving it through parse and serialize, and verify an existing round-trip test covers a record carrying `meta.sig`.
-- [ ] 2.2 Implement the domain-separated signed-bytes encoding of design.md, and verify unit tests show two spellings of one sender produce identical bytes and that changing `from`, `to`, `type` or body each changes the bytes.
-- [ ] 2.3 Sign on publish when a key exists for the principal, and verify a test publishes and asserts `meta.sig` verifies against the printed fingerprint.
-- [ ] 2.4 Create a key lazily on first publish and report the fingerprint and its location, and verify a test on a fresh `HOME` asserts the notice is printed and the key file exists.
-- [ ] 2.5 Add signed fixtures to `protocol/fixtures/` — a valid signature, a tampered body, a restamped sender, an unknown algorithm, and a mixed stream — and verify the conformance test accepts and rejects the same fixtures as before plus these.
+- [x] 2.1 Add the `meta.sig` object to the record vocabulary in `cli/src/record.rs`, preserving it through parse and serialize, and verify an existing round-trip test covers a record carrying `meta.sig`.
+- [x] 2.2 Implement the domain-separated signed-bytes encoding of design.md, and verify unit tests show two spellings of one sender produce identical bytes and that changing `from`, `to`, `type` or body each changes the bytes.
+- [x] 2.3 Sign on publish when a key exists for the principal, and verify a test publishes and asserts `meta.sig` verifies against the printed fingerprint.
+- [x] 2.4 Create a key lazily on first publish and report the fingerprint and its location, and verify a test on a fresh `HOME` asserts the notice is printed and the key file exists.
+- [x] 2.5 Add signed fixtures to `protocol/fixtures/` — a valid signature, a tampered body, a restamped sender, an unknown algorithm, and a mixed stream — and verify the conformance test accepts and rejects the same fixtures as before plus these.
 
 ## 3. Verification and verdicts
 

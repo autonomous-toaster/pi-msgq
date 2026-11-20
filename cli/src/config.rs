@@ -28,12 +28,18 @@ pub fn scope() -> Option<String> {
     if scope.is_empty() { None } else { Some(scope) }
 }
 
+/// The directory this user's msgq state lives in: the credential file, the signing keys, and the
+/// trust keyring all sit under it, so one place names where a deployment keeps its secrets.
+pub fn state_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".config/msgq"))
+}
+
 /// Where a credential may be kept instead of in the environment. A deployment that can avoid
 /// leaving a secret in the process table does so.
 pub fn identity_file() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|home| PathBuf::from(home).join(".config/msgq/token"))
+    state_dir().map(|dir| dir.join("token"))
 }
 
 /// The credential to present, if one is configured.

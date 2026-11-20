@@ -11,6 +11,7 @@ pub mod commands;
 pub mod completion;
 pub mod config;
 pub mod error;
+pub mod keys;
 pub mod pg;
 pub mod presence;
 pub mod record;

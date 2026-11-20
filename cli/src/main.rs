@@ -194,6 +194,8 @@ fn run(cli: Cli) -> Result<(), Error> {
             }
             Ok(())
         }
+        Command::Keygen { principal, force } => commands::keygen(principal, force),
+        Command::Fingerprint { principal } => commands::fingerprint(principal),
         Command::Db { action } => match action {
             DbCmd::Info => commands::db_info(&db),
         },

@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "type": "prompt",
+  "from": "session/alice-1",
+  "to": "group/red",
+  "message": "goodbye",
+  "meta": {
+    "sig": {
+      "alg": "ed25519",
+      "key": "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE",
+      "sig": "vLCRJMnxyRuhmuGrSxKOPL2/jxuzE4qqBUQnNf2U/7nCN4a3kaM7JcW0yZ8dHRuJmgXCnpBebugTXpuz6ipSCA"
+    }
+  }
+}

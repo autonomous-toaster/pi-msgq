@@ -91,6 +91,67 @@ pub enum CursorAction {
     },
 }
 
+/// Create this machine's signing key for a principal.
+///
+/// Deliberately takes no bus: making a key trusts nobody, so it needs no cooperation and cannot be
+/// made to depend on one.
+pub fn keygen(principal: Option<String>, force: bool) -> Result<(), Error> {
+    let principal = principal.unwrap_or_else(crate::keys::principal_name);
+    let path = crate::keys::key_path(&principal)?;
+    if path.exists() && !force {
+        return Err(Error::usage(format!(
+            "{} already exists; pass --force to replace it",
+            path.display()
+        )));
+    }
+    let made = crate::keys::generate(&principal)?;
+    println!("principal:   {principal}");
+    println!("key:         {}", made.path.display());
+    println!("fingerprint: {}", made.fingerprint);
+    println!("public:      {}", made.public);
+    Ok(())
+}
+
+/// Print a principal's fingerprint, in the form a peer compares out of band.
+pub fn fingerprint(principal: Option<String>) -> Result<(), Error> {
+    let principal = principal.unwrap_or_else(crate::keys::principal_name);
+    let signing = crate::keys::load(&principal)?.ok_or_else(|| {
+        Error::runtime(format!(
+            "no key for {principal}; run 'msgq keygen {principal}' first"
+        ))
+    })?;
+    println!("{}", crate::keys::fingerprint(&signing.verifying_key()));
+    Ok(())
+}
+
+/// The principal this session signs as.
+///
+/// A bus that knows who the credential belongs to names it, because that is the name a peer pins. A
+/// bus that does not — the local file — leaves the machine to name itself.
+fn signing_principal(store: &Store) -> Result<String, Error> {
+    Ok(match store.identity()? {
+        Some((principal, _)) => principal,
+        None => crate::keys::principal_name(),
+    })
+}
+
+/// Sign a record with this session's key, making the key if this is the first record.
+///
+/// The notice goes to standard error: a publish prints an offset on standard output, and a script
+/// parsing that offset should not have to know that a key was created.
+fn sign_as_principal(value: &mut Value, store: &Store) -> Result<(), Error> {
+    let principal = signing_principal(store)?;
+    let (signing, made) = crate::keys::load_or_generate(&principal)?;
+    if let Some(made) = made {
+        eprintln!(
+            "msgq: created a signing key for {principal} at {}",
+            made.path.display()
+        );
+        eprintln!("msgq: fingerprint {}", made.fingerprint);
+    }
+    crate::keys::sign_value(value, &signing)
+}
+
 /// Publish one message to an address.
 pub fn publish(db: &crate::config::Target, args: PublishArgs) -> Result<(), Error> {
     let canonical = address::canonicalize(&args.address)?;
@@ -99,6 +160,7 @@ pub fn publish(db: &crate::config::Target, args: PublishArgs) -> Result<(), Erro
         crate::seal::seal_body(&mut value, &key)?;
     }
     let (store, _) = Store::open(db)?;
+    sign_as_principal(&mut value, &store)?;
 
     // When awaiting, record where the reply stream ends *before* publishing, so an
     // acknowledgement that arrives immediately is still reported.

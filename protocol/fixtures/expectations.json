@@ -97,6 +97,24 @@
       "publish": "accept",
       "read": "accept",
       "why": "a sealed body is accepted by both sides; a reader with the passphrase reads it and a reader without one refuses it, naming the key identifier"
+    },
+    {
+      "file": "17-signed-record.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "meta.sig is additive: a reader that does not verify still reads the record, and one that does verifies the pinned key"
+    },
+    {
+      "file": "18-signature-unknown-alg.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "an unimplemented signature algorithm is a claim nobody can check, which is unverified rather than refused"
+    },
+    {
+      "file": "19-signature-tampered.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "a broken signature is readable and must be preserved, so that a verifying reader can refuse it and say why"
     }
   ]
 }

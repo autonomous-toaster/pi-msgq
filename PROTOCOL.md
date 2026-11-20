@@ -52,6 +52,7 @@ a record. Adding a type is an additive change and keeps `v`.
 | `trace` | a string | a correlation identifier, so records belonging to one piece of work can be listed together |
 | `reply` | `true` | the sender wants an answer; a reader can detect the request without reading the body |
 | `enc` | an object with at least `alg` and `kid` | the record's body is encoded; see *Readable and opaque* below |
+| `sig` | an object with `alg`, `key` and `sig` | the record's sender signed it; see *Signatures* below |
 
 `meta.trace` is how a delegation tree is reconstructed: a client stamps an identifier on the request
 and every participant stamps the same identifier on what it sends in that work. A client that ignores
@@ -74,6 +75,28 @@ A record whose body is encoded declares it in `meta.enc`, carrying at least an a
 key identifier. A client that does not recognize the declaration preserves and ignores it; a reader
 that cannot honour it takes the record as having an opaque body. This document does not define any
 encoding — the reservation exists so that adding one is an additive change.
+
+### Signatures
+
+A record MAY carry `meta.sig`, an object naming the algorithm (`alg`), the public key (`key`, base64,
+no padding) and the signature (`sig`, base64, no padding). The only algorithm this version defines is
+`ed25519`.
+
+A signature covers a domain tag and a length-prefixed encoding of:
+
+```
+  "msgq.sig.v1" | canonical(from) | canonical(to) | type | sha256(body as stored)
+```
+
+Length prefixes are big-endian `u32`. `from` and `to` are canonicalized first, so two spellings of one
+address sign the same bytes. The body is signed as stored, which means the *seal*, when there is one,
+runs before the signature.
+
+What a signature proves is narrow and worth stating: whoever holds the private key for `key` signed
+this sender, this address and this body. It does not say that the key belongs to anybody in
+particular — that is a fact about who you exchanged fingerprints with, and it lives outside the bus.
+A reader's verdict (`trusted`, `unverified`, `refused`) is its own opinion, never something the bus
+asserts.
 ## Events
 
 An `event` record carries an object in `event`. Two kinds are conventions:

@@ -1,0 +1,16 @@
+# gitleaks configuration.
+#
+# The protocol fixtures carry real public keys and real signatures: that is the point of them, and a
+# fake one would not prove the encoding. A public key is not a secret, so the fixtures are exempt
+# from the generic high-entropy rule — narrowly, by path, rather than by relaxing the rule.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Signed-record fixtures: published public keys and signatures, never private material"
+paths = [
+  'protocol/fixtures/17-signed-record.json',
+  'protocol/fixtures/18-signature-unknown-alg.json',
+  'protocol/fixtures/19-signature-tampered.json',
+]

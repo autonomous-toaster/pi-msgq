@@ -17,6 +17,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// receiver that does not know a type still has a record. See `PROTOCOL.md`.
 pub const KNOWN_TYPES: [&str; 6] = ["prompt", "steer", "follow_up", "note", "command", "event"];
 
+/// The `meta` key holding a signature: `{ alg, key, sig }`. See `PROTOCOL.md` and `keys`.
+///
+/// It is a `meta` key rather than a top-level field because `meta` is open, which makes a signature
+/// an additive change: a reader that does not verify still accepts the record.
+pub const SIG_KEY: &str = "sig";
+
 /// Whether this version knows what a type means.
 pub fn is_known_type(kind: &str) -> bool {
     KNOWN_TYPES.contains(&kind)

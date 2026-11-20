@@ -233,6 +233,19 @@ pub enum Command {
         #[arg(value_name = "SHELL")]
         shell: Shell,
     },
+    /// Create this machine's signing key. Never touches a bus.
+    Keygen {
+        /// The principal the key belongs to (default: this user at this host).
+        principal: Option<String>,
+        /// Replace a key that already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print a key's fingerprint, to compare with a peer out of band.
+    Fingerprint {
+        /// The principal whose key to name (default: this user at this host).
+        principal: Option<String>,
+    },
     /// Database information.
     Db {
         #[command(subcommand)]
