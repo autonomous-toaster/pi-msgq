@@ -156,6 +156,9 @@ impl Bus {
         command.arg("--db").arg(self.location()).args(args);
         // A scope in the caller's shell would move the roster out from under the fixtures.
         command.env_remove("MSGQ_SCOPE");
+        // These fixtures write bytes rather than sign records, so what they read back is unsigned by
+        // construction. A strict bus refuses that — which is the rule working; the fixture asks.
+        command.env("MSGQ_INSECURE", "1");
         if let Bus::Shared { token, .. } = self {
             command.env("MSGQ_TOKEN", token);
         }
@@ -177,12 +180,36 @@ impl Bus {
         out.stdout
     }
 
+    /// Write a record the way the engine sees one: bytes, as given.
+    ///
+    /// These fixtures test ordering, retention and cursors, which have nothing to do with sealing. A
+    /// client may no longer write a body that is not sealed to a party, so the fixture stops being a
+    /// client and becomes what the engine stores: this is the one shape that is allowed to publish
+    /// plaintext, and it exists only in tests.
     fn publish(&self, address: &str, body: &str) {
-        // These fixtures are about how the bus behaves, not about sealing: they write as a foreign
-        // client would, and a first-contact publish to a peer whose key nobody holds says so.
-        self.ok(&["publish", address, body, "--plaintext"]);
-    }
+        use msgq::config::Target;
+        use msgq::store::{Bus as _, Store};
 
+        let target = match self {
+            Bus::Local(path) => Target::Local(path.clone()),
+            Bus::Shared { dsn, .. } => Target::Shared(dsn.clone()),
+        };
+        let credential = match self {
+            Bus::Local(_) => None,
+            Bus::Shared { token, .. } => Some(token.clone()),
+        };
+        let (store, _) = Store::open_with(&target, credential).expect("the fixture bus opens");
+        let record = serde_json::json!({
+            "v": 1,
+            "type": "note",
+            "from": "session/fixture",
+            "to": address,
+            "message": body,
+        });
+        store
+            .publish(address, &record)
+            .expect("the engine stores what it is given");
+    }
     /// Push records past a one-second window. The clock is the engine's, so the only honest way to
     /// age a record is to wait for it.
     fn age_out(&self) {
