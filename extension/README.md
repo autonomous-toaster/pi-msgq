@@ -412,7 +412,10 @@ build is green
 ```
 
 `unverified` is a normal state, not a fault: a peer you have not pinned is still readable, and stays
-unverified however many times it speaks. Only you can change that, with a command:
+unverified however many times it speaks. It is shown in the theme's **warning** colour, a refused
+signature in its **error** colour and a pinned sender in **success**, so the transcript says at a
+glance which of the three you are looking at without leaving pi's palette. Only you can change what a
+sender is worth, with a command:
 
 | Command | What it does |
 |---|---|
@@ -431,6 +434,9 @@ unverified however many times it speaks. Only you can change that, with a comman
 - **Session anchors die with the conversation.** `--session` is a separate word rather than a
   default because an anchor that outlives the conversation and one that does not are different
   promises. A second session on the same machine inherits none of the first's.
+- **A sealed body is verified as it sits on the bus.** The signature covers the stored bytes, so the
+  verdict is reached before the body is opened; verifying the plaintext afterwards would refuse every
+  sealed record. A reference to a sealed record says so instead of quoting its ciphertext.
 - **The verdict comes from the client.** The extension asks `msgq verify` about each record it
   delivers rather than carrying its own copy of the signature check, so there is one answer to what a
   record is. It also means a session costs one short-lived process per delivered message.

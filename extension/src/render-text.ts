@@ -8,6 +8,15 @@ import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 /** The theme methods this module needs. */
 export type MsgqTheme = Pick<Theme, "fg" | "bold">;
 
+/** What a reader concluded about a record, as the renderer shows it. */
+export interface MsgqVerdict {
+	state: "trusted" | "unverified" | "refused";
+	/** The principal an anchor names, when the verdict is trusted. */
+	principal?: string;
+	fingerprint?: string;
+	reason?: string;
+}
+
 /** One delivered record, as the renderer sees it. */
 export interface MsgqItem {
 	from: string;
@@ -15,6 +24,8 @@ export interface MsgqItem {
 	address: string;
 	type: string;
 	body: string;
+	/** Absent when this entry is not a record the session verified. */
+	verdict?: MsgqVerdict;
 }
 
 /** Structured details attached to every msgq message. */
@@ -38,6 +49,38 @@ export function typeColor(type: string): ThemeColor {
 		default:
 			return "dim";
 	}
+}
+
+/**
+ * The colour a verdict is shown in.
+ *
+ * Theme tokens only, so this reads as part of pi rather than as an overlay on it: a sender you have
+ * not pinned is a warning, in the same orange the rest of the interface reserves for one, and a
+ * signature that failed is an error. Trusted is the quiet case, because it is the one that needs no
+ * attention.
+ */
+export function verdictColor(state: MsgqVerdict["state"]): ThemeColor {
+	switch (state) {
+		case "trusted":
+			return "success";
+		case "refused":
+			return "error";
+		default:
+			return "warning";
+	}
+}
+
+/** The verdict as one coloured line, or "" when there is nothing to say. */
+export function verdictLine(item: MsgqItem, theme: MsgqTheme): string {
+	const verdict = item.verdict;
+	if (!verdict) return "";
+	const colour = verdictColor(verdict.state);
+	const who = verdict.principal ? ` ${verdict.principal}` : "";
+	const fingerprint = verdict.fingerprint
+		? ` ${verdict.fingerprint.slice(0, 15)}`
+		: "";
+	const why = verdict.reason ? ` \u2014 ${verdict.reason}` : "";
+	return theme.fg(colour, `verdict: ${verdict.state}${who}${fingerprint}${why}`);
 }
 
 function route(item: MsgqItem, theme: MsgqTheme): string {
@@ -78,6 +121,8 @@ export function composeMsgqText(details: MsgqDetails, theme: MsgqTheme): string 
 		const item = items[0];
 		lines.push(`${label} ${theme.fg(typeColor(item.type), item.type)}`);
 		lines.push(route(item, theme));
+		const verdict = verdictLine(item, theme);
+		if (verdict) lines.push(verdict);
 		if (item.body) {
 			lines.push("");
 			for (const line of item.body.split("\n")) {
@@ -95,6 +140,8 @@ export function composeMsgqText(details: MsgqDetails, theme: MsgqTheme): string 
 		lines.push(
 			`${theme.fg("dim", `${index + 1}.`)} ${route(item, theme)} ${theme.fg(typeColor(item.type), item.type)}`,
 		);
+		const verdict = verdictLine(item, theme);
+		if (verdict) lines.push(verdict);
 		for (const line of item.body.split("\n")) {
 			lines.push(theme.fg("customMessageText", line));
 		}

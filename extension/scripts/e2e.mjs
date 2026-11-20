@@ -268,6 +268,86 @@ async function scenarioDefaultNote() {
 	);
 }
 
+/**
+ * The verdict reaches the transcript, not only the model.
+ *
+ * A person reading the session has to be able to tell a pinned sender from a stranger without
+ * opening the bus, and the renderer can only colour what it is given: the state has to travel in the
+ * message details, and the model-facing content has to say the same thing in words.
+ */
+async function scenarioVerdictRender() {
+	const { child, send } = startPi();
+	const state = await send({ id: "s", type: "get_state" });
+	const sessionId = state.data.sessionId;
+	const address = `session/${sessionId}`;
+	console.log("session:", sessionId, "policy: default (nobody is pinned)");
+
+	publish(address, "hello from a stranger");
+	await wait(2500);
+
+	const { data } = await send({ id: "e", type: "get_entries" });
+	const { custom } = split(data.entries);
+	shutdown(child);
+
+	const entry = custom[0];
+	const item = entry?.details?.items?.[0];
+	const state_ = item?.verdict?.state;
+	const content = String(entry?.content ?? "");
+	const ok =
+		custom.length === 1 &&
+		state_ === "unverified" &&
+		typeof item?.verdict?.fingerprint === "string" &&
+		content.includes("verdict: unverified") &&
+		// The transcript and the model are told the same thing, from the same opinion.
+		content.includes(item.verdict.fingerprint.slice(0, 15));
+	report(
+		"verdict-render",
+		ok,
+		`custom=${custom.length} state=${state_} content=${JSON.stringify(content.split("\n")[1])}`,
+	);
+}
+
+/**
+ * A sealed body is verified as it sits on the bus, not as it reads once opened.
+ *
+ * The signature covers the stored bytes. A reader that decrypts first and then verifies is comparing
+ * a signature against plaintext it never saw, so every sealed record would read as refused — which is
+ * exactly what a session with a passphrase reported before this existed.
+ */
+async function scenarioVerdictSealed() {
+	const passphrase = "correct horse battery staple";
+	const { child, send } = startPi([], { MSGQ_PASSPHRASE: passphrase });
+	const state = await send({ id: "s", type: "get_state" });
+	const sessionId = state.data.sessionId;
+	const address = `session/${sessionId}`;
+	console.log("session:", sessionId, "policy: default, sealed bodies");
+
+	execFileSync(
+		CLI,
+		["--db", DB, "publish", address, "sealed but honest"],
+		{ encoding: "utf8", env: { ...process.env, MSGQ_PASSPHRASE: passphrase } },
+	);
+	await wait(2500);
+
+	const { data } = await send({ id: "e", type: "get_entries" });
+	const { custom } = split(data.entries);
+	shutdown(child);
+
+	const entry = custom[0];
+	const item = entry?.details?.items?.[0];
+	const ok =
+		custom.length === 1 &&
+		// Verified against the ciphertext: no anchor, so unverified — emphatically not refused.
+		item?.verdict?.state === "unverified" &&
+		// And the body the person reads is the opened one, not the ciphertext.
+		item?.body === "sealed but honest";
+	report(
+		"verdict-sealed",
+		ok,
+		`custom=${custom.length} state=${item?.verdict?.state} body=${JSON.stringify(item?.body)}`,
+	);
+}
+
 async function scenarioHonorPrompt() {
 	const { child, send, waitForEvent } = startPi(["--msgq-policy", "honor"]);
 	const state = await send({ id: "s", type: "get_state" });
@@ -1841,6 +1921,8 @@ else if (scenario === "note-busy") await scenarioNoteBusy();
 else if (scenario === "self-guard") await scenarioSelfGuard();
 else if (scenario === "steer-mid-run") await scenarioSteerMidRun();
 else if (scenario === "extra-topic") await scenarioExtraTopic();
+else if (scenario === "verdict-render") await scenarioVerdictRender();
+else if (scenario === "verdict-sealed") await scenarioVerdictSealed();
 else if (scenario === "presence") await scenarioPresence();
 else if (scenario === "peer-locator") await scenarioPeerLocator();
 else if (scenario === "maki-card") await scenarioMakiCard();

@@ -3,6 +3,7 @@
 
 import type { Policy } from "./config.ts";
 import { opaqueBody, type MsgqRecord, recordBody } from "./record.ts";
+import type { MsgqItem } from "./render-text.ts";
 
 /** What to do with a record at delivery time. */
 export type DeliveryPlan =
@@ -53,6 +54,8 @@ export interface PendingMessage {
 	commit: () => void;
 	/** The record this one refers to, when it refers to one. */
 	reference?: ReferencedRecord;
+	/** The reader's verdict, carried so the transcript can colour it. */
+	verdict?: MsgqItem["verdict"];
 }
 
 /** Holds turn-bearing records while a run is in progress. */
@@ -65,8 +68,9 @@ export class Coalescer {
 		offset: number,
 		commit: () => void,
 		reference?: ReferencedRecord,
+		verdict?: MsgqItem["verdict"],
 	): void {
-		this.pending.push({ record, address, offset, commit, reference });
+		this.pending.push({ record, address, offset, commit, reference, verdict });
 	}
 
 	get size(): number {
@@ -155,9 +159,15 @@ export interface ReferencedRecord {
 export function formatReference(reference: ReferencedRecord): string {
 	const referent = reference.record;
 	if (!referent) return `[about ${reference.id}]`;
+	const from = `from ${referent.from}`;
+	// A sealed body is bytes nobody here can read: quoting the ciphertext fills the transcript with
+	// base64 and tells the reader less than saying so does.
+	const kid = opaqueBody(referent);
+	if (kid !== undefined) {
+		return `[about ${reference.id} ${from}: a sealed body (key ${kid})]`;
+	}
 	// One line, whatever shape the body had.
 	const body = recordBody(referent).replace(/\s+/g, " ").trim();
-	const from = `from ${referent.from}`;
 	return body
 		? `[about ${reference.id} ${from}: "${body}"]`
 		: `[about ${reference.id} ${from}]`;

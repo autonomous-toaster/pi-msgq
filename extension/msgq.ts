@@ -424,8 +424,8 @@ export default function (pi: ExtensionAPI) {
 		if (owed && offset !== undefined && owed.offset === offset) owed.answered = true;
 	}
 
-	function itemOf(record: MsgqRecord, address: string): MsgqItem {
-		return { from: record.from, address, type: record.type, body: recordBody(record) };
+	function itemOf(record: MsgqRecord, address: string, verdict?: MsgqItem["verdict"]): MsgqItem {
+		return { from: record.from, address, type: record.type, body: recordBody(record), verdict };
 	}
 
 	/**
@@ -462,7 +462,15 @@ export default function (pi: ExtensionAPI) {
 		subscription: Subscription,
 		busy: boolean,
 	): void {
-		const body = recordBody(record);
+		// A command is opened like anything else before it is handed to the session: dispatching a
+		// sealed body would type ciphertext into the transcript and run it as a prompt.
+		const opened = openRecord(record, sealingKey);
+		if (!opened.ok) {
+			report(`msgq cannot read a command from ${record.from}: ${opened.reason}`, "error");
+			subscription.save(offset);
+			return;
+		}
+		const body = recordBody(opened.record);
 		const phases = isAckRecord(record) ? undefined : parseAckRequest(record.meta);
 		if (phases) {
 			publishAck({ to: record.from, replyTo: offset, phase: "received", delivery: "turn" });
@@ -475,7 +483,9 @@ export default function (pi: ExtensionAPI) {
 					customType: MESSAGE_TYPE,
 					content: formatCommandNote(record, address, referenceFor(record)),
 					display: true,
-					details: { items: [itemOf(record, address)] } satisfies MsgqDetails,
+					details: {
+						items: [itemOf(record, address, verdictOf(record))],
+					} satisfies MsgqDetails,
 				},
 				{ triggerTurn: false },
 			);
@@ -502,6 +512,11 @@ export default function (pi: ExtensionAPI) {
 		offset: number,
 		subscription: Subscription,
 	): void {
+		// The bytes the signature covers are the bytes on the bus, so the verdict is reached before the
+		// body is opened. Verifying afterwards would compare a signature against plaintext it never
+		// saw, and every sealed record would read as refused.
+		const stored = record;
+
 		// An unreadable body is an error, not content. Opening happens before `type` is consulted, so
 		// no policy can turn an unopened body into a turn and nothing claims it was received.
 		const opened = openRecord(record, sealingKey);
@@ -544,7 +559,14 @@ export default function (pi: ExtensionAPI) {
 
 		if (plan === "buffer") {
 			// Responsibility is not taken yet: a crash here must redeliver.
-			coalescer.add(record, address, offset, () => subscription.save(offset), reference);
+			coalescer.add(
+				record,
+				address,
+				offset,
+				() => subscription.save(offset),
+				reference,
+				verdictOf(stored),
+			);
 			return;
 		}
 
@@ -567,15 +589,19 @@ export default function (pi: ExtensionAPI) {
 			if (turn) trackInFlight(record, offset, phases);
 		}
 
-		const verdict = verdictOf(record);
+		const verdict = verdictOf(stored);
 
 		try {
 			pi.sendMessage(
 				{
 					customType: MESSAGE_TYPE,
-					content: formatMessage(record, address, reference, verdict),
+					// The model reads a plain line; the transcript colours it, which is why the verdict
+					// travels in the details as well as in the content.
+					content: formatMessage(record, address, reference, verdictLine(verdict)),
 					display: true,
-					details: { items: [itemOf(record, address)] } satisfies MsgqDetails,
+					details: {
+						items: [itemOf(record, address, verdict)],
+					} satisfies MsgqDetails,
 				},
 				{ triggerTurn: turn },
 			);
@@ -654,10 +680,10 @@ export default function (pi: ExtensionAPI) {
 	 * The answer comes from the client, never from this module: a second implementation of the
 	 * signature would be a second answer to the same question.
 	 */
-	function verdictOf(record: unknown): string {
+	function verdictOf(record: unknown): Verdict {
 		const verdict = verifyRecord(trustRunner, record, sessionTrust);
 		if (verdict.state === "unverified") sessionTrust.unverified += 1;
-		return verdictLine(verdict);
+		return verdict;
 	}
 
 	/** Run a trust verb through the client, with this session's layer in its environment. */
@@ -1026,7 +1052,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const details: MsgqDetails = {
-				items: batch.map((item) => itemOf(item.record, item.address)),
+				items: batch.map((item) => itemOf(item.record, item.address, item.verdict)),
 			};
 			entries.push({
 				type: "custom_message",

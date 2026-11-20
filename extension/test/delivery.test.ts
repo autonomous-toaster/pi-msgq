@@ -274,3 +274,32 @@ test("a refusal carries all three consequences or none", () => {
 	assert.equal(refusal(record()), undefined);
 	assert.equal(refusal(record({ type: "event", event: { kind: "presence" } })), undefined);
 });
+
+test("a reference to a sealed record says so instead of quoting ciphertext", () => {
+	const sealed = formatReference({
+		id: "session/peer#7",
+		record: {
+			v: 1,
+			type: "prompt",
+			from: "session/peer",
+			to: "session/me",
+			message: "V4XOhcj5fV44HecTwnkl4Hcg1b2E8rv/jgXzqFoGQNRirU7UyHHPEVkaK+SGgibDRW/FsWhBbBYUZYvOAup/6i9XaFuwzgBPdg==",
+			meta: { enc: { alg: "aes-256-gcm", kid: "858ebfb2" } },
+		},
+	});
+	assert.match(sealed, /a sealed body \(key 858ebfb2\)/);
+	assert.doesNotMatch(sealed, /V4XOhcj5/);
+
+	const plain = formatReference({
+		id: "session/peer#8",
+		record: {
+			v: 1,
+			type: "prompt",
+			from: "session/peer",
+			to: "session/me",
+			message: "the plan is tomorrow",
+		},
+	});
+	assert.match(plain, /"the plan is tomorrow"/);
+});
+
