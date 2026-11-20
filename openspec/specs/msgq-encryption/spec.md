@@ -6,61 +6,11 @@ the client cannot open.
 
 ## Requirements
 
-### Requirement: A key comes from custody
-
-T1.1 ALWAYS, the bus SHALL derive the key from a principal's seed when one is available.
-T1.1 ALWAYS, the bus SHALL derive a further key from a passphrase when no seed applies.
-T1.1 ALWAYS, the bus SHALL store no key material beside the bus file.
-T1.1 ALWAYS, a derived key SHALL be separate from every other key derived from the same seed.
-
-#### Scenario: The passphrase is asked for
-- **WHEN** a client seals or opens a body
-- **THEN** the client SHALL obtain the passphrase from the operator or from a configured source
-
-#### Scenario: No key material is written down
-- **WHEN** the bus stores a sealed body
-- **THEN** the bus file SHALL hold no key material
-
-#### Scenario: The seed is the root
-- **WHEN** a client seals or opens a body and the principal has a key
-- **THEN** the keys it uses SHALL be derived from that seed, and the seed SHALL NOT be used directly
-
-#### Scenario: The passphrase still applies
-- **WHEN** a client seals a body for an address that names no recipient
-- **THEN** the client SHALL use the passphrase-derived key when one is configured
-
-### Requirement: A body is sealed
-
-T2.1 IF a record names recipients, THEN publish SHALL seal its body under a fresh content key.
-T2.1 ALWAYS, the content key SHALL be delivered to each recipient separately, under a key agreed with
-that recipient.
-T2.1 ALWAYS, a fresh ephemeral key SHALL accompany every delivery of the content key.
-T2.1 ALWAYS, the record envelope SHALL stay readable.
-T2.1 ALWAYS, a fresh nonce SHALL accompany every sealed body.
-
-#### Scenario: Two seals differ
-- **WHEN** a client seals one body twice
-- **THEN** the two sealed bodies SHALL differ
-
-#### Scenario: The envelope stays readable
-- **WHEN** a client reads a sealed record without the key
-- **THEN** the address, the sender and the offset SHALL stay readable
-
-#### Scenario: One body, several readers
-- **WHEN** a record is sealed to more than one recipient
-- **THEN** the body SHALL be sealed once and each recipient SHALL receive only the content key
-
-#### Scenario: An ephemeral is not shared
-- **WHEN** one record is sealed to several recipients
-- **THEN** each delivery of the content key SHALL use its own ephemeral key
-
 ### Requirement: A reader opens a body
 
 T2.2 IF a record names the reader as a recipient, THEN the reader SHALL open the body.
-T2.2 IF a record is sealed and does not name the reader, THEN the reader SHALL report that it is sealed
-to somebody else and SHALL NOT treat that as an error.
-T2.2 IF the body of a record that names the reader fails to open, THEN the reader SHALL report an error
-naming the key.
+T2.2 IF a record is sealed and does not name the reader, THEN the reader SHALL report that it is sealed to somebody else and SHALL NOT treat that as an error.
+T2.2 IF the body of a record that names the reader fails to open, THEN the reader SHALL report an error naming the key.
 T2.2 IF the body fails to open, THEN the reader SHALL treat no byte of the body as content.
 
 #### Scenario: A tampered body is refused
@@ -75,44 +25,20 @@ T2.2 IF the body fails to open, THEN the reader SHALL treat no byte of the body 
 - **WHEN** a reader meets a body encoded with an algorithm it does not implement
 - **THEN** the reader SHALL report the algorithm and SHALL NOT fail the read
 
-### Requirement: A mixed history stays readable
-
-T2.3 ALWAYS, a reader SHALL read a plaintext record without a key.
-T2.3 ALWAYS, a reader SHALL read a sealed record that its key opens.
-T2.3 ALWAYS, a reader SHALL read a record sealed before this version under the rules it was sealed
-with, including its additional data and its key identifier.
-T2.3 ALWAYS, the bus SHALL preserve a sealed record that the reader cannot open.
-
-#### Scenario: One stream holds both kinds
-- **WHEN** a stream holds a plaintext record and a sealed record
-- **THEN** the reader SHALL read both
-
-#### Scenario: An older seal still opens
-- **WHEN** a reader meets a record sealed under the previous scheme
-- **THEN** the reader SHALL open it exactly as it did before this version
-
 ### Requirement: The key state is reported
 
-T3.3 ALWAYS, db info SHALL report which sealing mode this invocation would use.
-T3.3 ALWAYS, db info SHALL name the recipients a record would be sealed to.
+T3.3 ALWAYS, db info SHALL report the one sealing scheme in force.
+T3.3 ALWAYS, db info SHALL name the agreement key this session would seal with.
+T3.3 ALWAYS, db info SHALL report no bus key, because there is none.
 T3.3 ALWAYS, db info SHALL print no key material.
 
 #### Scenario: The report names the key
 - **WHEN** a client runs db info with a key configured
-- **THEN** the report SHALL name the key identifier and SHALL print no key material
+- **THEN** the report SHALL name the agreement key that key seals with, and SHALL print no key material
 
 #### Scenario: The report names the mode
-- **WHEN** a client runs db info with a key configured
-- **THEN** the report SHALL name the sealing mode and the agreement key in force
-
-### Requirement: The stored bytes carry no plaintext
-
-T5.2 ALWAYS, the bus file SHALL hold no plaintext body.
-T5.2 ALWAYS, the engine SHALL hold no plaintext body.
-
-#### Scenario: A search of the file finds nothing
-- **WHEN** an operator searches the bus file for a known message body
-- **THEN** the search SHALL find no match
+- **WHEN** a client runs db info
+- **THEN** the report SHALL name the recipient scheme as the only way a body is sealed
 
 ### Requirement: A key is found on the record itself
 
@@ -160,3 +86,49 @@ SHALL NOT be published.
 #### Scenario: An archived key is never published
 - **WHEN** a key is archived
 - **THEN** no part of it SHALL leave the machine
+
+### Requirement: A key is a principal's own
+
+T1.1 ALWAYS, a key SHALL be derived from the seed a principal signs with, or agreed for one record.
+T1.1 ALWAYS, the bus SHALL store no key material beside the bus file.
+T1.1 ALWAYS, no passphrase SHALL be consulted for sealing or opening.
+
+#### Scenario: The seed is the root
+- **WHEN** a client seals or opens a body
+- **THEN** every key it uses SHALL be derived from the principal's seed or agreed for that record
+
+#### Scenario: No key material is written down
+- **WHEN** the bus stores a sealed body
+- **THEN** the bus file SHALL hold no key material
+
+#### Scenario: There is no second source of keys
+- **WHEN** a passphrase is present in the environment
+- **THEN** it SHALL have no effect on what is sealed or how, and the client SHALL NOT read it
+
+### Requirement: A body is sealed to one party, always
+
+T2.1 IF a record is published to one party, THEN its body SHALL be sealed to that party and to its sender.
+T2.1 ALWAYS, the body SHALL be sealed under a fresh content key, and that key delivered to each recipient separately under a key agreed with that recipient, with a fresh ephemeral per delivery.
+T2.1 ALWAYS, the record envelope SHALL stay readable.
+T2.1 ALWAYS, a fresh nonce SHALL accompany every sealed body.
+T2.1 ALWAYS, an unsealed body SHALL be refused for any address that names a party.
+
+#### Scenario: Two seals differ
+- **WHEN** a client seals one body twice
+- **THEN** the two sealed bodies SHALL differ
+
+#### Scenario: The envelope stays readable
+- **WHEN** a client reads a sealed record without the key
+- **THEN** the address, the sender and the offset SHALL stay readable
+
+#### Scenario: One body, several readers
+- **WHEN** a record is sealed to more than one recipient
+- **THEN** the body SHALL be sealed once and each recipient SHALL receive only the content key
+
+#### Scenario: An ephemeral is not shared
+- **WHEN** one record is sealed to several recipients
+- **THEN** each delivery of the content key SHALL use its own ephemeral key
+
+#### Scenario: There is no unsealed path to a party
+- **WHEN** a client publishes to a party it holds no agreement key for
+- **THEN** the publish SHALL fail, and nothing SHALL be stored

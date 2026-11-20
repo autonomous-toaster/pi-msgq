@@ -380,12 +380,10 @@ msgq read session/alice-1 --from-start --json | jq -c .record | msgq open --json
   an algorithm this build lacks. A record sealed to somebody else is a fact about the record, not a
   failure of the read. `read` already opens what it can, so this verb is for bytes obtained
   elsewhere — which is exactly the extension's case, and why it is the extension that calls it.
-- **A group keeps the bus key.** A `session/...` address has no recipient list, and inventing one is a
-  change of its own. `--seal-to <address>` seals to a named participant instead and refuses when no
-  key is known; `--plaintext` stores the body unsealed and says so.
-- **A first contact falls back rather than failing**, to the bus key when one is configured or to
-  plaintext when none is, saying which whenever a key is in play. Nobody can have a key before they
-  have been heard from.
+- **A party address is always sealed.** A `session/...` or `cli/...` address is sealed to it and to its
+  sender; `--seal-to <address>` seals to a named participant as well. A publish to a party whose
+  agreement key is unknown fails, naming the address: a participant advertises its key on its presence
+  record, so an unknown key means nobody is there. There is no plaintext escape and no fallback.
 - **Replacing a key archives it** as `<principal>.<date>.key.retired`, because a record sealed under it
   stays sealed under it forever; `msgq open` tries the archive, so history keeps opening after a
   rotation.
@@ -538,9 +536,9 @@ just completions
 | `is outside the scopes of` | the credential may not write, read or prune that address |
 | `invalid value ... possible values` | a closed-set argument refused a value; exit 2, nothing written |
 | `belongs to … not …` | a prune of an address another principal opened |
-| `did not open (kid=…)` | the passphrase differs from the one the record was sealed with |
+| `the body does not open with this key` | a record sealed to you was altered, or your key is not the one it names |
 | `sealed to session/…` | the record is addressed to somebody else; `msgq open` says who |
-| `no agreement key known for …` | a named recipient has never been heard from; `--plaintext`, or wait for a record from it |
+| `no agreement key known for …` | nobody is at that address: a participant advertises its key on its presence record |
 | `the body does not open with this key` | a record sealed to you was altered, or your key is not the one that opens it |
 | `unverified` beside a message | nobody pinned that key; `msgq trust add` or `msgq trust add --self` |
 | `read-only` in `/peers me` | the session can read but its writes are refused |

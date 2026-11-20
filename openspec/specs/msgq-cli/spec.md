@@ -49,15 +49,19 @@ T7.2 ALWAYS, the documentation SHALL name the location form of each backend.
 - **THEN** the CLI SHALL exit with a usage error
 
 ### Requirement: Address grammar and canonicalization
-An address SHALL identify both a recipient and the stream it is written to. When an address contains `/`, its prefix MUST be one of `session`, `cwd`, `group`, or `cli`; any other prefix is a usage error. An address without `/` SHALL be canonicalized to `group/<name>`. Addresses SHALL be case-sensitive with surrounding whitespace trimmed. An empty address, or a scheme-only address such as `session/`, SHALL be rejected.
+An address SHALL identify both a recipient and the stream it is written to. When an address contains `/`, its prefix MUST be one of `session`, `cli`, or `bus`; any other prefix is a usage error. An address without `/` SHALL be canonicalized to `session/<name>`. Addresses SHALL be case-sensitive with surrounding whitespace trimmed. An empty address, or a scheme-only address such as `session/`, SHALL be rejected.
 
 #### Scenario: Bare name canonicalization
-- **WHEN** a message is published to `build.done`
-- **THEN** the stream `group/build.done` is written and `topics` lists `group/build.done`
+- **WHEN** a message is published to `reviewer`
+- **THEN** the stream `session/reviewer` is written and `topics` lists `session/reviewer`
 
 #### Scenario: Unknown prefix rejected
 - **WHEN** an address such as `foo/bar` is used
 - **THEN** the CLI exits with a usage error and writes nothing
+
+#### Scenario: A removed scheme is rejected
+- **WHEN** an address such as `group/backend` or `cwd/Users-me-proj` is used
+- **THEN** the CLI exits with a usage error, naming the schemes that exist
 
 #### Scenario: Scheme-only address rejected
 - **WHEN** an address such as `session/` is used
@@ -190,7 +194,7 @@ T4.8 ALWAYS, `msgq topics` SHALL list each address with the message count and th
 T4.8 ALWAYS, `msgq topics` SHALL list a registered address with a count of zero.
 
 #### Scenario: Distinct addresses
-- **WHEN** messages exist for `group/a` and `session/b`
+- **WHEN** messages exist for `session/a` and `cli/b`
 - **THEN** the listing SHALL show both addresses exactly once
 
 #### Scenario: No messages
@@ -490,7 +494,7 @@ T2.7 ALWAYS, the CLI SHALL refuse a bare offset for a wait.
 
 #### Scenario: Equal offsets in different streams
 - **WHEN** two addresses each hold a record at offset 7
-- **THEN** the CLI SHALL name the two records `group/a#7` and `session/b#7`
+- **THEN** the CLI SHALL name the two records `session/a#7` and `cli/b#7`
 
 ### Requirement: Cursor collection
 
@@ -1002,34 +1006,6 @@ SHALL report how many of the records it showed came from senders the reader hold
 - **WHEN** a read shows records from senders with no anchor
 - **THEN** that read SHALL say how many of them there were
 
-### Requirement: A publish seals to a recipient by rule
-
-A publish to an address that names one participant SHALL seal the body to that participant and to the
-sender. A publish to a group SHALL NOT. A publish that cannot reach the recipient's key SHALL fail
-rather than store the body unsealed, unless the caller asks for plaintext explicitly.
-
-#### Scenario: A session address is sealed
-- **WHEN** a client publishes to `session/` or `cli/` and holds the recipient's agreement key
-- **THEN** the body SHALL be sealed to that recipient and to the sender
-
-#### Scenario: A group address keeps the bus key
-- **WHEN** a client publishes to a group address
-- **THEN** the body SHALL be sealed under the bus key when one is configured, and the client SHALL say
-  which of the two happened
-
-#### Scenario: An unknown recipient is refused when it was named
-- **WHEN** the caller names a recipient whose key the client does not hold
-- **THEN** the publish SHALL fail, naming the address and the flag that would store it unsealed
-
-#### Scenario: A first contact falls back and says so
-- **WHEN** a client publishes to a participant whose key it does not hold, and the caller named nobody
-- **THEN** the body SHALL be sealed with the bus key when one is configured, or stored unsealed when
-  none is, and the client SHALL say which when any key is in play
-
-#### Scenario: Plaintext has to be meant
-- **WHEN** the caller asks for plaintext explicitly
-- **THEN** the body SHALL be stored unsealed and the client SHALL say so
-
 ### Requirement: Opening is one verb
 
 The client SHALL open sealed records on request, reading records from standard input and reporting one
@@ -1065,3 +1041,23 @@ and SHALL NOT delete it while records sealed under it remain readable.
 #### Scenario: The archive is local
 - **WHEN** a key is archived
 - **THEN** nothing about it SHALL be published to a bus
+
+### Requirement: A publish seals to one party, always
+
+A publish to an address that names one party SHALL seal the body to that party and to the sender. A publish to a party whose agreement key is unknown SHALL fail rather than store the body unsealed, and there SHALL be no way to ask for plaintext. The bus roster address SHALL be the one exception.
+
+#### Scenario: A session address is sealed
+- **WHEN** a client publishes to a `session/` or `cli/` address and holds the recipient's agreement key
+- **THEN** the body SHALL be sealed to that recipient and to the sender
+
+#### Scenario: An unknown recipient stops the publish
+- **WHEN** a client publishes to a party whose key it does not hold
+- **THEN** the publish SHALL fail, naming the address, and nothing SHALL be stored
+
+#### Scenario: The roster is the exception
+- **WHEN** a client publishes a presence record to the `bus` roster address
+- **THEN** the body SHALL NOT be sealed, because every participant reads it
+
+#### Scenario: No plaintext escape
+- **WHEN** a caller looks for a way to store a body unsealed for a party
+- **THEN** there SHALL be none, and the flag that used to exist SHALL be a usage error
