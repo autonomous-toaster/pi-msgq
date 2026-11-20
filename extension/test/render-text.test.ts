@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { composeMsgqText, type MsgqTheme, typeColor } from "../src/render-text.ts";
+import { bodyColor, composeMsgqText, type MsgqTheme, typeColor } from "../src/render-text.ts";
 
 // A theme that returns text unchanged, so assertions read as plain output.
 const plain = {
@@ -197,3 +197,21 @@ test("every message in a batch keeps its own verdict", () => {
 	assert.match(text, /<warning>verdict: unverified/);
 });
 
+
+test("a record the policy only displayed is dimmed, not dressed as a turn", () => {
+	const honored = composeMsgqText(
+		{ items: [{ from: "cli/a@h", address: "session/w", type: "prompt", body: "wake up", honored: true }] },
+		tinted,
+	);
+	assert.match(honored, /<customMessageText>wake up</);
+
+	const displayed = composeMsgqText(
+		{ items: [{ from: "cli/a@h", address: "session/w", type: "prompt", body: "only shown", honored: false }] },
+		tinted,
+	);
+	assert.match(displayed, /<muted>only shown</);
+
+	// Undecided keeps the message colour: the fallback path has no policy to report.
+	assert.equal(bodyColor({ from: "a", address: "b", type: "prompt", body: "", honored: false }), "muted");
+	assert.equal(bodyColor({ from: "a", address: "b", type: "prompt", body: "" }), "customMessageText");
+});

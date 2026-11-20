@@ -540,7 +540,7 @@ just completions
 | Symptom | Likely cause |
 |---|---|
 | Nothing arrives in a session | the wrong address. `msgq consumers` shows what it follows |
-| A message appears but the agent ignores it | the default `display` policy. Start with `--msgq-policy honor` |
+| A message appears but the agent ignores it | the default `display` policy — a dimmed record was shown, not acted on. Start with `--msgq-policy honor` |
 | A peer does nothing when messaged | its allowlist excludes you, or its policy is `display` |
 | `msgq disabled` in the session | the bus could not be opened — check `MSGQ_DB` |
 | `no credential was presented` | the server has identities; set `MSGQ_TOKEN` or write the identity file |

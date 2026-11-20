@@ -292,6 +292,11 @@ async function scenarioVerdictRender() {
 	const entry = custom[0];
 	const item = entry?.details?.items?.[0];
 	const state_ = item?.verdict?.state;
+	// Nobody honours a stranger under the default policy: the transcript is told so, and shows it dimmed.
+	if (item?.honored !== false) {
+		report("verdict-render", false, `a display-only record is not marked honoured: ${JSON.stringify(item)}`);
+		return;
+	}
 	const content = String(entry?.content ?? "");
 	const ok =
 		custom.length === 1 &&
@@ -364,10 +369,12 @@ async function scenarioHonorPrompt() {
 	const custom = allCustom.filter((entry) => entry.customType === "msgq");
 	shutdown(child);
 
+	// Under honour a turn-bearing prompt is acted on, so the transcript shows it purple, not dimmed.
+	const honored = custom[0]?.details?.items?.[0]?.honored;
 	report(
 		"honor-prompt",
-		custom.length === 1 && assistants.length >= 1,
-		`custom=${custom.length} assistants=${assistants.length}`,
+		custom.length === 1 && assistants.length >= 1 && honored === true,
+		`custom=${custom.length} assistants=${assistants.length} honored=${String(honored)}`,
 	);
 }
 

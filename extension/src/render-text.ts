@@ -26,6 +26,14 @@ export interface MsgqItem {
 	body: string;
 	/** Absent when this entry is not a record the session verified. */
 	verdict?: MsgqVerdict;
+	/**
+	 * Whether this record was acted on: it started a turn, or was dispatched as a command.
+	 *
+	 * Absent means "not decided here" and is rendered like a record that was acted on. `false` is the
+	 * policy saying display-only, and it is the difference a person needs to see — a message that was
+	 * shown and a message that woke the agent look the same otherwise.
+	 */
+	honored?: boolean;
 }
 
 /** Structured details attached to every msgq message. */
@@ -83,6 +91,16 @@ export function verdictLine(item: MsgqItem, theme: MsgqTheme): string {
 	return theme.fg(colour, `verdict: ${verdict.state}${who}${fingerprint}${why}`);
 }
 
+/**
+ * The colour a body is shown in.
+ *
+ * A record the session acted on keeps the message text colour. One it only displayed is dimmed: the
+ * policy said no, and a person reading the transcript is the one who has to know that.
+ */
+export function bodyColor(item: MsgqItem): ThemeColor {
+	return item.honored === false ? "muted" : "customMessageText";
+}
+
 function route(item: MsgqItem, theme: MsgqTheme): string {
 	return `${theme.fg("accent", item.from)} ${theme.fg("dim", "\u2192")} ${theme.fg("accent", item.address)}`;
 }
@@ -126,7 +144,7 @@ export function composeMsgqText(details: MsgqDetails, theme: MsgqTheme): string 
 		if (item.body) {
 			lines.push("");
 			for (const line of item.body.split("\n")) {
-				lines.push(theme.fg("customMessageText", line));
+				lines.push(theme.fg(bodyColor(item), line));
 			}
 		}
 		const hint = replyHint(item, theme);
@@ -143,7 +161,7 @@ export function composeMsgqText(details: MsgqDetails, theme: MsgqTheme): string 
 		const verdict = verdictLine(item, theme);
 		if (verdict) lines.push(verdict);
 		for (const line of item.body.split("\n")) {
-			lines.push(theme.fg("customMessageText", line));
+			lines.push(theme.fg(bodyColor(item), line));
 		}
 		// Each row names its own sender, so any one of them can be answered.
 		const hint = replyHint(item, theme);

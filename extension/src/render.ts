@@ -18,7 +18,13 @@ export function renderMsgq(
 		? message.details
 		: { items: [{ from: "?", address: "?", type: "note", body: String(message.content ?? "") }] };
 
-	const box = new Box(options.outputPad, 1, (text) => theme.bg("customMessageBg", text));
+	// Purple is what a record the session acted on looks like. A display-only record keeps the plain
+	// background, so the difference between "woke the agent" and "was shown" is visible at a glance
+	// rather than being something you have to remember the policy to know.
+	const honored = details.items.some((item) => item.honored !== false);
+	const box = honored
+		? new Box(options.outputPad, 1, (text) => theme.bg("customMessageBg", text))
+		: new Box(options.outputPad, 1);
 	box.addChild(new Text(composeMsgqText(details, theme), 0, 0));
 	return box;
 }

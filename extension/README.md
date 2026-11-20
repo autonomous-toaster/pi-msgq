@@ -72,6 +72,11 @@ find the address of a session you forgot to name.
 
 The policy **caps** what a message may do. It is the policy dial, and `display` is the default.
 
+You can see which it was without knowing the policy: a record the session **acted on** — it started a
+turn, or was dispatched as a command — is shown in the usual coloured box, and one it only **displayed**
+is dimmed on the plain background. That is the difference between "this woke the agent" and "this was
+shown to you", and it is the first thing to check when a peer's message seems to have been ignored.
+
 | Policy | Effect |
 |---|---|
 | `display` (default) | every record is shown in the transcript and **never starts a turn** |

@@ -433,8 +433,20 @@ export default function (pi: ExtensionAPI) {
 		if (owed && offset !== undefined && owed.offset === offset) owed.answered = true;
 	}
 
-	function itemOf(record: MsgqRecord, address: string, verdict?: MsgqItem["verdict"]): MsgqItem {
-		return { from: record.from, address, type: record.type, body: recordBody(record), verdict };
+	function itemOf(
+		record: MsgqRecord,
+		address: string,
+		verdict?: MsgqItem["verdict"],
+		honored?: boolean,
+	): MsgqItem {
+		return {
+			from: record.from,
+			address,
+			type: record.type,
+			body: recordBody(record),
+			verdict,
+			honored,
+		};
 	}
 
 	/**
@@ -494,7 +506,8 @@ export default function (pi: ExtensionAPI) {
 					content: formatCommandNote(record, address, referenceFor(record)),
 					display: true,
 					details: {
-						items: [itemOf(record, address, verdictOf(record))],
+						// A command is dispatched, so it is acted on by definition.
+						items: [itemOf(record, address, verdictOf(record), true)],
 					} satisfies MsgqDetails,
 				},
 				{ triggerTurn: false },
@@ -630,7 +643,7 @@ export default function (pi: ExtensionAPI) {
 					content: formatMessage(record, address, reference, verdictLine(verdict)),
 					display: true,
 					details: {
-						items: [itemOf(record, address, verdict)],
+						items: [itemOf(record, address, verdict, plan !== "display")],
 					} satisfies MsgqDetails,
 				},
 				{ triggerTurn: turn },
@@ -1113,7 +1126,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const details: MsgqDetails = {
-				items: batch.map((item) => itemOf(item.record, item.address, item.verdict)),
+				// A buffered batch is injected when the run settles, so every record in it is acted on.
+				items: batch.map((item) => itemOf(item.record, item.address, item.verdict, true)),
 			};
 			entries.push({
 				type: "custom_message",
