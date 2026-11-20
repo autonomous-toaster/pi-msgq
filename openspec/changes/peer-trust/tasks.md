@@ -18,10 +18,12 @@
 
 ## 3. Verification and verdicts
 
-- [ ] 3.1 Implement verification over the signed bytes against a supplied anchor, and verify unit tests cover valid, broken, and unknown-algorithm signatures.
-- [ ] 3.2 Compute a verdict per record in the read and follow paths and carry it in every output mode, and verify a test reads a mixed stream and asserts each record's verdict appears in text and JSON output.
-- [ ] 3.3 Refuse unsigned records by default unless `MSGQ_INSECURE=1` is set, and verify tests assert the default fails with an error naming the record and the setting, and that one invocation with the variable succeeds.
-- [ ] 3.4 Report a refusal with the principal, the fingerprint and the reason, and verify the error text names all three.
+- [x] 3.1 Implement verification over the signed bytes against a supplied anchor, and verify unit tests cover valid, broken, and unknown-algorithm signatures.
+- [x] 3.2 Print one shape for a stored record — topic, offset, recorded time, verdict, record — from read, follow, ask and await, and verify a test reads a mixed stream and asserts the shape, and that the record inside is byte-identical to what was stored.
+- [x] 3.3 Remove `--with-offset` and its guard now that wrapping is not a choice, and verify the flag is rejected as a usage error and every record-printing test uses the one shape.
+- [x] 3.4 Add `msgq verify`, reading records on stdin and printing one verdict per record in order, and verify tests cover a trusted record, an unsigned one, a broken signature, a retired key, and a line that is not a JSON object.
+- [x] 3.5 Refuse unsigned records by default unless `MSGQ_INSECURE=1` is set, and verify tests assert the default fails with an error naming the record and the setting, and that one invocation with the variable succeeds.
+- [x] 3.6 Report a refusal with the principal, the fingerprint and the reason, and verify the error text names all three.
 
 ## 4. The trust keyring
 
@@ -45,10 +47,11 @@
 - [ ] 6.1 Register `/msgq-trust` as a command and verify it is absent from the tool list by asserting the registered tools do not include it.
 - [ ] 6.2 Implement status, defaulting to the durable layer, with a session-only form, and verify command tests cover recording durably, recording for the session, and rendering both layers with the bus named.
 - [ ] 6.3 Keep the session layer in memory only and verify a test asserts a fresh session reports none of a previous session's anchors.
-- [ ] 6.4 Render the verdict of every delivered record, showing an unverified record as unverified and a refused one as refused with its reason, and verify render tests cover trusted, unverified, broken and retired cases.
+- [ ] 6.4 Obtain each delivered record's verdict from `msgq verify` and render it, showing an unverified record as unverified and a refused one as refused with its reason, and verify render tests cover trusted, unverified, broken and retired cases.
 - [ ] 6.5 Count records from unverified senders in the session and report the count in status, and verify a command test delivers two such records and asserts the count.
 - [ ] 6.6 Assert that a delivered record asking for trust, or carrying a key to adopt, writes no anchor, by a test that publishes such a record and checks the keyring is unchanged.
 - [ ] 6.7 Document the command in `extension/README.md`, and verify the documented invocations match the registered command's behaviour.
+- [ ] 6.8 Pass the session layer to the client as `MSGQ_TRUST_SESSION` and verify a test asserts it outranks a durable anchor and is outranked by `MSGQ_TRUST`.
 
 ## 7. Integration
 

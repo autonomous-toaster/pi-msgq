@@ -161,7 +161,8 @@ fn a_published_record_carries_a_signature_that_its_fingerprint_verifies() {
     let read = run(&home, &db, &["read", "group/x", "--from-start", "--json"]);
     assert_eq!(read.code, 0, "{}", read.stderr);
 
-    let value: serde_json::Value = serde_json::from_str(read.stdout.trim()).unwrap();
+    let line: serde_json::Value = serde_json::from_str(read.stdout.trim()).unwrap();
+    let value = &line["record"];
     let sig = &value["meta"]["sig"];
     assert_eq!(sig["alg"], "ed25519", "{value}");
     assert!(sig["key"].is_string(), "{value}");

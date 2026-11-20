@@ -17,6 +17,7 @@ pub mod presence;
 pub mod record;
 pub mod seal;
 pub mod store;
+pub mod trust;
 
 /// Package version.
 pub fn version() -> &'static str {

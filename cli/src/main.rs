@@ -87,7 +87,6 @@ fn run(cli: Cli) -> Result<(), Error> {
             from_start,
             limit,
             json,
-            with_offset,
             strict,
         } => commands::read(
             &db,
@@ -95,7 +94,6 @@ fn run(cli: Cli) -> Result<(), Error> {
             from_spec(from, from_start)?,
             limit,
             json,
-            with_offset,
             strict,
         ),
         Command::Follow {
@@ -104,14 +102,12 @@ fn run(cli: Cli) -> Result<(), Error> {
             from,
             from_start,
             json,
-            with_offset,
         } => commands::follow(
             &db,
             &addresses,
             &consumer,
             from_spec(from, from_start)?,
             json,
-            with_offset,
         ),
         Command::Topics { json, names, card } => commands::topics(&db, json, names, card),
         Command::Sessions {
@@ -194,6 +190,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             }
             Ok(())
         }
+        Command::Verify { json } => commands::verify(&db, json),
         Command::Keygen { principal, force } => commands::keygen(principal, force),
         Command::Fingerprint { principal } => commands::fingerprint(principal),
         Command::Db { action } => match action {

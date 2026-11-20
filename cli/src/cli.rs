@@ -142,12 +142,9 @@ pub enum Command {
         /// Maximum number of records to print.
         #[arg(long, value_name = "N", default_value_t = 1000)]
         limit: i64,
-        /// Emit raw records as JSON lines.
+        /// Emit one JSON object per record, carrying its position and its verdict.
         #[arg(long)]
         json: bool,
-        /// Wrap each JSON line as {topic, offset, created_at, record}.
-        #[arg(long, requires = "json")]
-        with_offset: bool,
         /// Exit non-zero when retention removed records the caller asked for.
         #[arg(long)]
         strict: bool,
@@ -165,12 +162,9 @@ pub enum Command {
         /// Start from the earliest record.
         #[arg(long)]
         from_start: bool,
-        /// Emit raw records as JSON lines.
+        /// Emit one JSON object per record, carrying its position and its verdict.
         #[arg(long)]
         json: bool,
-        /// Wrap each JSON line as {topic, offset, created_at, record}.
-        #[arg(long, requires = "json")]
-        with_offset: bool,
     },
     /// List addresses that have messages.
     Topics {
@@ -232,6 +226,14 @@ pub enum Command {
         /// The shell to describe.
         #[arg(value_name = "SHELL")]
         shell: Shell,
+    },
+    /// Reach a verdict about records handed in on standard input, one per line.
+    ///
+    /// This is how a client that reads the bus itself obtains the same verdict as a read.
+    Verify {
+        /// Emit one JSON verdict per record instead of a line.
+        #[arg(long)]
+        json: bool,
     },
     /// Create this machine's signing key. Never touches a bus.
     Keygen {

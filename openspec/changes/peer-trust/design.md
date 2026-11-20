@@ -76,16 +76,47 @@ record. Neither is impersonation, and a bus can always do both.
 
 ### Signing and verification happen in the Rust client, once
 
-Verdicts are computed in `cli/src` during the read path and emitted with each record. The extension
-renders them; it does not implement ed25519. This keeps one implementation of the wire format,
-reuses the fixtures, and matches how the extension already reaches for `msgq` for everything that is
-not delivery.
+Verdicts are computed in `cli/src` and reach a caller one of two ways, both backed by the same
+function:
 
-It also removes the obvious performance worry: verification happens inside the same `msgq read`
-call that fetches the records, so a batch costs no extra process per record.
+```
+  msgq read / follow   -> the verdict rides in the record wrapper it prints
+  msgq verify          -> reads records on stdin, prints one verdict per record
+```
+
+The second exists because the extension does not read through `msgq read`: it has its own consumer
+over honker and postgres. Without a verification surface of its own, the extension would need a
+second ed25519 implementation in TypeScript — exactly the drift `msgq-protocol` forbids — so it pipes
+the record it just received through `msgq verify` instead.
+
+The cost is one short-lived process per delivered record in the extension. That is the price of one
+implementation rather than two, and it is bounded by how often messages arrive. If it ever matters,
+the fix is a persistent verifier speaking lines over a pipe, not a second implementation.
 
 Cryptography comes from `ed25519-dalek`, with `rand` for key generation and `sha2` for the body
 digest. No new protocol, no SSH wire format.
+
+### Every record a command prints is wrapped, and the verdict rides in the wrapper
+
+`--json` has one shape for a stored record, everywhere a stored record is printed:
+
+```json
+{ "topic": "group/x", "offset": 4, "created_at": 1763...,
+  "verdict": { "state": "unverified", "fingerprint": "SHA256:...", "reason": "unsigned" },
+  "record": { "v": 1, "type": "prompt", ... } }
+```
+
+The record stays exactly the bytes the bus stored; the verdict and the position live beside it,
+never inside it. That keeps `PROTOCOL.md` true — a record is what crosses the wire, and a reader's
+opinion is not part of it — while giving every consumer one place to look.
+
+`--with-offset` is gone: it used to be the flag that chose wrapping, and now wrapping is not a
+choice. There is no compatibility to keep here, and two shapes for one record was the thing that
+made the verdict hard to place in the first place.
+
+One boundary is deliberate: `msgq await --json` prints an acknowledgement *summary* — phase,
+reference, delivery — not a whole record, so it carries no verdict. An acknowledgement is progress
+about somebody else's message, and the record it is progress about is what a reader verifies.
 
 ### Keys and anchors are two different things, with two different consent rules
 
@@ -106,10 +137,13 @@ strict by default without making a fresh local bus unusable.
 
 ### The keyring is scoped by bus, and the bus id reuses the naming discipline already in `pg/naming.rs`
 
-`~/.config/msgq/trust/<bus-id>/anchors.toml`, where `bus-id` is a readable slug plus a digest of the
+`~/.config/msgq/trust/<bus-id>/anchors.json`, where `bus-id` is a readable slug plus a digest of the
 canonical bus location: the resolved absolute path for a file bus, `host:port/db` for a server bus.
 That is the same shape `pg/naming.rs` already uses for queue names — slug for legibility, digest for
 identity — so there is one idiom rather than two.
+
+JSON rather than TOML because the CLI already depends on `serde_json` and the build is offline: a
+format nobody has to weigh a new dependency for.
 
 Anchors are per principal: `current` fingerprint, plus `retired` entries with the date they were
 retired. Writes are atomic (temp file, then rename), because a half-written keyring would silently
@@ -121,14 +155,16 @@ change what a reader trusts.
   layer       CLI                      extension
   ---------   ----------------------   ------------------------
   env         MSGQ_TRUST               MSGQ_TRUST (inherited)
-  session     --                       in memory, per session
-  durable     anchors.toml             anchors.toml
+  session     MSGQ_TRUST_SESSION       in memory, per session
+  durable     anchors.json             anchors.json
 
   precedence: env > session > durable
 ```
 
-The session layer has no file and no representation in the CLI, which is the point: it must not
-outlive the process that created it. The extension's `/msgq-trust --session` writes to memory only.
+The session layer has no file, which is the point: it must not outlive the process that created it.
+The extension keeps its `/msgq-trust --session` anchors in memory and passes them to the CLI it
+spawns as `MSGQ_TRUST_SESSION` — the same `principal:fingerprint` grammar as `MSGQ_TRUST`, one rank
+lower — so the precedence rule lives in one place instead of being reimplemented in TypeScript.
 Disagreement between layers is reported and never resolved silently, because a silent resolution
 would be the one place where trust changes without an act.
 
@@ -182,6 +218,12 @@ and it grants no trust to anyone.
 → `msgq-identity` gains a requirement stating that one credential names one principal, not one
 session, and that telling sessions apart needs a signature — which this change does not provide.
 The overclaim in the `sender_of` comment is corrected as part of the implementation.
+
+**The extension pays a process per delivered record for its verdict.**
+
+→ Bounded by message rate and by the retention window of a conversation. The alternative — a second
+implementation in TypeScript — is the drift the protocol spec already forbids, so the trade is
+deliberate. A persistent verifier is the upgrade path if it ever shows.
 
 **Verifying a sealed body's storage bytes couples the signature to the encryption layer.**
 

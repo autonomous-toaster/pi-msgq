@@ -212,12 +212,26 @@ export function interpretAsk(report: { ok: boolean; text: string }, to: string):
 		.pop();
 	if (line === undefined) return { answered: false, text: `no answer from ${to} yet` };
 
-	let parsed: { outcome?: unknown; phase?: unknown; message?: unknown };
+	let parsed: {
+		outcome?: unknown;
+		phase?: unknown;
+		verdict?: { state?: unknown };
+		record?: { message?: unknown };
+	};
 	try {
-		parsed = JSON.parse(line) as { outcome?: unknown; phase?: unknown; message?: unknown };
+		parsed = JSON.parse(line);
 	} catch {
 		// Not the shape this expects: report it as it came rather than inventing one.
 		return { answered: false, text: report.text };
+	}
+	// A record arrives wrapped with its position and its verdict, so the answer is the record inside.
+	const record = parsed.record;
+	if (parsed.verdict?.state === "refused") {
+		return { answered: false, text: `the answer from ${to} failed its signature: ${line}` };
+	}
+	if (typeof record?.message === "string") {
+		const unverified = parsed.verdict?.state === "unverified" ? " (unverified sender)" : "";
+		return { answered: true, text: `${record.message}${unverified}` };
 	}
 	if (typeof parsed.outcome === "string") {
 		const phase = typeof parsed.phase === "string" ? ` (${parsed.phase})` : "";
@@ -229,6 +243,5 @@ export function interpretAsk(report: { ok: boolean; text: string }, to: string):
 					: `${to} finished without answering${phase}`,
 		};
 	}
-	if (typeof parsed.message === "string") return { answered: true, text: parsed.message };
 	return { answered: false, text: report.text };
 }

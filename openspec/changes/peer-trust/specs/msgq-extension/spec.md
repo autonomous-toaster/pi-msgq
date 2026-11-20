@@ -62,7 +62,8 @@ recorded for any other bus. The bus SHALL be fixed for the life of the session.
 
 The extension SHALL render each record with its verdict — trusted, unverified or refused — and
 SHALL NOT hide an unverified record. A refused record SHALL be shown as refused with its reason
-rather than dropped silently.
+rather than dropped silently. The verdict SHALL come from the client's verification surface rather
+than being computed again in the extension, so that one implementation decides what a record is.
 
 #### Scenario: A stranger is shown as unverified
 

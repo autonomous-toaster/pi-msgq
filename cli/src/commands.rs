@@ -291,6 +291,7 @@ pub fn ask(db: &crate::config::Target, args: AskArgs) -> Result<(), Error> {
         return Ok(());
     }
 
+    let reader = crate::trust::Reader::new(db)?;
     await_reply(
         &store,
         &stream,
@@ -298,6 +299,7 @@ pub fn ask(db: &crate::config::Target, args: AskArgs) -> Result<(), Error> {
         offset,
         args.timeout,
         args.json,
+        &reader,
     )
 }
 
@@ -309,6 +311,7 @@ fn await_reply(
     reply_to: i64,
     timeout_s: u64,
     json_out: bool,
+    reader: &crate::trust::Reader,
 ) -> Result<(), Error> {
     let updates = store.wake(&[stream]);
     let started = Instant::now();
@@ -357,7 +360,18 @@ fn await_reply(
             }
 
             if json_out {
-                println!("{}", String::from_utf8_lossy(&event.payload));
+                // The reply goes out in the one shape a stored record is printed in, verdict and all.
+                let verdict = reader.verdict(&record);
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "topic": event.topic,
+                        "offset": event.offset,
+                        "created_at": event.created_at,
+                        "verdict": verdict.to_json(),
+                        "record": record,
+                    }))?
+                );
             } else {
                 println!(
                     "{}",
@@ -553,11 +567,12 @@ pub fn read(
     from: FromSpec,
     limit: i64,
     json: bool,
-    with_offset: bool,
     strict: bool,
 ) -> Result<(), Error> {
     let targets = address::canonicalize_all(addresses)?;
     let (store, _) = Store::open(db)?;
+    let reader = crate::trust::Reader::new(db)?;
+    report_conflicts(db)?;
     let limit = limit.max(1);
 
     let mut events: Vec<StoredRecord> = Vec::new();
@@ -598,16 +613,142 @@ pub fn read(
     events.sort_by(|a, b| a.offset.cmp(&b.offset).then_with(|| a.topic.cmp(&b.topic)));
     events.truncate(limit as usize);
 
+    // Verify before opening: a signature covers the bytes that are stored, so a sealed body is
+    // checked as it sits on the bus, not as it reads once decrypted.
+    let verdicts: Vec<crate::trust::Verdict> = events
+        .iter()
+        .map(|e| reader.verdict(&stored_value(e)))
+        .collect();
     let failures = decrypt_events(&mut events)?;
-    for event in &events {
-        render(event, json, with_offset);
+    let mut refused: Vec<String> = Vec::new();
+    let mut unsigned: Vec<String> = Vec::new();
+    for (event, verdict) in events.iter().zip(&verdicts) {
+        render(event, verdict, json);
+        refuse(verdict, event, &mut refused, &mut unsigned);
     }
-    if !failures.is_empty() {
-        return Err(Error::runtime(format!(
+    verdict_failures(&failures, &refused, &unsigned)
+}
+
+/// Refuse to print what the reader cannot trust, once every record has been shown with its verdict.
+///
+/// An unsigned record is only tolerable when the invocation asked for it, and a broken signature is
+/// never tolerable. Both are reported after the output so a caller sees what arrived, then learns
+/// that the read is not to be relied on.
+fn verdict_failures(
+    decrypt: &[String],
+    refused: &[String],
+    unsigned: &[String],
+) -> Result<(), Error> {
+    let mut problems: Vec<String> = Vec::new();
+    if !decrypt.is_empty() {
+        problems.push(format!(
             "cannot decrypt {} record(s): {}",
-            failures.len(),
-            failures.join("; ")
-        )));
+            decrypt.len(),
+            decrypt.join("; ")
+        ));
+    }
+    if !refused.is_empty() {
+        problems.push(format!(
+            "refused {} record(s): {}",
+            refused.len(),
+            refused.join("; ")
+        ));
+    }
+    if !unsigned.is_empty() && !crate::trust::insecure() {
+        problems.push(format!(
+            "{} record(s) carry no usable signature (first: {}); set {}=1 to read them anyway",
+            unsigned.len(),
+            unsigned[0],
+            crate::trust::INSECURE_ENV
+        ));
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(Error::runtime(problems.join("; ")))
+}
+
+/// Note a verdict that a caller has to hear about.
+fn refuse(
+    verdict: &crate::trust::Verdict,
+    event: &StoredRecord,
+    refused: &mut Vec<String>,
+    unsigned: &mut Vec<String>,
+) {
+    let id = address::record_id(&event.topic, event.offset);
+    match verdict {
+        crate::trust::Verdict::Refused { reason, .. } => {
+            refused.push(format!("{id}: {reason}"));
+        }
+        // Bookkeeping is exempt from the strict default, for the same reason it is exempt from
+        // sealing: presence and acknowledgements are public metadata about a participant, not
+        // content a reader acts on. The record they are about is the one that carries a signature.
+        verdict if verdict.is_unsigned() && !is_bookkeeping(&stored_value(event)) => {
+            unsigned.push(id)
+        }
+        _ => {}
+    }
+}
+
+/// Whether a record is one of the bus's own progress records rather than content.
+fn is_bookkeeping(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("event") {
+        return false;
+    }
+    matches!(
+        value
+            .get("event")
+            .and_then(|e| e.get("kind"))
+            .and_then(Value::as_str),
+        Some("presence") | Some("ack")
+    )
+}
+
+/// Name every principal whose trust layers disagree, before any record is shown.
+///
+/// A disagreement is reported and never reconciled: the precedence rule decides which anchor is
+/// used, but only a person can decide which one is right.
+fn report_conflicts(db: &crate::config::Target) -> Result<(), Error> {
+    for conflict in crate::trust::conflicts(db)? {
+        let claims: Vec<String> = conflict
+            .claims
+            .iter()
+            .map(|(layer, fingerprint)| {
+                format!("{} says {}", layer.name(), crate::trust::short(fingerprint))
+            })
+            .collect();
+        eprintln!(
+            "msgq: the trust layers disagree about {}: {}",
+            conflict.principal,
+            claims.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Verify records handed in on standard input, one verdict per record.
+///
+/// This exists so that a client which reads the bus itself — the pi extension does — obtains the same
+/// verdict as the command-line reader, from one implementation, without a second copy of the crypto.
+pub fn verify(db: &crate::config::Target, json: bool) -> Result<(), Error> {
+    let reader = crate::trust::Reader::new(db)?;
+    for line in read_stdin()?.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let verdict = match serde_json::from_str::<Value>(line) {
+            Ok(value) if value.is_object() => reader.verdict(&value),
+            _ => crate::trust::Verdict::Unverified {
+                fingerprint: None,
+                reason: "the line is not a record".to_string(),
+            },
+        };
+        if json {
+            println!("{}", verdict.to_json());
+        } else {
+            println!("{}", verdict.line());
+        }
     }
     Ok(())
 }
@@ -716,10 +857,10 @@ pub fn follow(
     consumer: &str,
     from: FromSpec,
     json: bool,
-    with_offset: bool,
 ) -> Result<(), Error> {
     let targets = address::canonicalize_all(addresses)?;
     let (store, _) = Store::open(db)?;
+    let reader = crate::trust::Reader::new(db)?;
     let owner = format!("msgq:{}:{}", std::process::id(), nanos());
 
     let locks = take_follow_locks(&store, &targets, consumer, &owner)?;
@@ -758,7 +899,12 @@ pub fn follow(
         for event in batch {
             store.cursor_set(consumer, &event.topic, event.offset)?;
             offsets.insert(event.topic.clone(), event.offset);
-            render(&event, json, with_offset);
+            let verdict = reader.verdict(&stored_value(&event));
+            render(&event, &verdict, json);
+            let mut refused = Vec::new();
+            let mut unsigned = Vec::new();
+            refuse(&verdict, &event, &mut refused, &mut unsigned);
+            verdict_failures(&[], &refused, &unsigned)?;
         }
     }
 
@@ -1350,40 +1496,45 @@ fn nanos() -> u128 {
 }
 
 /// Render one event as a raw JSON line or a human-readable line.
-fn render(event: &StoredRecord, json_out: bool, with_offset: bool) {
+/// Print one stored record with its position and its verdict, and hand the verdict back.
+///
+/// There is one shape, in both output modes: the record stays exactly the bytes the bus stored, and
+/// everything a reader adds — where it sits and what it is worth — lives beside it, never inside it.
+fn render(event: &StoredRecord, verdict: &crate::trust::Verdict, json_out: bool) {
+    let value: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
+
     if json_out {
-        let payload = String::from_utf8_lossy(&event.payload);
-        if with_offset {
-            let record = serde_json::from_slice::<Value>(&event.payload).unwrap_or(Value::Null);
-            println!(
-                "{}",
-                serde_json::to_string(&json!({
-                    "topic": event.topic,
-                    "offset": event.offset,
-                    "created_at": event.created_at,
-                    "record": record,
-                }))
-                .unwrap_or_else(|_| payload.into_owned())
-            );
-        } else {
-            println!("{payload}");
-        }
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "topic": event.topic,
+                "offset": event.offset,
+                "created_at": event.created_at,
+                "verdict": verdict.to_json(),
+                "record": value,
+            }))
+            .unwrap_or_else(|_| String::from_utf8_lossy(&event.payload).into_owned())
+        );
         return;
     }
 
-    let value: Value = serde_json::from_slice(&event.payload).unwrap_or(Value::Null);
     let from = value.get("from").and_then(Value::as_str).unwrap_or("?");
     let (kind, body) = describe(&value);
-
     println!(
-        "{:>7}  {}  {:<24}  {:<9}  {:<20}  {}",
+        "{:>7}  {}  {:<24}  {:<9}  {:<14}  {:<20}  {}",
         event.offset,
         format_unix(event.created_at),
         event.topic,
         kind,
+        verdict.state(),
         from,
         body
     );
+}
+
+/// The record a stored event carries, as the bus holds it.
+fn stored_value(event: &StoredRecord) -> Value {
+    serde_json::from_slice(&event.payload).unwrap_or(Value::Null)
 }
 
 /// The `event` object of a record, when that record is an acknowledgement.

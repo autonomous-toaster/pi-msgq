@@ -61,6 +61,13 @@ fn run_env(db: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
     }
 }
 
+/// The record a `--json` line wraps: every command that prints a whole record prints one shape.
+fn record_of(value: &serde_json::Value) -> &serde_json::Value {
+    value
+        .get("record")
+        .unwrap_or_else(|| panic!("no record in the one shape: {value}"))
+}
+
 fn spawn_follow(db: &Path, address: &str, consumer: &str) -> std::process::Child {
     Command::new(bin())
         .arg("--db")
@@ -88,7 +95,7 @@ fn publish_and_stateless_read() {
     assert_eq!(first.stdout.lines().count(), 2);
     for line in first.stdout.lines() {
         let value: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(value["v"], 1);
+        assert_eq!(record_of(&value)["v"], 1);
     }
 
     // --from N returns records after N.
@@ -97,16 +104,14 @@ fn publish_and_stateless_read() {
 }
 
 #[test]
-fn json_with_offset_wraps_the_record() {
+fn json_wraps_the_record_with_its_position_and_verdict() {
     let db = temp_db();
     assert_eq!(run(&db, &["publish", "group/a", "one"]).code, 0);
 
-    let out = run(
-        &db,
-        &["read", "group/a", "--from-start", "--json", "--with-offset"],
-    );
-    assert_eq!(out.code, 0);
-    assert_eq!(out.stdout.lines().count(), 1);
+    let out = run(&db, &["read", "group/a", "--from-start", "--json"]);
+    // The record is signed by a key this bus has no anchor for, and unsigned history is refused by
+    // default — so the shape is what this test is about, not the exit status.
+    assert_eq!(out.stdout.lines().count(), 1, "{}", out.stderr);
     let value: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
     assert_eq!(value["topic"], "group/a");
     assert!(value["offset"].as_i64().unwrap() >= 1);
@@ -114,15 +119,14 @@ fn json_with_offset_wraps_the_record() {
     assert_eq!(value["record"]["message"], "one");
     assert_eq!(value["record"]["v"], 1);
 
-    // Without the flag the raw record is byte-for-byte what it always was.
-    let plain = run(&db, &["read", "group/a", "--from-start", "--json"]);
-    let record: serde_json::Value = serde_json::from_str(plain.stdout.trim()).unwrap();
-    assert_eq!(record["message"], "one");
-    assert!(record.get("offset").is_none());
+    // The record inside the wrapper is exactly what was stored: the verdict lives beside it.
+    assert!(value["record"].get("offset").is_none());
+    assert!(value["record"].get("verdict").is_none());
+    assert_eq!(value["verdict"]["state"], "unverified");
 }
 
 #[test]
-fn with_offset_requires_json() {
+fn the_removed_with_offset_flag_is_a_usage_error() {
     let db = temp_db();
     let out = run(&db, &["read", "group/a", "--with-offset"]);
     assert_eq!(out.code, 2);
@@ -136,14 +140,7 @@ fn follow_with_offset_reports_the_record_position() {
     let child = Command::new(bin())
         .arg("--db")
         .arg(&db)
-        .args([
-            "follow",
-            "group/a",
-            "--consumer",
-            "c1",
-            "--json",
-            "--with-offset",
-        ])
+        .args(["follow", "group/a", "--consumer", "c1", "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -228,8 +225,8 @@ fn passthrough_preserves_unknown_fields() {
     assert_eq!(run(&db, &["publish", "group/p", "--json", record]).code, 0);
     let out = run(&db, &["read", "group/p", "--from-start", "--json"]);
     let value: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
-    assert_eq!(value["custom"]["k"], 1);
-    assert_eq!(value["type"], "note");
+    assert_eq!(record_of(&value)["custom"]["k"], 1);
+    assert_eq!(record_of(&value)["type"], "note");
 }
 
 #[test]
@@ -247,7 +244,7 @@ fn multi_address_read_merges_by_offset() {
         .lines()
         .map(|l| {
             let v: serde_json::Value = serde_json::from_str(l).unwrap();
-            v["message"].as_str().unwrap().to_string()
+            record_of(&v)["message"].as_str().unwrap().to_string()
         })
         .collect();
     assert_eq!(messages, vec!["a1", "b1", "a2"]);
@@ -705,8 +702,11 @@ fn ask_no_wait_publishes_the_same_record_as_a_blocking_ask() {
         .filter(|line| !line.is_empty())
         .collect();
     assert_eq!(records.len(), 2, "{}", out.stdout);
-    // Whether the sender waits is the sender's business: the wire cannot tell the two apart.
-    assert_eq!(records[0], records[1]);
+    // Whether the sender waits is the sender's business: the wire cannot tell the two apart. Only the
+    // position beside the record differs, because the two questions were published separately.
+    let first: serde_json::Value = serde_json::from_str(records[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(records[1]).unwrap();
+    assert_eq!(record_of(&first), record_of(&second));
 }
 
 #[test]

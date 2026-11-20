@@ -1,5 +1,30 @@
 # Spec Delta
 
+## MODIFIED Requirements
+
+### Requirement: Output modes and exit codes
+
+Commands SHALL print human-readable output by default. `--json` SHALL print one JSON object per
+line. A command that prints a stored record SHALL print the same object every other such command
+prints: the topic, the offset, the recorded time, the verdict, and the record. The exit status SHALL
+be 0 on success, 1 on a runtime or database error, 2 on a usage error, and 3 when an await finishes
+without a terminal acknowledgement.
+
+#### Scenario: JSON output
+
+- **WHEN** `--json` is provided to a command that prints a stored record
+- **THEN** each record is emitted as one JSON object per line, carrying the record and its verdict
+
+#### Scenario: Usage error
+
+- **WHEN** an unknown flag is provided
+- **THEN** the CLI exits with status 2
+
+#### Scenario: Await timeout
+
+- **WHEN** an await finishes without a terminal acknowledgement
+- **THEN** the CLI exits with status 3
+
 ## ADDED Requirements
 
 ### Requirement: A key is generated and named by a fingerprint
@@ -101,26 +126,48 @@ The permission SHALL be reported wherever the trust posture is reported.
 - **WHEN** an operator asks the client about the bus while the setting is in force
 - **THEN** the report SHALL state that unsigned records are being read
 
-### Requirement: A read reports a verdict per record
+### Requirement: A record is printed with its position and its verdict
 
-A read, a follow and a listing SHALL report for each record whether it is trusted, unverified or
-refused, and SHALL name the reason for a refusal. An unverified record SHALL be delivered as content
-and SHALL remain visibly unverified in every output mode.
+Every command that prints a whole stored record SHALL print one shape: the topic, the offset, the
+recorded time, the verdict, and the record itself as the bus stored it. The verdict SHALL NOT be
+added to the record. A command that prints no whole record — an acknowledgement summary, a listing,
+a report — SHALL be unchanged.
 
-#### Scenario: The verdict reaches every output mode
+#### Scenario: One shape for a record
 
-- **WHEN** a record is read in any output mode
-- **THEN** its verdict SHALL be present in that output
+- **WHEN** a whole record is printed by a read, a follow or an ask
+- **THEN** the output SHALL carry the topic, the offset, the recorded time, the verdict and the record
 
-#### Scenario: A refusal is not silence
+#### Scenario: The record stays the record
 
-- **WHEN** a record is refused
-- **THEN** the output SHALL name the principal, the fingerprint and the reason
+- **WHEN** a verdict accompanies a record
+- **THEN** the record SHALL be exactly the bytes the bus stored, with no field added
 
-#### Scenario: Unverified stays visible
+#### Scenario: Text names the verdict too
 
-- **WHEN** a record is unverified
-- **THEN** the output SHALL mark it as unverified and SHALL NOT present it as trusted
+- **WHEN** a record is printed in the human-readable form
+- **THEN** the verdict SHALL be visible on the line
+
+### Requirement: The verdict is the same on every path
+
+The verdict a reader reaches SHALL come from one implementation, whether it is computed during a
+read or asked for separately. A client other than the command-line one SHALL be able to obtain the
+verdict for a record it read by itself.
+
+#### Scenario: A separate client asks
+
+- **WHEN** a client hands one or more records to the verification surface
+- **THEN** it SHALL receive one verdict per record, in the order the records were given
+
+#### Scenario: The two paths agree
+
+- **WHEN** the same record is read by the command-line client and handed to the verification surface
+- **THEN** both SHALL report the same verdict
+
+#### Scenario: A malformed record is not a crash
+
+- **WHEN** a record that is not a JSON object is handed to the verification surface
+- **THEN** it SHALL report that record as unverified with the reason, and SHALL continue with the rest
 
 ### Requirement: The trust posture is reportable
 

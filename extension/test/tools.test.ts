@@ -155,12 +155,56 @@ test("a question to this session is refused", () => {
 });
 
 test("a wait's two endings are told apart by shape, not by prose", () => {
+	// A record arrives wrapped: its position and its verdict sit beside it, never inside it.
 	const answer = interpretAsk(
-		{ ok: true, text: '{"v":1,"type":"prompt","from":"session/x","to":"session/planner","message":"four"}' },
+		{
+			ok: true,
+			text: JSON.stringify({
+				topic: "session/planner",
+				offset: 3,
+				created_at: 1,
+				verdict: { state: "trusted", principal: "planner", fingerprint: "SHA256:x" },
+				record: { v: 1, type: "prompt", from: "session/x", to: "session/planner", message: "four" },
+			}),
+		},
 		"session/x",
 	);
 	assert.equal(answer.answered, true);
 	assert.equal(answer.text, "four");
+
+	// An unpinned sender still answers; the model is told the answer is unverified.
+	const stranger = interpretAsk(
+		{
+			ok: true,
+			text: JSON.stringify({
+				topic: "session/x",
+				offset: 4,
+				created_at: 1,
+				verdict: { state: "unverified", fingerprint: "SHA256:y", reason: "no anchor for this key" },
+				record: { v: 1, type: "prompt", from: "session/y", to: "session/x", message: "five" },
+			}),
+		},
+		"session/y",
+	);
+	assert.equal(stranger.answered, true);
+	assert.match(stranger.text, /five \(unverified sender\)/);
+
+	// A broken signature is never dressed up as an answer.
+	const refused = interpretAsk(
+		{
+			ok: true,
+			text: JSON.stringify({
+				topic: "session/x",
+				offset: 5,
+				created_at: 1,
+				verdict: { state: "refused", fingerprint: "SHA256:z", reason: "the signature does not cover this record" },
+				record: { v: 1, type: "prompt", from: "session/z", to: "session/x", message: "six" },
+			}),
+		},
+		"session/z",
+	);
+	assert.equal(refused.answered, false);
+	assert.match(refused.text, /failed its signature/);
 
 	const running = interpretAsk({ ok: true, text: '{"outcome":"running","reply_to":7}' }, "session/x");
 	assert.equal(running.answered, false);
