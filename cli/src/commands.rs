@@ -117,11 +117,26 @@ pub fn keygen(
             path.display()
         )));
     }
+    // A replaced key is archived, never deleted: a record sealed under it stays sealed under it
+    // forever, so retiring a decryption key is deletion rather than policy.
+    let archived = if path.exists() {
+        let retired = crate::keys::archive_path(&principal, &today_utc())?;
+        std::fs::rename(&path, &retired)
+            .map_err(|e| Error::runtime(format!("cannot archive {}: {e}", path.display())))?;
+        Some(retired)
+    } else {
+        None
+    };
+
     let made = crate::keys::generate(&principal)?;
     println!("principal:   {principal}");
     println!("key:         {}", made.path.display());
     println!("fingerprint: {}", made.fingerprint);
     println!("public:      {}", made.public);
+    if let Some(retired) = archived {
+        println!("archived:    {}", retired.display());
+        println!("             records sealed under it still open with it");
+    }
     Ok(())
 }
 
@@ -936,6 +951,25 @@ fn report_conflicts(db: &crate::config::Target) -> Result<(), Error> {
     Ok(())
 }
 
+/// The sealing mode this invocation would use, for reporting.
+fn sealing_mode(db: &crate::config::Target) -> Result<String, Error> {
+    let principal = signing_principal_of(db)?;
+    let Some(signing) = crate::keys::load(&principal)? else {
+        return Ok(format!(
+            "bus key only (no key for {principal} yet, so nothing can be sealed to it)"
+        ));
+    };
+    let ours = crate::envelope::agreement_fingerprint(&crate::keys::agreement_public(&signing));
+    Ok(match crate::seal::Key::from_env()? {
+        Some(key) => format!(
+            "recipients ({principal} at {}), bus key {} for groups",
+            crate::trust::short(&ours),
+            key.kid()
+        ),
+        None => format!("recipients ({principal} at {})", crate::trust::short(&ours)),
+    })
+}
+
 /// Show what is trusted on this bus.
 pub fn trust_list(db: &crate::config::Target, json: bool) -> Result<(), Error> {
     let listing = crate::trust::verbs::list(db)?;
@@ -1095,7 +1129,13 @@ fn today_utc() -> String {
 /// is a failure: opened, sealed to somebody else, or an encoding this build cannot honour.
 pub fn open_records(db: &crate::config::Target, json: bool) -> Result<(), Error> {
     let principal = signing_principal_of(db)?;
-    let signing = crate::keys::load(&principal)?;
+    // The current key first, then everything it replaced: a record sealed under a retired key is
+    // still that key's to open, and rotation must not lose it.
+    let mut keys: Vec<SigningKey> = Vec::new();
+    if let Some(current) = crate::keys::load(&principal)? {
+        keys.push(current);
+    }
+    keys.extend(crate::keys::archived(&principal)?);
     let passphrase = crate::seal::Key::from_env()?;
 
     for line in read_stdin()?.lines() {
@@ -1103,7 +1143,7 @@ pub fn open_records(db: &crate::config::Target, json: bool) -> Result<(), Error>
         if line.is_empty() {
             continue;
         }
-        let outcome = open_one(line, signing.as_ref(), passphrase.as_ref());
+        let outcome = open_one(line, &keys, passphrase.as_ref());
         if json {
             println!("{outcome}");
         } else {
@@ -1114,11 +1154,7 @@ pub fn open_records(db: &crate::config::Target, json: bool) -> Result<(), Error>
 }
 
 /// Open one record, and say what happened in a form a caller can branch on.
-fn open_one(
-    line: &str,
-    signing: Option<&SigningKey>,
-    passphrase: Option<&crate::seal::Key>,
-) -> Value {
+fn open_one(line: &str, keys: &[SigningKey], passphrase: Option<&crate::seal::Key>) -> Value {
     let mut value: Value = match serde_json::from_str(line) {
         Ok(value @ Value::Object(_)) => value,
         _ => {
@@ -1134,7 +1170,7 @@ fn open_one(
     }
 
     if crate::envelope::is_envelope(&value) {
-        let Some(signing) = signing else {
+        if keys.is_empty() {
             return json!({
                 "cannot_open": {
                     "alg": crate::envelope::ALG_ENVELOPE,
@@ -1144,16 +1180,28 @@ fn open_one(
                     )
                 }
             });
-        };
-        return match crate::envelope::open_for(&mut value, signing) {
-            Ok(crate::envelope::Opened::Body) => json!({ "opened": value }),
-            Ok(crate::envelope::Opened::Elsewhere(for_whom)) => json!({ "sealed_to": for_whom }),
-            Ok(crate::envelope::Opened::UnknownAlgorithm(alg)) => json!({
-                "cannot_open": { "alg": alg, "reason": "this build does not implement it" }
+        }
+        // Every key this principal ever had, because the record may predate a rotation.
+        let mut elsewhere: Vec<String> = Vec::new();
+        let mut failure: Option<String> = None;
+        for key in keys {
+            let mut candidate = value.clone();
+            match crate::envelope::open_for(&mut candidate, key) {
+                Ok(crate::envelope::Opened::Body) => return json!({ "opened": candidate }),
+                Ok(crate::envelope::Opened::Elsewhere(for_whom)) => elsewhere = for_whom,
+                Ok(crate::envelope::Opened::UnknownAlgorithm(alg)) => {
+                    return json!({
+                        "cannot_open": { "alg": alg, "reason": "this build does not implement it" }
+                    });
+                }
+                Err(error) => failure = Some(error.to_string()),
+            }
+        }
+        return match failure {
+            Some(reason) => json!({
+                "cannot_open": { "alg": crate::envelope::ALG_ENVELOPE, "reason": reason }
             }),
-            Err(error) => json!({
-                "cannot_open": { "alg": crate::envelope::ALG_ENVELOPE, "reason": error.to_string() }
-            }),
+            None => json!({ "sealed_to": elsewhere }),
         };
     }
 
@@ -1992,6 +2040,7 @@ pub fn db_info(db: &crate::config::Target) -> Result<(), Error> {
         );
     }
     println!("encryption:       {}", crate::seal::describe()?);
+    println!("sealing:          {}", sealing_mode(db)?);
     if let Some((principal, scopes)) = store.identity()? {
         println!(
             "identity:         {principal} (scopes: {})",

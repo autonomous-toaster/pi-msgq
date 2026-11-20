@@ -104,6 +104,16 @@ pub fn key_path(principal: &str) -> Result<PathBuf, Error> {
     Ok(keys_dir()?.join(format!("{name}.key")))
 }
 
+/// Where a replaced key is kept: beside the key, dated, and never published.
+pub fn archive_path(principal: &str, when: &str) -> Result<PathBuf, Error> {
+    let path = key_path(principal)?;
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| Error::runtime("the key file has no name to archive"))?;
+    Ok(path.with_file_name(format!("{stem}.{when}.key.retired")))
+}
+
 /// Generate a key for a principal and write it with mode 0600.
 pub fn generate(principal: &str) -> Result<Generated, Error> {
     let path = key_path(principal)?;
@@ -149,6 +159,58 @@ pub fn load_or_generate(principal: &str) -> Result<(SigningKey, Option<Generated
         ))
     })?;
     Ok((key, Some(made)))
+}
+
+/// Every key this principal ever had, newest file first.
+///
+/// A record sealed under a replaced key stays sealed under it forever, so opening has to try the
+/// archive rather than declare the record unreadable.
+pub fn archived(principal: &str) -> Result<Vec<SigningKey>, Error> {
+    let path = key_path(principal)?;
+    let Some(dir) = path.parent() else {
+        return Ok(Vec::new());
+    };
+    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+        Some(stem) => stem.to_string(),
+        None => return Ok(Vec::new()),
+    };
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&format!("{stem}.")) && name.ends_with(".key.retired") {
+                found.push((name, entry.path()));
+            }
+        }
+    }
+    // Newest first: the most recent archive is the likeliest to be the one that opens.
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut keys = Vec::new();
+    for (_, file) in found {
+        if let Some(key) = load_file(&file)? {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+/// Load one key file by path.
+fn load_file(path: &Path) -> Result<Option<SigningKey>, Error> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    let encoded = raw
+        .trim()
+        .strip_prefix(KEY_PREFIX)
+        .ok_or_else(|| Error::runtime(format!("{} is not a msgq key", path.display())))?;
+    let bytes = STANDARD_NO_PAD
+        .decode(encoded)
+        .map_err(|e| Error::runtime(format!("{} is damaged: {e}", path.display())))?;
+    let seed: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| Error::runtime(format!("{} is damaged: wrong key length", path.display())))?;
+    Ok(Some(SigningKey::from_bytes(&seed)))
 }
 
 /// Load a principal's private key, if one exists.

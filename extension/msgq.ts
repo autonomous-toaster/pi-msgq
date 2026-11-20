@@ -64,6 +64,7 @@ import {
 	wantsReply,
 } from "./src/delivery.ts";
 import { type CommandDeps, registerCommands } from "./src/commands.ts";
+import { openWithClient, type OpenOutcome } from "./src/open.ts";
 import { clientPublisher, clientPublishRunner, type Publisher } from "./src/publish.ts";
 import {
 	clientRunner,
@@ -464,13 +465,14 @@ export default function (pi: ExtensionAPI) {
 	): void {
 		// A command is opened like anything else before it is handed to the session: dispatching a
 		// sealed body would type ciphertext into the transcript and run it as a prompt.
-		const opened = openRecord(record, sealingKey);
-		if (!opened.ok) {
-			report(`msgq cannot read a command from ${record.from}: ${opened.reason}`, "error");
+		const opened = openThroughClient(record);
+		if (opened.kind !== "opened") {
+			const why = opened.kind === "elsewhere" ? `sealed to ${opened.sealedTo.join(", ")}` : opened.reason;
+			report(`msgq cannot read a command from ${record.from}: ${why}`, "error");
 			subscription.save(offset);
 			return;
 		}
-		const body = recordBody(opened.record);
+		const body = recordBody(opened.record as MsgqRecord);
 		const phases = isAckRecord(record) ? undefined : parseAckRequest(record.meta);
 		if (phases) {
 			publishAck({ to: record.from, replyTo: offset, phase: "received", delivery: "turn" });
@@ -519,13 +521,22 @@ export default function (pi: ExtensionAPI) {
 
 		// An unreadable body is an error, not content. Opening happens before `type` is consulted, so
 		// no policy can turn an unopened body into a turn and nothing claims it was received.
-		const opened = openRecord(record, sealingKey);
-		if (!opened.ok) {
+		const opened = openThroughClient(record);
+		if (opened.kind === "elsewhere") {
+			// Sealed for somebody else: a fact about the record, and not this session's to read.
+			report(
+				`msgq: a record from ${record.from} is sealed to ${opened.sealedTo.join(", ")}`,
+				"info",
+			);
+			subscription.save(offset);
+			return;
+		}
+		if (opened.kind === "cannot") {
 			report(`msgq cannot read a record from ${record.from}: ${opened.reason}`, "error");
 			subscription.save(offset);
 			return;
 		}
-		record = opened.record;
+		record = opened.record as MsgqRecord;
 
 		// An acknowledgement is never itself acknowledged.
 		const phases = isAckRecord(record) ? undefined : parseAckRequest(record.meta);
@@ -670,6 +681,24 @@ export default function (pi: ExtensionAPI) {
 	const signedPublish: Publisher = clientPublisher(
 		clientPublishRunner(msgqBin, { db: busPath }),
 	);
+
+	/**
+	 * How this session reads a sealed body.
+	 *
+	 * Through the client, for the same reason a verdict is: one implementation of the encoding, and the
+	 * extension keeps no copy of it. A plaintext record costs nothing.
+	 */
+	function openThroughClient(record: MsgqRecord): OpenOutcome {
+		return openWithClient(
+			(candidate) =>
+				clientRunner(msgqBin)(
+					["--db", busPath, "open", "--json"],
+					`${JSON.stringify(candidate)}\n`,
+					{},
+				),
+			record,
+		);
+	}
 
 	/** The client, asked what one record is worth. */
 	const trustRunner = clientRunner(msgqBin);

@@ -178,6 +178,7 @@ msgq [--db <PATH>] <COMMAND>
 | `fingerprint [PRINCIPAL]` | print a key's `SHA256:` fingerprint, to compare out of band |
 | `trust [list\|add\|revoke\|rotate]` | record, rotate, revoke and show what this reader believes about a peer; `add --self` pins this machine |
 | `verify [--json]` | reach a verdict about records handed in on standard input, one per line |
+| `open [--json]` | open the body of records handed in on standard input, or say who they are sealed to |
 | `db info` | path, size, contents, protocol version, per-consumer lag, record ages |
 | `prune --older-than <AGE> [--apply]` | remove records older than an age, never one a consumer has not passed |
 
@@ -262,6 +263,36 @@ database yourself.
 reason. See *Trust* below.
 
 `topics`, `sessions`, `card`, `consumers`, `cursor` and `db info` print their own objects, unchanged.
+
+## Sealing to a recipient
+
+A body can be sealed to the people who should read it, rather than to everyone who holds one
+passphrase. Each principal's key file yields two keys — the one that signs and a second that agrees a
+content key — so one file and one fingerprint cover both.
+
+```bash
+msgq publish session/alice-1 "the plan is tomorrow"   # sealed to alice, and to you
+msgq read session/alice-1 --from-start --json | jq -c .record | msgq open --json
+```
+
+- A record is sealed to its recipient **and its sender**, so a session can read back what it sent.
+- The body is sealed once with a fresh content key; that key is wrapped once per recipient, each wrap
+  under its own ephemeral X25519. A record does not grow with its audience by more than about 124
+  bytes per reader.
+- Every signed record carries its sender's agreement key in `meta.sig.agree`, inside the bytes the
+  signature covers. That is where a key is found: no directory, and it works with the peer offline.
+  Substituting it breaks the signature.
+- ``msgq open`` reads records on stdin and answers one outcome per line: the opened record, the
+  recipients it is sealed to, or an algorithm this build lacks. A record sealed to somebody else is a
+  fact about the record, not a failure of the read.
+- A publish to `group/` keeps the bus key when one is configured and says so: a group has no recipient
+  list, and inventing one is a change of its own. `--seal-to <address>` seals to a named participant
+  instead, and refuses if no key is known; `--plaintext` stores the body unsealed and says so.
+- A record sealed before this change opens exactly as did, under its own additional data and key
+  identifier. `db info` names the sealing mode this invocation would use.
+- Replacing a key archives the one it replaces (`<principal>.<date>.key.retired`), because a record
+  sealed under it stays sealed under it forever. `msgq open` tries the archive, so history keeps
+  opening after a rotation.
 
 ## Trust
 

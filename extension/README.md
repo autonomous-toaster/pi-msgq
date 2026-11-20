@@ -446,6 +446,22 @@ sender is worth, with a command:
 One thing this deliberately does not do: tell two sessions of the same principal apart. One key
 belongs to a principal, so a sibling session holding it can still speak as its neighbour.
 
+### Sealed bodies
+
+A peer may seal a body to this session, or to somebody else. Opening is not done here: the extension
+asks `msgq open`, for the same reason it asks `msgq verify` for a verdict — one implementation decides
+what an encoding is.
+
+```
+  plaintext record          -> delivered, costs no process
+  sealed to this session    -> delivered, opened by the client
+  sealed to somebody else   -> reported: "a record from X is sealed to Y", and not delivered
+  an algorithm we lack      -> reported, and not delivered
+```
+
+A record sealed to you is still your record: the verdict shown beside it is reached on the stored
+bytes, before the body is opened.
+
 ## Configuration
 
 | Setting | Flag | Environment | Default |

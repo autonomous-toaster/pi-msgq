@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "type": "prompt",
+  "from": "session/alice-1",
+  "to": "session/bob-2",
+  "message": "q8Zr0Vn0m1c0Y2xkZ0pQeUJvU2x0eG5RZkV6S0p6cQ==",
+  "meta": {
+    "enc": {
+      "alg": "x25519+aes-256-gcm",
+      "aad": "v2",
+      "field": "message",
+      "nonce": "3S0m0n0c0e0=",
+      "cek": [
+        {
+          "to": "session/bob-2",
+          "fp": "SHA256:mJ0d0n0t0b0e0r0e0a0d0t0h0i0s0f0i0x0t0u0r0e0",
+          "epk": "k0X0s0e0v0p0u0b0l0i0c0k0e0y0f0o0r0f0i0x0t0u0r0e=",
+          "nonce": "3S0m0n0c0e0=",
+          "box": "q8Zr0Vn0m1c0Y2xkZ0p0Z0t0X0o0u0m0b0l0e0d0="
+        }
+      ]
+    }
+  }
+}

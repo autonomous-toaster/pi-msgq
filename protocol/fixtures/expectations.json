@@ -115,6 +115,12 @@
       "publish": "accept",
       "read": "accept",
       "why": "a broken signature is readable and must be preserved, so that a verifying reader can refuse it and say why"
+    },
+    {
+      "file": "20-sealed-to-recipients.json",
+      "publish": "accept",
+      "read": "accept",
+      "why": "a record sealed to recipients is accepted by both sides; a reader that is not one of them reports who it is for and preserves the record"
     }
   ]
 }
