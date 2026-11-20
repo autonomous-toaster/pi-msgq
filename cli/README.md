@@ -265,8 +265,7 @@ reason. See *Trust* below.
 
 ## Sealing to a recipient
 
-A body can be sealed to the people who should read it, rather than to everyone who holds one
-passphrase. Each principal's key file yields two keys — the one that signs and a second that agrees a
+A body can be sealed to the people who should read it, rather than to the whole bus. Each principal's key file yields two keys — the one that signs and a second that agrees a
 content key — so one file and one fingerprint cover both.
 
 ```bash
@@ -287,9 +286,9 @@ msgq read session/alice-1 --from-start --json | jq -c .record | msgq open --json
   exists for bytes a caller obtained elsewhere — the extension is the caller that needs it.
 - A publish to a `session/` or `cli/` address is sealed to it; a bare name means the same session,
   and there is no set-naming address left for a bus-wide key to serve.
-- A first contact falls back rather than failing: with no key for the peer, the bus key is used when
-  one is configured, or the body is stored unsealed when none is. `recipient-only-sealing` removes that
-  fallback and the bus key with it.
+- A publish to a party whose agreement key is unknown fails, naming the address: a peer advertises its
+  key on its presence record, so an unknown key means nobody is there. There is no fallback and no
+  `--plaintext`, and no passphrase scheme behind either.
 - Replacing a key archives the one it replaces (`<principal>.<date>.key.retired`), because a record
   sealed under it stays sealed under it forever. `msgq open` tries the archive, so history keeps
   opening after a rotation.

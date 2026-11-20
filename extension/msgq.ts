@@ -92,8 +92,7 @@ import { formatIdentity, type IdentityFacts } from "./src/commands-text.ts";
 import { runPlanned } from "./src/run.ts";
 import { Presence, PRESENCE_TTL_S } from "./src/presence.ts";
 import type { PresenceState } from "./src/presence-text.ts";
-import { decodeRecord, openRecord, type MsgqRecord, recordBody } from "./src/record.ts";
-import { describeKey, loadKey, type SealingKey } from "./src/seal.ts";
+import { decodeRecord, type MsgqRecord, recordBody } from "./src/record.ts";
 import {
 	askWaitSeconds,
 	interpretAsk,
@@ -156,7 +155,6 @@ export default function (pi: ExtensionAPI) {
 /** Half of the default one-hour lease, in milliseconds. */
 	const HALF_LEASE_MS = 30 * 60 * 1000;
 	let leaseTimer: ReturnType<typeof setInterval> | undefined;
-	let sealingKey: SealingKey | undefined;
 
 	/** Renew once now, then at half the lease, so the deadline never passes unnoticed. */
 	function renewLease(shared: PgBus): void {
@@ -780,7 +778,6 @@ export default function (pi: ExtensionAPI) {
 			allowed,
 			card: currentCard,
 			write: writeState(),
-			encryption: describeKey(sealingKey),
 		};
 	}
 
@@ -1031,9 +1028,7 @@ export default function (pi: ExtensionAPI) {
 		// Keys. A broken configured source is reported and treated as absent, so reads refuse sealed
 		// bodies instead of pretending the session can open them.
 		try {
-			sealingKey = loadKey();
 		} catch (error) {
-			sealingKey = undefined;
 			report(`msgq cannot use the configured passphrase: ${String(error)}`, "warning");
 		}
 

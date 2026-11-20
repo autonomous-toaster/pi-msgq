@@ -4,7 +4,6 @@
 // is whatever the publisher wrote, so decoding is deliberately lenient about
 // everything except the envelope's own identity.
 
-import { additionalData, ALG, openBytes, sealBytes, type SealingKey } from "./seal.ts";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -124,53 +123,4 @@ function sealableField(record: MsgqRecord): "message" | "event" | undefined {
 		return "event";
 	}
 	return undefined;
-}
-
-/** The outcome of opening one record. A failure carries the reason a reader should report. */
-export type OpenResult =
-	| { ok: true; record: MsgqRecord }
-	| { ok: false; kid: string; reason: string };
-
-/**
- * Open a sealed body, or say why it cannot be opened.
- *
- * The declaration is dropped from the returned record: a body that is now readable must not still
- * claim to be encoded.
- */
-export function openRecord(record: MsgqRecord, key?: SealingKey): OpenResult {
-	const info = encInfo(record);
-	if (!info) return { ok: true, record };
-	if (info.alg !== ALG) {
-		return { ok: false, kid: info.kid, reason: `it is encoded with ${info.alg}, which this build does not implement` };
-	}
-	if (!key) {
-		return { ok: false, kid: info.kid, reason: "no passphrase is configured for this session" };
-	}
-	const enc = (record.meta as { enc: { nonce?: string; field?: string } }).enc;
-	const field = enc.field === "event" ? "event" : "message";
-	const body = field === "message" ? record.message : JSON.stringify(record.event);
-	if (typeof body !== "string") {
-		return { ok: false, kid: info.kid, reason: `the record carries no ${field} body` };
-	}
-	try {
-		const plaintext = openBytes(enc.nonce ?? "", body, additionalData(record), key).toString("utf8");
-		const opened: MsgqRecord = { ...record, [field]: field === "event" ? JSON.parse(plaintext) : plaintext };
-		const meta = { ...(record.meta as Record<string, unknown>) };
-		delete meta.enc;
-		opened.meta = meta;
-		return { ok: true, record: opened };
-	} catch (error) {
-		return { ok: false, kid: info.kid, reason: `${String((error as Error).message ?? error)} (kid=${info.kid})` };
-	}
-}
-
-/** Seal the body of a record. Returns the record unchanged when it has no sealable body. */
-export function sealRecord(record: MsgqRecord, key: SealingKey): MsgqRecord {
-	const field = sealableField(record);
-	if (!field) return record;
-	const plaintext = field === "message" ? (record.message ?? "") : JSON.stringify(record.event);
-	const { nonce, body } = sealBytes(Buffer.from(plaintext, "utf8"), additionalData(record), key);
-	const meta = { ...((record.meta as Record<string, unknown>) ?? {}) };
-	meta.enc = { alg: ALG, kid: key.kid, nonce, field };
-	return { ...record, [field]: body, meta };
 }

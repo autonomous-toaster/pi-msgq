@@ -215,7 +215,7 @@ One product, two engines, and a deployment runs exactly one of them:
 | reach | the machine that holds the file | every machine that can reach the server |
 | identity | file permissions; the sender is a claim | a credential the server checks |
 | retention | a declared window, default one hour | the same window |
-| bodies | plaintext unless you set a passphrase ([sealing](#sealing-message-bodies)) | the same |
+| bodies | sealed to their recipients ([sealing](#sealing-a-body-to-a-recipient)) | the same |
 
 Nothing synchronises the two: there is no relay, no bridge and no dual write. Pick one and point
 every session at it.
@@ -261,7 +261,7 @@ and whether it was created by this command.
 **2. Who is who: file permissions.** This backend has no identities and no credential — that is the
 whole of its trust model, and it is worth saying plainly rather than implying more:
 
-- anyone who can read the file can read every plaintext record in it; set a passphrase and
+- anyone who can read the file can read the envelope but not a sealed body; seal to a recipient and
   the bodies are sealed, but the envelope, the addresses and the senders stay readable;
 - anyone who can write the file can publish anything, **including a `from` that is not theirs**. A
   record's sender on this backend is a claim, not a fact.
@@ -390,20 +390,11 @@ msgq read session/alice-1 --from-start --json | jq -c .record | msgq open --json
   stays sealed under it forever; `msgq open` tries the archive, so history keeps opening after a
   rotation.
 
-### The older scheme, still readable
+### One scheme, no other
 
-Set a passphrase and the body is sealed under one key derived from it with scrypt, exactly as before:
-
-```bash
-export MSGQ_PASSPHRASE="correct horse battery staple"    # or MSGQ_PASSPHRASE_FILE=/run/secrets/msgq
-msgq publish session/standup "the plan is tomorrow"
-```
-
-That is the key the **bus** holds rather than a person's, so everyone with the passphrase — the
-operator of a shared server included — reads everything. Groups and records written before recipient
-sealing still use it, and those records keep opening unchanged. `MSGQ_KEY_SALT` names the derivation,
-and `db info` prints the sealing mode this invocation would use. Presence and acknowledgement bodies
-are never sealed under either scheme: the roster and the lifecycle read them.
+There is no passphrase scheme any more. `MSGQ_PASSPHRASE`, `MSGQ_PASSPHRASE_FILE` and `MSGQ_KEY_SALT` are
+not read: a key is a principal's own, or it is agreed for one record. A body is sealed to its recipients
+or it is not sealed at all, and the only unsealed address is the roster.
 
 ## Trusting a sender
 
