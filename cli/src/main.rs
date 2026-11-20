@@ -38,6 +38,8 @@ fn run(cli: Cli) -> Result<(), Error> {
             ack,
             reply_to,
             print_id,
+            seal_to,
+            plaintext,
             await_ack,
             timeout,
         } => commands::publish(
@@ -51,6 +53,8 @@ fn run(cli: Cli) -> Result<(), Error> {
                 ack,
                 reply_to,
                 print_id,
+                seal_to,
+                plaintext,
                 await_ack,
                 timeout,
             },
@@ -191,6 +195,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             Ok(())
         }
         Command::Verify { json } => commands::verify(&db, json),
+        Command::Open { json } => commands::open_records(&db, json),
         Command::Trust { action } => match action.unwrap_or(TrustCmd::List { json: false }) {
             TrustCmd::List { json } => commands::trust_list(&db, json),
             TrustCmd::Add {

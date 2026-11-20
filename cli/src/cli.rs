@@ -86,6 +86,12 @@ pub enum Command {
         /// Print the record's id instead of its offset.
         #[arg(long = "print-id")]
         print_id: bool,
+        /// Seal the body to this address, whatever the target is. Repeatable.
+        #[arg(long = "seal-to", value_name = "ADDRESS")]
+        seal_to: Vec<String>,
+        /// Store the body unsealed even when a recipient is known.
+        #[arg(long)]
+        plaintext: bool,
         /// Wait for acknowledgements after publishing.
         #[arg(long = "await")]
         await_ack: bool,
@@ -232,6 +238,14 @@ pub enum Command {
     /// This is how a client that reads the bus itself obtains the same verdict as a read.
     Verify {
         /// Emit one JSON verdict per record instead of a line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the body of records handed in on standard input, one per line.
+    ///
+    /// A record sealed to somebody else is reported, not failed: that is a fact about the record.
+    Open {
+        /// Emit one JSON outcome per record instead of a line.
         #[arg(long)]
         json: bool,
     },

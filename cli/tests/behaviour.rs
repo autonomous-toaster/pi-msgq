@@ -178,7 +178,9 @@ impl Bus {
     }
 
     fn publish(&self, address: &str, body: &str) {
-        self.ok(&["publish", address, body]);
+        // These fixtures are about how the bus behaves, not about sealing: they write as a foreign
+        // client would, and a first-contact publish to a peer whose key nobody holds says so.
+        self.ok(&["publish", address, body, "--plaintext"]);
     }
 
     /// Push records past a one-second window. The clock is the engine's, so the only honest way to
