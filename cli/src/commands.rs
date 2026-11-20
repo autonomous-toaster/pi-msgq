@@ -209,13 +209,8 @@ fn seal_by_rule(
     signing: &SigningKey,
 ) -> Result<(), Error> {
     if args.plaintext {
-        if crate::seal::Key::from_env()?.is_some() {
-            eprintln!(
-                "msgq: --plaintext given; the body is stored unsealed even though a bus key is configured"
-            );
-        } else {
-            eprintln!("msgq: --plaintext given; the body is stored unsealed");
-        }
+        // Worth one line, and only one: the caller asked for the unsafe thing explicitly.
+        eprintln!("msgq: --plaintext given; the body is stored unsealed");
         return Ok(());
     }
 
@@ -229,7 +224,7 @@ fn seal_by_rule(
     // inventing one is a change of its own.
     let explicit = !args.seal_to.is_empty();
     if !explicit && canonical.starts_with("group/") {
-        return seal_with_bus_key(value, "a group address has no recipient list");
+        return seal_with_bus_key(value);
     }
 
     let targets: Vec<String> = if explicit {
@@ -258,37 +253,28 @@ fn seal_by_rule(
     }
 
     if unknown.is_empty() {
+        // Sealing to the recipient and the sender is the expected path, so it says nothing: a client
+        // that narrates every ordinary publish is a client nobody reads.
         recipients.dedup_by(|a, b| a.key.as_bytes() == b.key.as_bytes());
         crate::envelope::seal_for(value, &recipients)?;
-        if recipients.len() > 1 {
-            eprintln!(
-                "msgq: sealed to {}",
-                recipients
-                    .iter()
-                    .map(|r| r.address.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
         return Ok(());
     }
 
     // Not sealed to the peer: the bus key, or plaintext. On a bus with no key material anywhere,
     // plaintext is the state of the world rather than a decision, and saying so every publish is noise.
-    seal_with_bus_key(
-        value,
-        &format!(
-            "no key is known for {}; it would have one after a record from it",
-            unknown.join(", ")
-        ),
-    )
+    seal_with_bus_key(value)
 }
 
 /// Seal with the bus key when one is configured, and say what happened when one is.
-fn seal_with_bus_key(value: &mut Value, why: &str) -> Result<(), Error> {
+/// Seal under the bus key when one is configured, silently.
+///
+/// No notice: an ordinary publish narrating which key it picked is noise on every line, and the
+/// record itself declares what it was sealed with. `db info` reports the mode for anyone who wants to
+/// know before they write, and a caller who asked for something a client cannot honour — a named
+/// recipient with no key — gets an error instead.
+fn seal_with_bus_key(value: &mut Value) -> Result<(), Error> {
     if let Some(key) = crate::seal::Key::from_env()? {
         crate::seal::seal_body(value, &key)?;
-        eprintln!("msgq: sealed with the bus key ({why})");
     }
     Ok(())
 }

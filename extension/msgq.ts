@@ -221,6 +221,8 @@ export default function (pi: ExtensionAPI) {
 	 * ordering that made this work before was luck, not design.
 	 */
 	let awaitingAnswerFrom: string | undefined;
+	/** Correspondents whose records are sealed to somebody else, so the notice is said once. */
+	const saidSealedTo = new Set<string>();
 	/**
 	 * The question this session was asked and may still owe an answer to.
 	 *
@@ -544,11 +546,17 @@ export default function (pi: ExtensionAPI) {
 		// no policy can turn an unopened body into a turn and nothing claims it was received.
 		const opened = openThroughClient(record);
 		if (opened.kind === "elsewhere") {
-			// Sealed for somebody else: a fact about the record, and not this session's to read.
-			report(
-				`msgq: a record from ${record.from} is sealed to ${opened.sealedTo.join(", ")}`,
-				"info",
-			);
+			// Sealed for somebody else: a fact about the record, and not this session's to read. Said
+			// once per correspondent rather than per record — a busy bus would otherwise fill the
+			// transcript with the same line.
+			const key = `${record.from}|${opened.sealedTo.join(",")}`;
+			if (!saidSealedTo.has(key)) {
+				saidSealedTo.add(key);
+				report(
+					`msgq: records from ${record.from} are sealed to ${opened.sealedTo.join(", ")}; this session is not one of them`,
+					"info",
+				);
+			}
 			subscription.save(offset);
 			return;
 		}
@@ -588,7 +596,7 @@ export default function (pi: ExtensionAPI) {
 		// A wait already returned this answer inside the tool result. The record it was carried
 		// in is still on the stream, and delivering it again is the whole answer twice.
 		if (answersConsumedAsk(record, self, answeredPeers, reference)) {
-			report(`msgq: the answer from ${record.from} was already returned by the ask that waited for it`);
+			// Nothing to say: this is the record of an answer the waiting tool already returned.
 			subscription.save(offset);
 			return;
 		}
@@ -1103,7 +1111,7 @@ export default function (pi: ExtensionAPI) {
 			// takes while the agent is busy — which is exactly when an ask is waiting.
 			const batch = drained.filter((item) => {
 				if (!answersConsumedAsk(item.record, self, answeredPeers, item.reference)) return true;
-				report(`msgq: the answer from ${item.record.from} was already returned by the ask that waited for it`);
+				// Nothing to say: the waiting tool already returned this answer.
 				item.commit();
 				return false;
 			});

@@ -79,6 +79,11 @@ concept; a message's `to` field always equals the stream name.
 If an address contains `/`, its prefix must be one of the reserved schemes. Addresses are
 case-sensitive. Empty addresses and scheme-only addresses (`session/`) are rejected.
 
+A bare name here means **`group/<name>`**, not a session — the shorthand predates sessions being
+addressable at all. So `msgq publish reviewer` writes to the fan-out address `group/reviewer`, while
+`/peer reviewer` in the pi extension sends to `session/reviewer`. When you mean one session, say
+`session/reviewer`; when you mean everyone listening on a name, the bare name is the shorthand.
+
 `cwd/<enc>` uses pi's session-directory encoding: strip the leading `/` and replace `/`, `\`,
 and `:` with `-`.
 
