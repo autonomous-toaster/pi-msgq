@@ -3,10 +3,18 @@ import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 
 import honker from "@russellthehippo/honker-node";
 
-import { HonkerBus } from "../src/consumer.ts";
+import {
+	HonkerBus,
+	RETRY_MAX_MS,
+	RETRY_REPORT_AFTER,
+	createPump,
+	openRaw,
+	retryDelay,
+} from "../src/consumer.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: the binding is a CJS module without usable ESM types.
 const native = honker as any;
@@ -49,9 +57,7 @@ test("first attach delivers only new records, never the retained history", async
 		"session/a",
 		"c1",
 		(event) => seen.push((event.payload as any).message),
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 
 	await wait(300);
@@ -79,9 +85,7 @@ test("the cursor advances only when the caller saves", async () => {
 			delivered = event.offset;
 			cursorAtDelivery = reader.stream("session/a").getOffset("c1");
 		},
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 
 	await wait(200);
@@ -113,17 +117,13 @@ test("two consumers advance independently", async () => {
 		"session/a",
 		"a",
 		(event) => a.push((event.payload as any).message),
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 	const subB = bus.subscribe(
 		"session/a",
 		"b",
 		(event) => b.push((event.payload as any).message),
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 
 	await wait(200);
@@ -152,9 +152,7 @@ test("a single record can be read at a known offset without consuming", () => {
 		"session/a",
 		"c1",
 		() => {},
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 	const reader = native.open(db, { watcherPollIntervalMs: INTERVAL });
 	const before = reader.stream("session/a").getOffset("c1");
@@ -190,9 +188,7 @@ test("resumes from the saved cursor after reopening", async () => {
 			first.push((event.payload as any).message);
 			lastOffset = event.offset;
 		},
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 	await wait(200);
 	publish(db, "session/a", "while-running");
@@ -210,9 +206,7 @@ test("resumes from the saved cursor after reopening", async () => {
 		"session/a",
 		"c1",
 		(event) => second.push((event.payload as any).message),
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 	await wait(400);
 	assert.deepEqual(second, ["while-away"], "a saved cursor resumes and delivers the gap");
@@ -229,9 +223,7 @@ test("an unsaved record is redelivered after reopening", async () => {
 		"session/a",
 		"c1",
 		(event) => seen.push((event.payload as any).message),
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 	await wait(200);
 	publish(db, "session/a", "not-acted-on");
@@ -247,9 +239,7 @@ test("an unsaved record is redelivered after reopening", async () => {
 		"session/a",
 		"c1",
 		(event) => again.push((event.payload as any).message),
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 	await wait(400);
 	assert.deepEqual(again, ["not-acted-on"], "an unacted record is redelivered, not lost");
@@ -297,4 +287,357 @@ test("emptying the log after close does nothing", () => {
 	const bus = new HonkerBus(tempDb(), INTERVAL);
 	bus.close();
 	bus.truncateWal();
+});
+
+// ---- the pump: what a failed read costs -------------------------------------------------------
+
+/** A record as the pump sees it: only the offset matters to the loop. */
+function record(offset: number): {
+	offset: number;
+	topic: string;
+	key: null;
+	payload: unknown;
+	createdAt: null;
+} {
+	return { offset, topic: "session/a", key: null, payload: { message: `m${offset}` }, createdAt: null };
+}
+
+/** Let the pump's microtasks run without waiting on a wall clock. */
+async function tick(turns = 8): Promise<void> {
+	for (let i = 0; i < turns; i += 1) await Promise.resolve();
+}
+
+test("countSince counts what follows an offset and moves no cursor", () => {
+	const db = tempDb();
+	const first = publish(db, "session/a", "one");
+	const second = publish(db, "session/a", "two");
+	publish(db, "session/b", "elsewhere");
+
+	const bus = new HonkerBus(db, INTERVAL);
+	assert.equal(bus.countSince("session/a", 0), 2);
+	assert.equal(bus.countSince("session/a", first), 1);
+	assert.equal(bus.countSince("session/a", second), 0);
+	// Nothing attached, so there is no cursor to move; the point is that counting did not need one.
+	bus.close();
+});
+
+test("a failed read is retried from the same cursor and reported once", async () => {
+	const delivered: number[] = [];
+	const reported: string[] = [];
+	let attempt = 0;
+
+	const pump = createPump({
+		from: 10,
+		read: () => {
+			attempt += 1;
+			if (attempt <= 2) throw new Error("database is locked");
+			return attempt === 3 ? [record(11), record(12)] : [];
+		},
+		wait: () => new Promise<void>((resolve) => setImmediate(resolve)),
+		onEvent: (event) => delivered.push(event.offset),
+		onState: (change) => reported.push(change.state),
+		sleep: () => Promise.resolve(),
+	});
+
+	await tick(30);
+	pump.close();
+
+	assert.deepEqual(delivered, [11, 12], "every record is delivered exactly once after the retries");
+	assert.deepEqual(reported, ["retrying", "attached"], "one detachment, one recovery, whatever the retries");
+	assert.equal(pump.cursor(), 12, "the resume point is the last record handed over");
+});
+
+test("the cursor does not move while reads fail", async () => {
+	const pump = createPump({
+		from: 40,
+		read: () => {
+			throw new Error("database is closed");
+		},
+		wait: () => Promise.resolve(),
+		onEvent: () => {},
+		onState: () => {},
+		sleep: () => Promise.resolve(),
+	});
+
+	await tick(20);
+	assert.equal(pump.cursor(), 40, "a failure before any read skips nothing and replays nothing");
+	pump.close();
+});
+
+test("the backoff grows to the cap and stays there", () => {
+	const flat = () => 0.5;
+	assert.equal(retryDelay(1, flat), 100);
+	assert.equal(retryDelay(2, flat), 200);
+	assert.equal(retryDelay(5, flat), 1_600);
+	assert.equal(retryDelay(20, flat), RETRY_MAX_MS);
+	assert.equal(retryDelay(500, flat), RETRY_MAX_MS, "the delay never exceeds the cap");
+
+	// Jitter stays inside its band, so a bus that breaks once does not wake every session at once.
+	assert.equal(retryDelay(1, () => 0), 80);
+	assert.equal(retryDelay(1, () => 1), 120);
+});
+
+test("a subscription that keeps failing reports the threshold once and keeps trying", async () => {
+	const delays: number[] = [];
+	const repeats: number[] = [];
+	let reads = 0;
+
+	const pump = createPump({
+		from: 0,
+		read: () => {
+			reads += 1;
+			if (reads <= 25) throw new Error("the store is unwell");
+			return [];
+		},
+		wait: () => new Promise<void>((resolve) => setTimeout(resolve, 5)),
+		onEvent: () => {},
+		onState: (change) => {
+			if (change.repeat) repeats.push(change.failures);
+		},
+		delay: (failures) => retryDelay(failures, () => 0.5),
+		sleep: async (ms) => {
+			delays.push(ms);
+			await Promise.resolve();
+		},
+	});
+
+	await tick(200);
+	pump.close();
+
+	assert.ok(delays.length >= RETRY_REPORT_AFTER, `expected at least ${RETRY_REPORT_AFTER} delays, got ${delays.length}`);
+	assert.deepEqual(delays.slice(0, 7), [100, 200, 400, 800, 1_600, 3_200, 5_000]);
+	assert.equal(Math.max(...delays), RETRY_MAX_MS);
+	assert.deepEqual(repeats, [RETRY_REPORT_AFTER], "the same failure is repeated once, not on every attempt");
+});
+
+test("a nudge during a retry attaches once, not twice", async () => {
+	const waiting: Array<() => void> = [];
+	let reads = 0;
+
+	const pump = createPump({
+		from: 0,
+		read: () => {
+			reads += 1;
+			throw new Error("database is locked");
+		},
+		wait: () => Promise.resolve(),
+		onEvent: () => {},
+		sleep: () =>
+			new Promise<void>((resolve) => {
+				waiting.push(resolve);
+			}),
+	});
+
+	await tick();
+	assert.equal(reads, 1, "the first attempt failed and is waiting out its backoff");
+
+	pump.attachNow();
+	pump.attachNow();
+	await tick();
+
+	assert.equal(reads, 2, "two nudges shorten one wait, so they buy one attempt");
+	assert.equal(waiting.length, 2, "the second attempt has its own backoff, not a second pump");
+	pump.close();
+});
+
+test("an engine that goes away detaches the subscription instead of ending it", async () => {
+	const db = tempDb();
+	const bus = new HonkerBus(db, INTERVAL);
+	const states: string[] = [];
+	const sub = bus.subscribe(
+		"session/a",
+		"c1",
+		() => {},
+		(change) => states.push(change.state),
+	);
+
+	await wait(200);
+	publish(db, "session/a", "while-attached");
+	await wait(300);
+	assert.deepEqual(states, ["attached"]);
+
+	// The store goes bad underneath the pump — the table it reads is gone — which is the failure the
+	// extension used to turn into a permanent disable.
+	const raw = openRaw(db);
+	raw.query("DROP TABLE _honker_stream");
+	raw.close();
+	await wait(300);
+
+	assert.deepEqual(states, ["attached", "retrying"], "the subscription reports the detachment");
+	sub.close();
+	bus.close();
+});
+
+test("an attach behind the head says how many records were waiting", async () => {
+	const db = tempDb();
+
+	const bus1 = new HonkerBus(db, INTERVAL);
+	let lastOffset = 0;
+	const sub1 = bus1.subscribe(
+		"session/a",
+		"c1",
+		(event) => {
+			lastOffset = event.offset;
+		},
+		() => {},
+	);
+	await wait(200);
+	publish(db, "session/a", "acted-on");
+	await wait(300);
+	sub1.save(lastOffset);
+	sub1.close();
+	bus1.close();
+
+	publish(db, "session/a", "waiting-1");
+	publish(db, "session/a", "waiting-2");
+
+	const bus2 = new HonkerBus(db, INTERVAL);
+	const changes: Array<{ state: string; waiting?: number }> = [];
+	const seen: string[] = [];
+	const sub2 = bus2.subscribe(
+		"session/a",
+		"c1",
+		(event) => seen.push((event.payload as any).message),
+		(change) => changes.push({ state: change.state, waiting: change.waiting }),
+	);
+	await wait(400);
+
+	assert.deepEqual(changes, [{ state: "attached", waiting: 2 }], "the backlog is counted before it is read");
+	assert.deepEqual(seen, ["waiting-1", "waiting-2"]);
+	sub2.close();
+	bus2.close();
+});
+
+test("a replay after a failure neither duplicates nor drops a record", async () => {
+	const delivered: number[] = [];
+	// The script: two records, a failure, two more. The pump must hand over each of the four once.
+	let attempt = 0;
+	const pump = createPump({
+		from: 0,
+		read: () => {
+			attempt += 1;
+			if (attempt === 1) return [record(1), record(2)];
+			if (attempt === 2) throw new Error("the store went away");
+			if (attempt === 3) return [record(3), record(4)];
+			return [];
+		},
+		wait: () => new Promise<void>((resolve) => setImmediate(resolve)),
+		onEvent: (event) => delivered.push(event.offset),
+		sleep: () => Promise.resolve(),
+	});
+
+	await tick(40);
+	pump.close();
+
+	assert.deepEqual(delivered, [1, 2, 3, 4], "the retry resumes after the last handed-over record");
+	assert.equal(pump.cursor(), 4);
+});
+
+test("a store that is locked detaches the subscription, which recovers when the lock clears", async () => {
+	const db = tempDb();
+	// A rollback-mode journal is what makes a writer's exclusive lock block a reader; in WAL a reader
+	// never waits, so there would be no failure to recover from.
+	const setup = new DatabaseSync(db);
+	setup.exec("PRAGMA journal_mode=DELETE");
+	setup.close();
+
+	const bus = new HonkerBus(db, INTERVAL);
+	const states: string[] = [];
+	const seen: string[] = [];
+	const reader = openRaw(db);
+	const sub = bus.subscribe(
+		"session/a",
+		"c1",
+		(event) => {
+			seen.push((event.payload as any).message);
+			sub.save(event.offset);
+		},
+		(change) => states.push(change.state),
+	);
+	const locker = new DatabaseSync(db);
+	try {
+		await wait(300);
+		publish(db, "session/a", "before-the-lock");
+		await wait(400);
+		assert.deepEqual(seen, ["before-the-lock"]);
+		assert.deepEqual(states, ["attached"]);
+		const actedOn = reader.stream("session/a").getOffset("c1");
+		assert.ok(actedOn > 0, "the delivered record was saved");
+
+		locker.exec("BEGIN EXCLUSIVE");
+		await wait(800);
+		assert.deepEqual(states, ["attached", "retrying"], "the lock is a detachment, not an error");
+
+		locker.exec("COMMIT");
+		await wait(700);
+		assert.deepEqual(states, ["attached", "retrying", "attached"], "the subscription recovers by itself");
+		assert.equal(
+			reader.stream("session/a").getOffset("c1"),
+			actedOn,
+			"nothing was saved during the outage, and nothing was skipped by it",
+		);
+	} finally {
+		try {
+			locker.exec("COMMIT");
+		} catch {
+			// Already committed, or the lock never landed.
+		}
+		locker.close();
+	}
+
+	publish(db, "session/a", "after-the-lock");
+	await wait(600);
+	assert.deepEqual(seen, ["before-the-lock", "after-the-lock"]);
+	assert.ok(reader.stream("session/a").getOffset("c1") > 0, "the cursor advances once delivery resumes");
+
+	sub.close();
+	bus.close();
+	reader.close();
+});
+
+test("a session that died mid-turn replays its backlog as one batch", async () => {
+	const db = tempDb();
+
+	// The process that died: it acted on one record and saved that, then vanished without closing
+	// anything — which is the only thing a kill -9 leaves behind.
+	const dying = new HonkerBus(db, INTERVAL);
+	let actedOn = 0;
+	const dyingSub = dying.subscribe(
+		"session/a",
+		"c1",
+		(event) => {
+			actedOn = event.offset;
+			dyingSub.save(event.offset);
+		},
+		() => {},
+	);
+	await wait(300);
+	publish(db, "session/a", "acted-on");
+	await wait(400);
+	dyingSub.save(actedOn);
+	assert.ok(actedOn > 0);
+
+	publish(db, "session/a", "waiting-1");
+	publish(db, "session/a", "waiting-2");
+	publish(db, "session/a", "waiting-3");
+
+	// The replacement process: same consumer, same address, nothing else in common.
+	const bus = new HonkerBus(db, INTERVAL);
+	const changes: Array<{ state: string; waiting?: number }> = [];
+	const seen: string[] = [];
+	const sub = bus.subscribe(
+		"session/a",
+		"c1",
+		(event) => seen.push((event.payload as any).message),
+		(change) => changes.push({ state: change.state, waiting: change.waiting }),
+	);
+	await wait(500);
+
+	assert.deepEqual(changes, [{ state: "attached", waiting: 3 }], "one attach, and it says how much was waiting");
+	assert.deepEqual(seen, ["waiting-1", "waiting-2", "waiting-3"], "the backlog arrives in order, once");
+
+	sub.close();
+	bus.close();
+	dyingSub.close();
+	dying.close();
 });

@@ -9,13 +9,23 @@
 
 import { readFileSync } from "node:fs";
 
-import type { Bus, BusEvent, Subscription } from "./consumer.ts";
+import type {
+	AttachmentChange,
+	Bus,
+	BusEvent,
+	Subscription,
+} from "./consumer.ts";
+import { createPump } from "./consumer.ts";
 
 /** Records fetched per read. */
 /** The lease a session renews for, and half of it is when the next renewal is due. */
 export const DEFAULT_LEASE = "1 hour";
 
 const READ_BATCH = 100;
+
+/** One page of the waiting-record count, and how far the count is allowed to page. */
+const COUNT_PAGE = 1000;
+const COUNT_LIMIT = 20_000;
 
 /** Fallback wait when nothing notifies. */
 // A watchdog: the LISTEN channel wakes the pump, and this only covers a missed notification.
@@ -202,79 +212,119 @@ export class PgBus implements Bus {
 		address: string,
 		consumer: string,
 		onEvent: (event: BusEvent) => void,
-		onError: (error: unknown) => void,
+		onState: (change: AttachmentChange) => void,
 		onGap?: (dropped: number) => void,
 	): Subscription {
-		let stopped = false;
+		// Where this consumer had reached. Loaded on attach, which is why the pump is told nothing
+		// about it: a server answers when asked, and the answer is this session's resume point.
 		let cursor: number | undefined;
+		let attached = false;
+		let waking: (() => void) | undefined;
+		let notify: (() => void) | undefined;
 
-		const pump = (async () => {
-			try {
-				// A consumer attaching to an address that has never been written to still needs a
-				// queue to read: an empty one is the honest starting point.
-				await this.client.query("SELECT msgq.ensure_queue($1)", [address]);
-				const queue = await this.queueOf(address);
-				await this.initializeCursor(consumer, address);
-				cursor = await this.storedOffset(consumer, address);
-				// Report the loss once and carry on: a gap is a warning, and a consumer that stops
-				// because it missed something never catches up.
-				const dropped = await this.dropped(address, cursor);
-				if (dropped > 0) onGap?.(dropped);
-				let waking: (() => void) | undefined;
-				const channel = `pgmq.q_${queue}.INSERT`;
-				const notify = () => waking?.();
-				this.client.on("notification", notify);
-				await this.client.query(`LISTEN ${quote(channel)}`);
+		/** Everything that has to succeed before the first read: the queue, the cursor, the wake. */
+		const attach = async (): Promise<void> => {
+			if (notify) this.client.off("notification", notify);
+			// A consumer attaching to an address that has never been written to still needs a
+			// queue to read: an empty one is the honest starting point.
+			await this.client.query("SELECT msgq.ensure_queue($1)", [address]);
+			const queue = await this.queueOf(address);
+			await this.initializeCursor(consumer, address);
+			cursor = await this.storedOffset(consumer, address);
+			// Report the loss once and carry on: a gap is a warning, and a consumer that stops
+			// because it missed something never catches up.
+			const dropped = await this.dropped(address, cursor);
+			if (dropped > 0) onGap?.(dropped);
+			const channel = `pgmq.q_${queue}.INSERT`;
+			const wake = () => waking?.();
+			notify = wake;
+			this.client.on("notification", wake);
+			await this.client.query(`LISTEN ${quote(channel)}`);
+		};
 
-				while (!stopped) {
-					const result = await this.client.query(
-						"SELECT msg_id, record::text AS payload, created_at FROM msgq.read_since($1, $2, $3, $4)",
-						[this.token, address, cursor ?? 0, READ_BATCH],
-					);
-					if (result.rows.length === 0) {
-						// A notification and a timeout are both a reason to look again.
-						await new Promise<void>((resolve) => {
-							const timer = setTimeout(done, IDLE_WAIT_MS);
-							function done() {
-								clearTimeout(timer);
-								waking = undefined;
-								resolve();
-							}
-							waking = done;
-						});
-						continue;
-					}
-					for (const row of result.rows) {
-						if (stopped) break;
-						const offset = Number(row.msg_id);
-						cursor = offset;
-						onEvent({
-							offset,
-							topic: address,
-							key: null,
-							payload: JSON.parse(String(row.payload)),
-							createdAt: Number(row.created_at),
-						});
-					}
-					// The caller advances the cursor through save(); reading never does.
-					await this.persist(consumer, address, cursor ?? 0);
+		const pump = createPump({
+			from: 0,
+			read: async () => {
+				if (!attached) {
+					await attach();
+					attached = true;
 				}
-				this.client.off("notification", notify);
-			} catch (error) {
-				if (!stopped) onError(error);
-			}
-		})();
+				const result = await this.client.query(
+					"SELECT msg_id, record::text AS payload, created_at FROM msgq.read_since($1, $2, $3, $4)",
+					[this.token, address, cursor ?? 0, READ_BATCH],
+				);
+				return result.rows.map((row) => ({
+					offset: Number(row.msg_id),
+					topic: address,
+					key: null,
+					payload: JSON.parse(String(row.payload)),
+					createdAt: Number(row.created_at),
+				}));
+			},
+			wait: () =>
+				new Promise<void>((resolve) => {
+					// A notification and a timeout are both a reason to look again.
+					const timer = setTimeout(done, IDLE_WAIT_MS);
+					function done() {
+						clearTimeout(timer);
+						waking = undefined;
+						resolve();
+					}
+					waking = done;
+				}),
+			onEvent: (event) => {
+				cursor = event.offset;
+				onEvent(event);
+			},
+			onState,
+			// The resume point is the server's answer, not the argument: this engine discovers it on
+			// attach, so the count is taken from where the cursor actually is.
+			onWaiting: () => this.countSince(address, cursor ?? 0),
+			// The caller advances the cursor through save(); reading never does. A batch is the
+			// boundary at which this engine writes it back.
+			onBatch: async (next) => {
+				cursor = next;
+				await this.persist(consumer, address, next);
+			},
+			onClose: () => {
+				if (notify) this.client.off("notification", notify);
+			},
+		});
 
 		return {
 			address,
 			save: (offset: number) => {
 				if (cursor !== undefined && offset > cursor) cursor = offset;
 			},
-			close: () => {
-				stopped = true;
-				void pump;
+			attachNow: () => pump.attachNow(),
+			state: () => {
+				const state = pump.state();
+				return state === "closed" ? "retrying" : state;
 			},
+			close: () => pump.close(),
 		};
+	}
+
+	/**
+	 * How many records follow `offset`.
+	 *
+	 * Counted in pages because the read surface is paged, and bounded because this is a hint for an
+	 * announcement, not an inventory: a caller that needs every record reads them. A count that comes
+	 * back short under-reports, which is the safe direction — the records are still all delivered.
+	 */
+	async countSince(address: string, offset: number): Promise<number> {
+		let total = 0;
+		let from = Math.max(0, offset);
+		for (;;) {
+			const result = await this.client.query(
+				"SELECT msg_id FROM msgq.read_since($1, $2, $3, $4)",
+				[this.token, address, from, COUNT_PAGE],
+			);
+			const rows = result.rows;
+			total += rows.length;
+			if (rows.length < COUNT_PAGE || total >= COUNT_LIMIT) return total;
+			from = Number(rows[rows.length - 1]?.msg_id ?? from);
+		}
 	}
 
 	/** A consumer with no stored position reads from the start; the function stamps the owner. */

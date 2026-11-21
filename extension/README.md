@@ -68,6 +68,51 @@ msgq publish session/api-worker "build is green" --type note
 `msgq consumers` lists the addresses currently being followed, which is a quick way to
 find the address of a session you forgot to name.
 
+## When the bus cannot be read
+
+Reading is a loop, not a single step, and it is allowed to fail. A failed read is a **detachment**,
+never the end of the extension: the subscription keeps its cursor, backs off from 100 ms to 5 s with
+jitter, and tries the same address again. It never gives up, and a session that has lost the bus
+keeps working — it simply cannot hear anything until the bus returns.
+
+```
+  state                          status slot                    what it means
+  ----------------------------   ----------------------------   -----------------------------
+  attaching                      msgq: attaching (N)            the first read has not answered yet
+  attached                       msgq: attached (N)             every address is reading
+  retrying                       msgq: detached (retrying)      something is not reading; records wait
+  disabled                       msgq: disabled                 the configuration is unusable
+```
+
+Only a configuration error disables the extension — an unknown policy, or an address whose scheme
+does not exist. Everything else is retried, including an engine that will not open at session start.
+
+A detachment and the recovery from it are written into the transcript as msgq entries marked
+`event`, because a toast is not something a model can read. A run in progress is not interrupted:
+the entry lands when the run settles. Neither entry starts a turn — a broken bus is not a reason to
+run, and a run started by one would deliver nothing.
+
+```
+  msgq event   msgq → session/api-worker
+               cannot read session/api-worker: database is locked. Retrying; records that
+               arrive meanwhile are kept on the bus and delivered when it is back.
+```
+
+When the subscription attaches again it says what was waiting, before it hands anything over:
+
+```
+  msgq event   msgq → session/api-worker
+               reading session/api-worker again; 12 records were waiting and are being
+               delivered now.
+```
+
+While nothing is attached, presence is not renewed: an entry in the roster promises that a peer can
+reach you, and a session that cannot read lets its lease expire rather than advertise a mailbox
+nobody is watching. The next successful attach publishes it again.
+
+If you need the backlog sooner than the retry, `msgq read <address>` still reads it by hand, and
+`/peers` shows what the roster believes.
+
 ## Delivery policy
 
 The policy **caps** what a message may do. It is the policy dial, and `display` is the default.

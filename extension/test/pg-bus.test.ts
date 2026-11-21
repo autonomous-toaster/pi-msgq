@@ -51,9 +51,12 @@ async function credential(dsn: string): Promise<string> {
 	const client = new module.default.Client({ connectionString: dsn });
 	await client.connect();
 	try {
-		const row = await client.query("SELECT msgq.register_identity($1, ARRAY['group']) AS token", [
-			`ext-${unique()}`,
-		]);
+		// Both schemes: the tests address sessions, and a scope is an address prefix ("group" alone
+	// covers neither of them).
+	const row = await client.query(
+		"SELECT msgq.register_identity($1, ARRAY['session', 'group']) AS token",
+		[`ext-${unique()}`],
+	);
 		return String(row.rows[0].token);
 	} finally {
 		await client.end();
@@ -106,9 +109,7 @@ test("a subscription receives what another client publishes", async (t) => {
 			subscription.save(event.offset);
 			resolve();
 		},
-		(error) => {
-			throw error;
-		},
+		() => {},
 	);
 	try {
 		await publish(DSN, address, { v: 1, type: "note", message: "hello" });
@@ -134,9 +135,7 @@ test("a cursor moves forward and never back", async (t) => {
 	await raw.connect();
 	try {
 		const offset = await publish(DSN, address, { v: 1, type: "note", message: "one" });
-		const subscription = bus.subscribe(address, consumer, () => {}, (error) => {
-			throw error;
-		});
+		const subscription = bus.subscribe(address, consumer, () => {}, () => {});
 		subscription.save(offset);
 		subscription.save(offset - 1);
 		await new Promise((done) => setTimeout(done, 300));
@@ -192,6 +191,45 @@ test("lost records are reported, not hidden", async (t) => {
 		assert.equal(await bus.dropped(address, 1), 0, "a consumer at the cut lost nothing");
 	} finally {
 		await raw.end();
+		await bus.close();
+	}
+});
+
+test("the shared bus counts what follows an offset, like the local one", async (t) => {
+	if (!DSN) {
+		t.diagnostic("MSGQ_TEST_DB_URI is unset: the shared bus was not exercised");
+		return;
+	}
+	process.env.MSGQ_TOKEN = await credential(DSN);
+	const address = `session/ext-count-${unique()}`;
+	const bus = await PgBus.open(DSN, [address]);
+	try {
+		const first = await publish(DSN, address, { v: 1, type: "note", message: "one" });
+		await publish(DSN, address, { v: 1, type: "note", message: "two" });
+
+		assert.equal(await bus.countSince(address, 0), 2);
+		assert.equal(await bus.countSince(address, first), 1);
+		assert.equal(await bus.countSince(address, first + 1), 0, "a count is exclusive of its offset");
+
+		// A subscription that attaches behind the head reports the count it found, before it reads:
+		// the same contract the local engine keeps, from the engine that has to ask.
+		const changes: Array<{ state: string; waiting?: number }> = [];
+		const seen: unknown[] = [];
+		const subscription = bus.subscribe(
+			address,
+			`ext-count-consumer-${unique()}`,
+			(event) => {
+				seen.push(event.payload);
+				subscription.save(event.offset);
+			},
+			(change) => changes.push({ state: change.state, waiting: change.waiting }),
+		);
+		await new Promise((done) => setTimeout(done, 500));
+
+		assert.deepEqual(changes[0], { state: "attached", waiting: 2 });
+		assert.equal(seen.length, 2);
+		subscription.close();
+	} finally {
 		await bus.close();
 	}
 });

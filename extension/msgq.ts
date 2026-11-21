@@ -19,10 +19,19 @@ import { Type } from "@earendil-works/pi-ai";
 
 import {
 	HonkerBus,
+	type AttachmentChange,
+	type AttachmentState,
 	type Bus,
 	type BusEvent,
+	retryDelay,
 	type Subscription,
 } from "./src/consumer.ts";
+import {
+	attachNotice,
+	DISABLED_STATUS,
+	presenceReachable,
+	statusFor,
+} from "./src/attach.ts";
 import { PgBus } from "./src/pg-bus.ts";
 import {
 	ConfigError,
@@ -171,6 +180,21 @@ export default function (pi: ExtensionAPI) {
 	}
 	let addresses: string[] = [];
 	let skipped = 0;
+	/**
+	 * What each subscribed address is doing.
+	 *
+	 * Kept here rather than read off the subscription so a rebuilt set starts from `attaching`: the
+	 * status slot and the presence clock both answer questions about the whole session, not about one
+	 * pump.
+	 */
+	let attachment = new Map<string, AttachmentState>();
+	/** Presence records a session cannot hear the answer to, so they are not renewed. */
+	let presenceSuspended = false;
+	/** Notices waiting for a run to settle before they can be written into the transcript. */
+	let pendingNotices: Array<{ content: string; address: string }> = [];
+	/** Attempts made to open an engine that would not open, and the timer for the next one. */
+	let connectFailures = 0;
+	let connectTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Senders allowed to start a turn under the honour policy. Empty means no allowlist. */
 	let allowed: string[] = [];
 	/** Whether presence is configured on, as opposed to actually held. */
@@ -254,6 +278,101 @@ export default function (pi: ExtensionAPI) {
 
 	function setStatus(text: string | undefined): void {
 		if (context?.hasUI) context.ui.setStatus(STATUS_KEY, text);
+	}
+
+	function attachmentStates(): AttachmentState[] {
+		return addresses.map((address) => attachment.get(address) ?? "attaching");
+	}
+
+	/** Put the whole session's state in the status slot: attached, attaching, detaching, disabled. */
+	function refreshStatus(): void {
+		// With no engine at all the session is detached from everything it means to follow, and the
+		// slot says that rather than reporting a subscription count nobody is honouring.
+		setStatus(
+			bus ? statusFor(attachmentStates()) : identity ? statusFor(["retrying"]) : undefined,
+		);
+	}
+
+	/**
+	 * Write one line into the transcript.
+	 *
+	 * Not a turn trigger: a bus that broke is not a reason to start a run, and a run started by a
+	 * failure notice would deliver nothing. A run in progress cannot take an entry without it landing
+	 * mid-thought, so it waits for the settle hook — the same place a buffered message is flushed.
+	 */
+	function announce(content: string, address: string): void {
+		if (context && !context.isIdle()) {
+			pendingNotices.push({ content, address });
+			return;
+		}
+		writeNotice(content, address);
+	}
+
+	function writeNotice(content: string, address: string): void {
+		try {
+			pi.sendMessage(
+				{
+					customType: MESSAGE_TYPE,
+					content,
+					display: true,
+					details: {
+						items: [{ from: "msgq", address, type: "event", body: content, honored: false }],
+					} satisfies MsgqDetails,
+				},
+				{ triggerTurn: false },
+			);
+		} catch (error) {
+			report(`msgq could not write an attachment notice: ${String(error)}`, "warning");
+		}
+	}
+
+	/**
+	 * Stop renewing presence while nothing can be read.
+	 *
+	 * The record is not retracted: a retraction is a write, and the bus is the thing that is broken. The
+	 * lease expires on its own, which is the same outcome after one TTL and costs nothing now.
+	 */
+	function suspendPresence(): void {
+		if (!presence || presenceSuspended) return;
+		presenceSuspended = true;
+		presenceHeld = false;
+	}
+
+	/** Publish presence again once something can be read, and say whether it landed. */
+	function resumePresence(): void {
+		if (!presence || !presenceSuspended) return;
+		presenceSuspended = false;
+		void presence.start().then((held) => {
+			presenceHeld = held;
+			if (!held) report(`msgq presence is not registered (resumed): ${presenceWhy()}`, "warning");
+		});
+	}
+
+	/**
+	 * React to one subscription's state change.
+	 *
+	 * Edges are what a reader needs: the first retry after an attach is the detachment, the ninetieth
+	 * is the same detachment. The threshold notice behind `repeat` goes to the toast, because the
+	 * transcript already says the bus is gone.
+	 */
+	function onAttachState(address: string, change: AttachmentChange): void {
+		const previous = attachment.get(address) ?? "attaching";
+		attachment.set(address, change.state);
+		refreshStatus();
+
+		// Presence follows the whole set, not this address: one address that reads is still a reachable
+		// session, and the set can become reachable by an address other than the one that changed.
+		if (presenceReachable(attachmentStates())) resumePresence();
+		else suspendPresence();
+
+		const notice = attachNotice(change, address, previous);
+		if (notice) announce(notice.content, address);
+		if (change.repeat) {
+			report(
+				`msgq is still detached from ${address} after ${change.failures} attempts: ${change.reason ?? "no reason given"}`,
+				"warning",
+			);
+		}
 	}
 
 	/** Why a presence write did not land, in words: the bus error, or the usual cause. */
@@ -346,7 +465,7 @@ export default function (pi: ExtensionAPI) {
 
 	/** Move presence to a new state, reporting a lost lease without failing. */
 	function setPresenceState(state: PresenceState): void {
-		if (!presence) return;
+		if (!presence || presenceSuspended) return;
 		void presence.setState(state).then((held) => {
 			presenceHeld = held;
 			if (!held) {
@@ -379,17 +498,40 @@ export default function (pi: ExtensionAPI) {
 		inFlight.push({ offset, to: record.from, phases });
 	}
 
+	/**
+	 * Release every subscription, keeping the bus, the presence clock, and the timers.
+	 *
+	 * This is what a rebuild does. It is deliberately not `teardown()`: a subscription that has to be
+	 * replaced is not a session that has to stop consuming, and conflating the two is what made a
+	 * failed read look like a shutdown.
+	 */
+	function releaseSubscriptions(): void {
+		for (const subscription of subscriptions) subscription.close();
+		subscriptions = [];
+		attachment = new Map();
+	}
+
 	/** Release every resource. Idempotent across reload and shutdown. */
 	function teardown(): void {
 		if (renewTimer !== undefined) {
 			clearInterval(renewTimer);
 			renewTimer = undefined;
 		}
+		if (leaseTimer !== undefined) {
+			clearInterval(leaseTimer);
+			leaseTimer = undefined;
+		}
+		if (connectTimer !== undefined) {
+			clearTimeout(connectTimer);
+			connectTimer = undefined;
+		}
+		connectFailures = 0;
 		// A retraction is a write: it is started here and settles on its own, because teardown is
 		// not a place to wait for the network.
 		void presence?.stop();
 		presence = undefined;
 		presenceHeld = false;
+		presenceSuspended = false;
 		derivedCard = {};
 		cardOverrides = {};
 		currentCard = undefined;
@@ -404,8 +546,8 @@ export default function (pi: ExtensionAPI) {
 		lastStopReason = undefined;
 		lastInbound = undefined;
 		owed = undefined;
-		for (const subscription of subscriptions) subscription.close();
-		subscriptions = [];
+		releaseSubscriptions();
+		pendingNotices = [];
 		coalescer = new Coalescer();
 		// Before the handle goes: this session's readers are closed, so the log can be folded
 		// back and emptied instead of sitting at its high-water mark for whoever is left.
@@ -419,8 +561,13 @@ export default function (pi: ExtensionAPI) {
 	/** Disable the extension after a fatal condition, reporting where possible. */
 	function disable(reason: string): void {
 		report(`msgq disabled: ${reason}`, "error");
+		// A disabled extension is still told to the model, not only to the UI: it is the one state in
+		// which every later message will be missed for certain. Written directly, because a notice
+		// queued for the end of a run would be cleared by the teardown below.
+		if (context) writeNotice(`[msgq] disabled: ${reason}`, self || "bus");
+		// Before the teardown: that is what releases the context the status slot is set through.
+		setStatus(DISABLED_STATUS);
 		teardown();
-		setStatus("msgq: disabled");
 	}
 
 	/**
@@ -670,15 +817,18 @@ export default function (pi: ExtensionAPI) {
 	function resubscribe(): void {
 		const open = bus;
 		if (!open || !identity) return;
-		for (const subscription of subscriptions) subscription.close();
+		releaseSubscriptions();
 		const targets = subscriptionAddresses(identity, extraTopics);
 		addresses = targets;
+		for (const address of targets) attachment.set(address, "attaching");
 		subscriptions = targets.map((address) => {
 			const subscription = open.subscribe(
 				address,
 				consumer,
 				(event) => onEvent(address, event, subscription),
-				(error) => disable(`bus subscription failed on ${address}: ${String(error)}`),
+				// A failure here is a detachment, not a shutdown: the pump has already decided to
+				// retry from the offset it kept, and all this does is tell the session.
+				(change) => onAttachState(address, change),
 				(dropped) =>
 					report(
 						`msgq is ${dropped} record(s) behind the retention window on ${address}; ` +
@@ -688,6 +838,7 @@ export default function (pi: ExtensionAPI) {
 			);
 			return subscription;
 		});
+		refreshStatus();
 	}
 
 	function onEvent(address: string, event: BusEvent, subscription: Subscription): void {
@@ -970,6 +1121,112 @@ export default function (pi: ExtensionAPI) {
 	};
 	registerCommands(pi, commandDeps);
 
+	/**
+	 * Open the engine. Reports and returns false when it will not open.
+	 *
+	 * A failure here is the same fact as a failed read — this session cannot be reached — so it is
+	 * reported the same way and retried, never treated as the end of the extension.
+	 */
+	async function openBus(): Promise<boolean> {
+		if (!identity) return false;
+		const targets = subscriptionAddresses(identity, extraTopics);
+		try {
+			if (busPath.includes("://")) {
+				const shared = await PgBus.open(busPath, targets);
+				bus = shared;
+				// A session may stay silent far longer than its lease. Renewing at start and again at
+				// half the lease keeps a resumed session usable without minting a second credential.
+				renewLease(shared);
+			} else {
+				bus = new HonkerBus(busPath);
+			}
+			connectFailures = 0;
+			resubscribe();
+			return true;
+		} catch (error) {
+			bus = null;
+			connectFailures += 1;
+			const reason = `cannot open ${busPath}: ${String(error)}`;
+			report(`msgq ${reason}`, "error");
+			announce(
+				`[msgq] ${reason}. Retrying; the session keeps running, and anything published ` +
+					"to it meanwhile stays on the bus.",
+				self || "bus",
+			);
+			refreshStatus();
+			return false;
+		}
+	}
+
+	/** Try again after the backoff. One timer, so a bus that is down costs one wakeup at a time. */
+	function scheduleConnect(): void {
+		if (connectTimer) return;
+		connectTimer = setTimeout(() => {
+			connectTimer = undefined;
+			void reconnect();
+		}, retryDelay(connectFailures));
+		connectTimer.unref?.();
+	}
+
+	async function reconnect(): Promise<void> {
+		if (bus || !identity) return;
+		if (!(await openBus())) {
+			scheduleConnect();
+			return;
+		}
+		await startPresence();
+		report(`msgq: connected to ${busPath}`);
+	}
+
+	/**
+	 * Register presence, once. Called at start and again if the engine only opened later.
+	 */
+	async function startPresence(): Promise<void> {
+		const ctx = context;
+		if (!presenceConfigured || !bus || presence || !identity || !ctx) return;
+		currentCard = await deriveCard(currentCwd);
+		// Presence goes out through the client too, so the bus holds no unsigned record this session
+		// wrote: a forged presence is refused like any other forgery.
+		presence = new Presence(signedPublish, {
+			address: self,
+			participant: identity.sessionId,
+			alias: identity.alias,
+			state: ctx.isIdle() ? "idle" : "busy",
+			ttlS: presenceTtl,
+			card: currentCard,
+			scope: process.env.MSGQ_SCOPE?.trim() || undefined,
+		});
+		presenceHeld = await presence.start();
+		if (!presenceHeld) {
+			report(`msgq presence is not registered (${presenceWhy()})`, "warning");
+		}
+		void reportPresenceCollision();
+		const renewMs = Math.max(1, Math.floor(presenceTtl / 3)) * 1000;
+		let renewCount = 0;
+		renewTimer = setInterval(() => {
+			if (!presence) return;
+			renewCount += 1;
+			if (contextMode === "auto" && renewCount % 6 === 0) void refreshCard(currentCwd);
+			// A session that cannot read is not reachable, so its lease is left to expire rather
+			// than renewed on behalf of a mailbox nobody is watching.
+			if (presenceSuspended) return;
+			const held = presenceHeld;
+			// A presence write is best-effort and cannot throw: a full disk or a closed
+			// handle must not take the session down with it.
+			void presence.renew().then((nowHeld) => {
+				presenceHeld = nowHeld;
+				// Only the change is news. Reporting every failure would repeat the same line
+				// each TTL, and a bus that came back would go unmentioned.
+				if (held && !nowHeld) {
+					report(`msgq presence was lost: ${presenceWhy()}`, "warning");
+				} else if (!held && nowHeld) {
+					report("msgq presence is registered", "info");
+				}
+			});
+		}, renewMs);
+		renewTimer.unref?.();
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
 		teardown();
 		context = ctx;
@@ -1032,71 +1289,45 @@ export default function (pi: ExtensionAPI) {
 			report(`msgq cannot use the configured passphrase: ${String(error)}`, "warning");
 		}
 
-		// Bus. A connection string selects the shared engine; anything else is a file.
-		try {
-			if (busPath.includes("://")) {
-				bus = await PgBus.open(busPath, subscriptionAddresses(identity, extraTopics));
-				// A session may stay silent far longer than its lease. Renewing at start and again at
-				// half the lease keeps a resumed session usable without minting a second credential.
-				renewLease(bus);
-			} else {
-				bus = new HonkerBus(busPath);
-			}
-			resubscribe();
-		} catch (error) {
-			disable(`cannot open ${busPath}: ${String(error)}`);
-			return;
-		}
+		// Bus. A connection string selects the shared engine; anything else is a file. An engine that
+		// will not open is a detachment, not the end of the session: the file may appear, the server may
+		// come back, and a session nobody can reach is still a session that has work to do.
+		if (!(await openBus())) scheduleConnect();
 
 		// Presence: a scoped write exception, published as a record any client could publish. A failure
 		// here is never fatal.
-		if (presenceConfigured && bus) {
-			currentCard = await deriveCard(currentCwd);
-			// Presence goes out through the client too, so the bus holds no unsigned record this session
-			// wrote: a forged presence is refused like any other forgery.
-			presence = new Presence(signedPublish, {
-				address: self,
-				participant: identity.sessionId,
-				alias: identity.alias,
-				state: ctx.isIdle() ? "idle" : "busy",
-				ttlS: presenceTtl,
-				card: currentCard,
-				scope: process.env.MSGQ_SCOPE?.trim() || undefined,
-			});
-			presenceHeld = await presence.start();
-			if (!presenceHeld) {
-				report(`msgq presence is not registered (${presenceWhy()})`, "warning");
-			}
-			void reportPresenceCollision();
-			const renewMs = Math.max(1, Math.floor(presenceTtl / 3)) * 1000;
-			let renewCount = 0;
-			renewTimer = setInterval(() => {
-				if (!presence) return;
-				renewCount += 1;
-				if (contextMode === "auto" && renewCount % 6 === 0) void refreshCard(currentCwd);
-				const held = presenceHeld;
-				// A presence write is best-effort and cannot throw: a full disk or a closed
-				// handle must not take the session down with it.
-				void presence.renew().then((nowHeld) => {
-					presenceHeld = nowHeld;
-					// Only the change is news. Reporting every failure would repeat the same line
-					// each TTL, and a bus that came back would go unmentioned.
-					if (held && !nowHeld) {
-						report(`msgq presence was lost: ${presenceWhy()}`, "warning");
-					} else if (!held && nowHeld) {
-						report("msgq presence is registered", "info");
-					}
-				});
-			}, renewMs);
-			renewTimer.unref?.();
-		}
+		await startPresence();
 
-		setStatus(`msgq: ${addresses.length} (${policy})`);
+		refreshStatus();
 		report(`msgq: following ${addresses.join(", ")} as ${consumer} (${policy})`);
 	});
 
 	pi.on("agent_before_settle", async (_event: AgentBeforeSettleEvent) => {
 		const entries: NonNullable<AgentBeforeSettleEventResult["entries"]> = [];
+
+		// A run is a boundary at which a detached address is worth another attempt: the backoff may
+		// still have seconds to run, and the session is about to stop listening for a while anyway.
+		for (const subscription of subscriptions) {
+			if (attachment.get(subscription.address) !== "attached") subscription.attachNow();
+		}
+
+		// Notices produced during the run could not be written into it; this is where they land, before
+		// the buffered messages they may be explaining.
+		const notices = pendingNotices;
+		pendingNotices = [];
+		for (const notice of notices) {
+			entries.push({
+				type: "custom_message",
+				customType: MESSAGE_TYPE,
+				content: notice.content,
+				display: true,
+				details: {
+					items: [
+						{ from: "msgq", address: notice.address, type: "event", body: notice.content, honored: false },
+					],
+				} satisfies MsgqDetails,
+			});
+		}
 
 		if (!coalescer.empty) {
 			const drained = coalescer.drain();
@@ -1110,35 +1341,35 @@ export default function (pi: ExtensionAPI) {
 				item.commit();
 				return false;
 			});
-			if (batch.length === 0) return undefined;
-
-			// Responsibility is taken here: the batch is about to be injected, so it can
-			// no longer be lost, and its progress is persisted.
-			for (const item of batch) {
-				item.commit();
-				const phases = isAckRecord(item.record) ? undefined : parseAckRequest(item.record.meta);
-				if (phases) {
-					publishAck({
-						to: item.record.from,
-						replyTo: item.offset,
-						phase: "received",
-						delivery: "queued",
-					});
-					trackInFlight(item.record, item.offset, phases);
+			if (batch.length > 0) {
+				// Responsibility is taken here: the batch is about to be injected, so it can
+				// no longer be lost, and its progress is persisted.
+				for (const item of batch) {
+					item.commit();
+					const phases = isAckRecord(item.record) ? undefined : parseAckRequest(item.record.meta);
+					if (phases) {
+						publishAck({
+							to: item.record.from,
+							replyTo: item.offset,
+							phase: "received",
+							delivery: "queued",
+						});
+						trackInFlight(item.record, item.offset, phases);
+					}
 				}
-			}
 
-			const details: MsgqDetails = {
-				// A buffered batch is injected when the run settles, so every record in it is acted on.
-				items: batch.map((item) => itemOf(item.record, item.address, item.verdict, true)),
-			};
-			entries.push({
-				type: "custom_message",
-				customType: MESSAGE_TYPE,
-				content: formatBatch(batch),
-				display: true,
-				details,
-			});
+				const details: MsgqDetails = {
+					// A buffered batch is injected when the run settles, so every record in it is acted on.
+					items: batch.map((item) => itemOf(item.record, item.address, item.verdict, true)),
+				};
+				entries.push({
+					type: "custom_message",
+					customType: MESSAGE_TYPE,
+					content: formatBatch(batch),
+					display: true,
+					details,
+				});
+			}
 		}
 
 		// The reply convention is advisory, so a question can survive a whole run unanswered. Ask

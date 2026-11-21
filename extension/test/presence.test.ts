@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { HonkerBus, openRaw, type Bus } from "../src/consumer.ts";
+import { presenceReachable } from "../src/attach.ts";
 import {
 	PRESENCE_ADDRESS,
 	PRESENCE_RENEW_MS,
@@ -277,4 +279,43 @@ test("presence renews a third of its lifetime", () => {
 		(24 * 60 * 60 * 1000) / PRESENCE_RENEW_MS <= 2160,
 		"a day of idle presence stays under 2,160 writes",
 	);
+});
+
+// ---- presence follows attachment --------------------------------------------------------------
+
+test("a session that cannot read is not renewed, and is renewed again once it can", async () => {
+	const db = tempDb();
+	const { bus, presence } = makePresence(db);
+
+	await presence.start();
+	assert.equal(presenceRecords(db).length, 1);
+
+	// Detached: the extension stops renewing, and does not retract. A retraction is a write, and the
+	// bus is the thing that is broken; the lease expires on its own instead.
+	assert.equal(presenceReachable(["retrying"]), false);
+	assert.equal(presenceReachable(["attaching"]), false);
+	await new Promise((done) => setTimeout(done, 120));
+	assert.equal(presenceRecords(db).length, 1, "nothing is renewed while detached");
+
+	// Recovered: the same participant publishes again, in the state it is in now.
+	assert.equal(presenceReachable(["attached"]), true);
+	await presence.setState("busy");
+	const records = presenceRecords(db);
+	assert.equal(records.length, 2);
+	assert.equal(presenceEvent(records[1]).state, "busy");
+
+	await presence.stop();
+	bus.close();
+});
+
+test("the renewal timer consults the attachment state", async () => {
+	const source = await readFile(new URL("../msgq.ts", import.meta.url), "utf8");
+	const suspend = source.slice(source.indexOf("function suspendPresence"), source.indexOf("function resumePresence"));
+	assert.doesNotMatch(
+		suspend,
+		/presence\.stop/,
+		"a retraction is a write, and a detached session cannot promise it lands",
+	);
+	assert.match(source, /if \(presenceSuspended\) return;/, "the timer and the state changes both consult it");
+	assert.match(source, /if \(!presence \|\| presenceSuspended\) return;/, "a state change is a write too");
 });
