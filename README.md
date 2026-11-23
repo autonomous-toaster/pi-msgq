@@ -34,23 +34,57 @@ showcase: nothing on the wire depends on it.
 
 Building from a checkout, or running the tests? See [DEVELOPMENT.md](DEVELOPMENT.md).
 
-## Install
+## Getting started
+
+A session another session can talk to, one command per step.
 
 ```bash
-cargo install --path cli                              # the bus, as `msgq`
+git clone https://github.com/autonomous-toaster/pi-msgq && cd pi-msgq
+cargo install --path cli                   # the bus, as `msgq`
+(cd extension && npm install)              # the native binding the extension reads the bus with
+msgq keygen                                # this machine's signing key, and its fingerprint
+msgq trust add --self                      # anchor that key, so your own records read as trusted
+pi install "$PWD/extension"                # load the extension in every session from now on
+export MSGQ_POLICY=honor                   # put this in ~/.zshrc: sessions honour their messages
 ```
 
-The extension is **loaded**, not installed:
+Then open two sessions and name them. The name *is* the address:
 
 ```bash
-pi -e /path/to/pi-msgq/extension
+pi --name alpha                            # one terminal
+pi --name beta                             # another
 ```
 
-Start a session worth talking to:
+`MSGQ_POLICY=honor` is what makes a session answerable, for every session started from that shell.
+The default, `display`, shows incoming messages and never starts a turn; `--msgq-policy honor`
+overrides the environment for one invocation. A misspelled value is refused rather than quietly
+ignored — the extension stays off until it is fixed.
+
+Under `honor`, anything that can write the bus can start a turn in your session, and a `command`
+record lands as input. Narrow it with `MSGQ_ALLOW=session/alpha,session/beta` — comma-separated
+sender addresses, and no list at all means any sender. (Shell publishes speak as `cli/<you>@<host>`,
+so a list of sessions keeps them display-only.) For knowing *who* sent something, use the trust
+layer, which `MSGQ_ALLOW` is deliberately not.
+
+Either session can reach the other with its `peers` tool, and a shell can reach them both:
 
 ```bash
-pi -e ./extension --msgq-policy honor --name planner
+msgq sessions                              # who is live, and where
+msgq publish session/beta "the suite is green"
 ```
+
+That message appears in beta's transcript. Nothing else is configured: no daemon, no port, no
+service — `~/.pi/agent/msgq/msgq.db` is the bus, and every client opens that same file.
+
+Two more things worth the keystrokes:
+
+- **`msgq keygen` before `msgq trust add --self`.** The first publish would create the key anyway,
+  but `trust add --self` anchors a key that must already exist, and keygen prints the fingerprint
+  you compare with a peer out of band.
+- **Trust is per bus.** Anchors sit beside the keyring, keyed by the database, so pointing `--db`
+  elsewhere means trusting again there; `msgq trust` names the bus and the file. And
+  `pi -e /path/to/pi-msgq/extension` loads the extension for one invocation instead of the
+  `pi install` above.
 
 ## Several sessions, one question
 
