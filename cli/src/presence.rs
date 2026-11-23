@@ -121,19 +121,28 @@ pub fn is_retraction(state: &str) -> bool {
     state.eq_ignore_ascii_case("gone")
 }
 
-/// The scheme of an address, which is what a participant is: `session`, `cli`, `group`, `cwd`.
+/// The scheme of an address, which is what a participant is: `session` or `cli`.
+///
+/// An address with no scheme is not a participant at all — the canonical form always carries one —
+/// so the answer for it is the string itself rather than a scheme invented for it.
 pub fn kind_of(address: &str) -> String {
-    address
-        .split_once('/')
-        .map(|(scheme, _)| scheme)
-        .unwrap_or("group")
-        .to_string()
+    match address.split_once('/') {
+        Some((scheme, _)) => scheme.to_string(),
+        None => address.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_address_without_a_scheme_names_itself() {
+        assert_eq!(kind_of("session/api-worker"), "session");
+        assert_eq!(kind_of("cli/ci@host"), "cli");
+        assert_eq!(kind_of("alice"), "alice");
+    }
 
     #[test]
     fn parses_a_complete_record() {
