@@ -19,7 +19,10 @@ ALTER TABLE IF EXISTS msgq.cursor ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL D
 
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM msgq.cursor)
+    -- Re-key whenever the key does not name the owner, rows or not: a bus that has never been
+    -- written to still has to accept a cursor, and an empty one from an older build has the old key.
+    IF EXISTS (SELECT 1 FROM information_schema.tables
+               WHERE table_schema = 'msgq' AND table_name = 'cursor')
        AND NOT EXISTS (SELECT 1 FROM information_schema.key_column_usage
                        WHERE table_schema = 'msgq' AND table_name = 'cursor'
                          AND constraint_name = 'cursor_pkey' AND column_name = 'owner') THEN

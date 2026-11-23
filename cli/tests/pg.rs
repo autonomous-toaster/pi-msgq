@@ -151,6 +151,63 @@ fn opening_twice_records_one_set_of_facts() {
     assert!(second.meta("protocol_version").unwrap().is_some());
 }
 
+#[test]
+fn a_cursor_can_be_written_on_a_fresh_bus() {
+    let Some(dsn) = dsn() else {
+        return;
+    };
+    let _serialised = exclusive(&dsn);
+    let mut raw = client(&dsn);
+
+    // The key msgq.cursor() targets. BOOTSTRAP used to create the table with (consumer, address),
+    // so on a database that had never held a cursor every write failed with 42P10 "no unique or
+    // exclusion constraint matching the ON CONFLICT specification", and no session could record
+    // progress at all.
+    let key: String = raw
+        .query_one(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE conrelid = 'msgq.cursor'::regclass AND contype = 'p'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        key.contains("owner"),
+        "the cursor key must name the owner, or msgq.cursor() cannot write to it: {key}"
+    );
+
+    let suffix = unique();
+    let token: String = raw
+        .query_one(
+            "SELECT msgq.register_identity($1, ARRAY['session'])",
+            &[&format!("cursor-probe-{suffix}")],
+        )
+        .unwrap()
+        .get(0);
+    let consumer = format!("probe-{suffix}");
+    let written: i64 = raw
+        .query_one(
+            "SELECT msgq.cursor($1, 'session/cursor-probe', $2, 7)",
+            &[&token, &consumer],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(written, 7, "a fresh bus must accept a cursor");
+
+    // Reading it back is the same function with no offset, and it belongs to the writer.
+    let read: i64 = raw
+        .query_one(
+            "SELECT msgq.cursor($1, 'session/cursor-probe', $2)",
+            &[&token, &consumer],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        read, 7,
+        "the cursor comes back to the principal that wrote it"
+    );
+}
+
 /// A suffix that keeps each run's addresses apart without colliding across runs.
 fn unique() -> String {
     let nanos = std::time::SystemTime::now()

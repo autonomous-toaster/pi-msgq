@@ -11,7 +11,7 @@ const AUTHORIZATION: &str = include_str!("../../../sql/authorization.sql");
 /// The schema this build installs. Bump when `BOOTSTRAP` or the authorizing SQL changes: a bus whose
 /// `msgq.meta` records this value is left alone, which is what keeps a command from rewriting eighteen
 /// function bodies and 30 kB of WAL every time it runs.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Everything the bus adds to a database. A fresh connection runs exactly this and touches no
 /// pgmq table: creating a queue is a decision made per address, not at connect time.
@@ -29,10 +29,11 @@ pub const BOOTSTRAP: &str = "CREATE SCHEMA IF NOT EXISTS msgq;
                  ALTER TABLE msgq.address
                      ADD COLUMN IF NOT EXISTS newest_offset BIGINT NOT NULL DEFAULT 0;
                  CREATE TABLE IF NOT EXISTS msgq.cursor (
+                     owner TEXT NOT NULL DEFAULT '',
                      consumer TEXT NOT NULL,
                      address TEXT NOT NULL,
                      last_msg_id BIGINT NOT NULL,
-                     PRIMARY KEY (consumer, address)
+                     PRIMARY KEY (owner, consumer, address)
                  );
                  CREATE TABLE IF NOT EXISTS msgq.identity (
                      name TEXT PRIMARY KEY,

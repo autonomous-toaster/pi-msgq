@@ -64,6 +64,17 @@ pg-url:
     echo "the test database did not become ready" >&2
     exit 1
 
+# Install the bus's own schema on the test database.
+#
+# The image ships pgmq only; msgq's tables and functions are the client's to install, and the Rust
+# suites get them from connecting. A JS test has no such hook, so the CLI is asked to connect once
+# — the same BOOTSTRAP and authorizing SQL any deployment would run.
+pg-schema:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dsn=$(just pg-url)
+    (cd {{crate}} && cargo run --quiet -- --db "$dsn" sessions >/dev/null)
+
 # Stop the test database without losing it, so the next run starts quickly.
 pg-down:
     podman stop {{PG_NAME}}
@@ -306,6 +317,7 @@ extension-test:
         }
     fi
     export MSGQ_TEST_DB_URI="$(just pg-url)"
+    just pg-schema >/dev/null
     if output=$(cd {{ext}} && node --test test/ 2>&1); then
         echo "✓ extension tests passed"
     else
