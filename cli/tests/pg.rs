@@ -36,7 +36,7 @@ fn fixture_token(dsn: &str) -> String {
     let mut client = client(dsn);
     client
         .query_one(
-            "SELECT msgq.register_identity('fixture', ARRAY['group','session','cwd','cli'])",
+            "SELECT msgq.register_identity('fixture', ARRAY['session','cwd','cli'])",
             &[],
         )
         .unwrap()
@@ -51,7 +51,17 @@ fn open(dsn: &str) -> Store {
 }
 
 fn client(dsn: &str) -> Client {
+    ensure_schema(dsn);
     Client::connect(dsn, NoTls).expect("the named test database must accept connections")
+}
+
+/// Make sure the bus's own schema is on the database before a test asks it anything directly.
+///
+/// Most tests here talk to `msgq.*` through raw SQL, and on a database nobody has opened yet that
+/// schema does not exist. Opening the bus is what installs it, so every helper that hands back a
+/// connection does that first; it is one version check once the schema is there.
+fn ensure_schema(dsn: &str) {
+    Store::open_with(&Target::Shared(dsn.to_string()), None).expect("the shared engine must open");
 }
 
 /// Whether an address has a queue, and whether the engine's registry knows it. Counted per address
@@ -875,7 +885,7 @@ fn a_missing_or_expired_credential_is_named() {
 
     // Ensure the bus has an identity, so it is a bus that can authorize.
     raw.execute(
-        "SELECT msgq.register_identity($1, ARRAY['group'])",
+        "SELECT msgq.register_identity($1, ARRAY['session'])",
         &[&format!("keeper-{}", unique()).as_str()],
     )
     .unwrap();
@@ -892,7 +902,7 @@ fn a_missing_or_expired_credential_is_named() {
 
     let expired: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group'], now() - interval '1 hour')",
+            "SELECT msgq.register_identity($1, ARRAY['session'], now() - interval '1 hour')",
             &[&format!("expired-{}", unique()).as_str()],
         )
         .unwrap()
@@ -930,7 +940,7 @@ fn a_runtime_role_cannot_write_a_stream_directly() {
     let address = format!("session/runtime-{}", unique());
     let token: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group','cli'])",
+            "SELECT msgq.register_identity($1, ARRAY['session','cli'])",
             &[&format!("runtime-{}", unique()).as_str()],
         )
         .unwrap()
@@ -1071,29 +1081,34 @@ fn a_sender_may_speak_as_itself_and_no_further() {
     let _serialised = exclusive(&dsn);
     let mut raw = client(&dsn);
     let identity = format!("owner-{}", unique());
+    // One suffix, three addresses: the credential is scoped to the names this test uses, so
+    // "another user's namespace" is a prefix it does not cover, rather than a scope broad enough
+    // to allow every session address.
+    let suffix = unique();
+    let address = format!("session/sender-{suffix}");
+    let opener = format!("session/opener-{suffix}");
+    let own = format!("session/worker-{suffix}");
     let token: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['session', 'group', 'cli'])",
-            &[&identity.as_str()],
+            "SELECT msgq.register_identity($1, ARRAY[$2, $3, $4, 'cli'])",
+            &[&identity.as_str(), &address, &opener, &own],
         )
         .unwrap()
         .get(0);
     let store = Store::open_with(&Target::Shared(dsn.clone()), Some(token))
         .expect("open")
         .0;
-    let address = format!("session/sender-{}", unique());
     let queue = {
         store
             .publish(
                 &address,
-                &json!({"v": 1, "type": "note", "from": format!("session/opener-{}", unique()),
-                        "to": address, "message": "first"}),
+                &json!({"v": 1, "type": "note", "from": opener, "to": address,
+                        "message": "first"}),
             )
             .unwrap();
         queue_for(&mut raw, &address).expect("registered")
     };
 
-    let own = format!("session/worker-{}", unique());
     for (claimed, expected) in [
         // Inside the credential's scopes: one credential, several sessions.
         (own.clone(), Some(own.clone())),
@@ -1183,7 +1198,7 @@ fn a_cross_tenant_read_is_refused_and_the_owner_reads_its_own() {
     let red = format!("session/red-read-{}", unique());
     let token: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group','cli'])",
+            "SELECT msgq.register_identity($1, ARRAY['session','cli'])",
             &[&format!("red-read-{}", unique()).as_str()],
         )
         .unwrap()
@@ -1268,10 +1283,10 @@ fn a_prune_outside_ownership_is_refused_and_removes_nothing() {
             .unwrap();
     }
 
-    // A principal that may read the room still may not erase its history.
+    // A principal that may write in the room still may not erase its history.
     let other: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group','cli'])",
+            "SELECT msgq.register_identity($1, ARRAY['session','cli'])",
             &[&format!("guest-{}", unique()).as_str()],
         )
         .unwrap()
@@ -1332,7 +1347,7 @@ fn a_silent_session_renews_the_same_credential() {
     let principal = format!("renewer-{}", unique());
     let token: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group'])",
+            "SELECT msgq.register_identity($1, ARRAY['session'])",
             &[&principal.as_str()],
         )
         .unwrap()
@@ -1443,7 +1458,7 @@ fn a_names_form_names_only_the_callers_consumers() {
     // Another principal holds a cursor on the same address.
     let other: String = raw
         .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['group'])",
+            "SELECT msgq.register_identity($1, ARRAY['session'])",
             &[&format!("theirs-{}", unique()).as_str()],
         )
         .unwrap()

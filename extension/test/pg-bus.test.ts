@@ -51,12 +51,11 @@ async function credential(dsn: string): Promise<string> {
 	const client = new module.default.Client({ connectionString: dsn });
 	await client.connect();
 	try {
-		// Both schemes: the tests address sessions, and a scope is an address prefix ("group" alone
-	// covers neither of them).
-	const row = await client.query(
-		"SELECT msgq.register_identity($1, ARRAY['session', 'group']) AS token",
-		[`ext-${unique()}`],
-	);
+		// The tests address sessions, and a scope is an address prefix.
+		const row = await client.query(
+			"SELECT msgq.register_identity($1, ARRAY['session']) AS token",
+			[`ext-${unique()}`],
+		);
 		return String(row.rows[0].token);
 	} finally {
 		await client.end();

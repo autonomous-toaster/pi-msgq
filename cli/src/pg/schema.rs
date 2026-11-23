@@ -13,6 +13,10 @@ const AUTHORIZATION: &str = include_str!("../../../sql/authorization.sql");
 /// function bodies and 30 kB of WAL every time it runs.
 pub const SCHEMA_VERSION: i32 = 3;
 
+/// The advisory lock that serialises installing the schema. "msgq", and unlike any other lock the
+/// bus or a test takes.
+const SCHEMA_INSTALL_LOCK: i64 = 0x6d73_6771;
+
 /// Everything the bus adds to a database. A fresh connection runs exactly this and touches no
 /// pgmq table: creating a queue is a decision made per address, not at connect time.
 pub const BOOTSTRAP: &str = "CREATE SCHEMA IF NOT EXISTS msgq;
@@ -57,31 +61,8 @@ pub fn connect(config: postgres::Config) -> Result<Client, Error> {
     let mut client = config
         .connect(postgres::NoTls)
         .map_err(|e| Error::runtime(format!("cannot connect to the bus: {e}")))?;
-    let installed: Option<i32> = client
-        .query_opt(
-            "SELECT value::int FROM msgq.meta WHERE key = 'schema_version'",
-            &[],
-        )
-        .ok()
-        .flatten()
-        .map(|row| row.get(0));
-
-    match install_decision(installed)? {
-        false => {}
-        true => {
-            client
-                .batch_execute(&format!("{BOOTSTRAP}\n{AUTHORIZATION}"))
-                .map_err(|e| {
-                    Error::runtime(format!("cannot bootstrap the bus schema: {}", pg(e)))
-                })?;
-            client
-                .execute(
-                    "INSERT INTO msgq.meta (key, value) VALUES ('schema_version', $1)
-                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                    &[&SCHEMA_VERSION.to_string()],
-                )
-                .map_err(|e| Error::runtime(format!("cannot record the schema version: {e}")))?;
-        }
+    if install_decision(recorded_version(&mut client))? {
+        install(&mut client)?;
     }
 
     let created_by = format!("msgq {}", crate::version());
@@ -99,6 +80,59 @@ pub fn connect(config: postgres::Config) -> Result<Client, Error> {
             .map_err(|e| Error::runtime(format!("cannot record {key}: {e}")))?;
     }
     Ok(client)
+}
+
+/// What the bus says it installs. A bus that has never been written to has no `msgq.meta` to ask,
+/// which is the same answer as an older one: install.
+const SCHEMA_VERSION_QUERY: &str = "SELECT value::int FROM msgq.meta WHERE key = 'schema_version'";
+
+/// The schema version this bus records, when it records one at all.
+fn recorded_version(client: &mut Client) -> Option<i32> {
+    client
+        .query_opt(SCHEMA_VERSION_QUERY, &[])
+        .ok()
+        .flatten()
+        .map(|row| row.get(0))
+}
+
+/// Install the schema, once, even when several clients reach a new bus at the same moment.
+///
+/// Every session on a shared bus connects at start, and on a bus nobody has written to yet they all
+/// decide to install. The advisory lock makes that decision and the DDL one step, and the version is
+/// read again inside it, so a client that waited finds the work already done instead of re-running
+/// eighteen `CREATE OR REPLACE` statements while another process is halfway through its own install.
+///
+/// A session lock rather than a transaction: the install is DDL, which PostgreSQL can run in a
+/// transaction but cannot roll back usefully, and a failed statement inside an explicit block turns
+/// every later one in the same batch into "current transaction is aborted" instead of the real error.
+/// The lock is released by the same connection, and by the server if the process dies holding it.
+fn install(client: &mut Client) -> Result<(), Error> {
+    client
+        .execute("SELECT pg_advisory_lock($1)", &[&SCHEMA_INSTALL_LOCK])
+        .map_err(|e| Error::runtime(format!("cannot serialise the schema install: {}", pg(e))))?;
+    let installed = install_locked(client);
+    // Released whether the install worked or not: a client that failed must not block the next one.
+    let _ = client.execute("SELECT pg_advisory_unlock($1)", &[&SCHEMA_INSTALL_LOCK]);
+    installed
+}
+
+/// The install itself, with the schema lock held.
+fn install_locked(client: &mut Client) -> Result<(), Error> {
+    // Read again under the lock: whoever held it may have installed while we waited.
+    if !install_decision(recorded_version(client))? {
+        return Ok(());
+    }
+    client
+        .batch_execute(&format!("{BOOTSTRAP}\n{AUTHORIZATION}"))
+        .map_err(|e| Error::runtime(format!("cannot bootstrap the bus schema: {}", pg(e))))?;
+    client
+        .execute(
+            "INSERT INTO msgq.meta (key, value) VALUES ('schema_version', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            &[&SCHEMA_VERSION.to_string()],
+        )
+        .map_err(|e| Error::runtime(format!("cannot record the schema version: {e}")))?;
+    Ok(())
 }
 
 /// Whether this connection must install the schema, given what the bus records.

@@ -66,8 +66,8 @@ AS $$
     SELECT regexp_replace(btrim(address, ' /'), '/+', '/', 'g')
 $$;
 
--- A scope is an address and everything beneath it. "group/red" covers "group/red/sub", not
--- "group/redder".
+-- A scope is an address and everything beneath it. "session/red" covers "session/red/sub", not
+-- "session/redder".
 CREATE OR REPLACE FUNCTION msgq.in_scope(address TEXT, scopes TEXT[])
 RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE

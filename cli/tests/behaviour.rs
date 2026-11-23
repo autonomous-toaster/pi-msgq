@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use msgq::config::Target;
+use msgq::store::Store;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_msgq")
 }
@@ -82,11 +85,14 @@ fn exclusive(dsn: &str) -> postgres::Client {
 
 /// A credential the behaviour cases may use, with scopes over every address the fixtures name.
 fn credential(dsn: &str) -> String {
+    // Opening the bus is what installs its schema, and this runs before anything else touches the
+    // database: a fresh test database has pgmq and nothing of msgq's.
+    Store::open_with(&Target::Shared(dsn.to_string()), None).expect("the shared engine must open");
     let mut client =
         postgres::Client::connect(dsn, postgres::NoTls).expect("the test database must accept");
     client
         .query_one(
-            "SELECT msgq.register_identity('behaviour', ARRAY['group','session','cwd','cli'])",
+            "SELECT msgq.register_identity('behaviour', ARRAY['session','cwd','cli'])",
             &[],
         )
         .expect("an identity must be mintable")

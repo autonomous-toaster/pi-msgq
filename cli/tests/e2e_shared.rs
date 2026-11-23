@@ -6,6 +6,9 @@
 
 use std::process::Command;
 
+use msgq::config::Target;
+use msgq::store::Store;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_msgq")
 }
@@ -38,15 +41,18 @@ fn exclusive(dsn: &str) -> postgres::Client {
     guard
 }
 
-/// Mint a credential with scopes over the addresses this scenario uses.
-fn credential(dsn: &str, name: &str) -> String {
+/// Mint a credential with exactly the scopes a session in this scenario needs.
+///
+/// A scope is an address prefix, so a session that is scoped to the addresses it speaks on and
+/// listens at can still be told apart from one that may speak for the whole bus: that is what the
+/// claim check below relies on.
+fn credential(dsn: &str, name: &str, scopes: &[String]) -> String {
+    // Opening the bus installs its schema; a fresh test database has pgmq and nothing of msgq's.
+    Store::open_with(&Target::Shared(dsn.to_string()), None).expect("the shared engine must open");
     let mut client =
         postgres::Client::connect(dsn, postgres::NoTls).expect("the test database must accept");
     client
-        .query_one(
-            "SELECT msgq.register_identity($1, ARRAY['session','group','cli'])",
-            &[&name],
-        )
+        .query_one("SELECT msgq.register_identity($1, $2)", &[&name, &scopes])
         .expect("an identity must be mintable")
         .get(0)
 }
@@ -103,14 +109,22 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     let scope = format!("team{unique}");
     let alice_address = format!("session/alice-{unique}");
     let bob_address = format!("session/bob-{unique}");
+    // What either session is allowed to touch: its own names, the peer it writes to, and the
+    // roster address of its scope.
+    let scopes = vec![
+        alice_address.clone(),
+        bob_address.clone(),
+        // Scoped presence lives on the bus address for the scope, not on a session one.
+        format!("bus/{scope}"),
+    ];
     let alice = Session {
         dsn: dsn.clone(),
-        token: credential(&dsn, &format!("alice-{unique}")),
+        token: credential(&dsn, &format!("alice-{unique}"), &scopes),
         scope: scope.clone(),
     };
     let bob = Session {
         dsn: dsn.clone(),
-        token: credential(&dsn, &format!("bob-{unique}")),
+        token: credential(&dsn, &format!("bob-{unique}"), &scopes),
         scope: scope.clone(),
     };
 
@@ -212,12 +226,12 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     ] {
         session.ok(&[
             "publish",
-            &format!("session/{scope}/presence"),
+            &format!("bus/{scope}/presence"),
             "--json",
             &serde_json::json!({
                 "v": 1, "type": "event",
                 "from": address,
-                "to": format!("session/{scope}/presence"),
+                "to": format!("bus/{scope}/presence"),
                 "event": {"kind": "presence", "state": "idle", "ttl": 60,
                           "participant": participant},
             })
@@ -231,7 +245,11 @@ fn two_sessions_exchange_a_note_an_ask_and_presence_on_one_server() {
     // Another scope sees neither, because the address is the separation.
     let elsewhere = Session {
         dsn: dsn.clone(),
-        token: credential(&dsn, &format!("out-{unique}")),
+        token: credential(
+            &dsn,
+            &format!("out-{unique}"),
+            &[format!("bus/other{unique}")],
+        ),
         scope: format!("other{unique}"),
     };
     let other = elsewhere.ok(&["sessions", "--json"]);
