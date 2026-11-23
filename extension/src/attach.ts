@@ -22,6 +22,11 @@ function records(count: number): string {
 	return `${count} record${count === 1 ? "" : "s"}`;
 }
 
+/** "1 record was" / "3 records were": a count read aloud should not sound like a bug. */
+function waitingPhrase(count: number): string {
+	return `${records(count)} ${count === 1 ? "was" : "were"}`;
+}
+
 /**
  * The notice a state change earns, if any.
  *
@@ -51,7 +56,7 @@ export function attachNotice(
 			kind: "attached",
 			content:
 				waiting > 0
-					? `[msgq] reading ${address} again; ${records(waiting)} were waiting and are being delivered now.`
+					? `[msgq] reading ${address} again; ${waitingPhrase(waiting)} waiting and ${waiting === 1 ? "is" : "are"} being delivered now.`
 					: `[msgq] reading ${address} again.`,
 		};
 	}
@@ -59,7 +64,7 @@ export function attachNotice(
 	if (waiting > 0) {
 		return {
 			kind: "attached",
-			content: `[msgq] ${records(waiting)} were waiting on ${address} and are being delivered now.`,
+			content: `[msgq] ${waitingPhrase(waiting)} waiting on ${address} and ${waiting === 1 ? "is" : "are"} being delivered now.`,
 		};
 	}
 

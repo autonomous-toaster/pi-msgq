@@ -199,6 +199,13 @@ export default function (pi: ExtensionAPI) {
 	let allowed: string[] = [];
 	/** Whether presence is configured on, as opposed to actually held. */
 	let presenceConfigured = false;
+	/**
+	 * The lifetime one presence record is published with.
+	 *
+	 * Session state rather than a local, because presence can be started twice: at session start, and
+	 * again if the engine only opens later.
+	 */
+	let presenceTtl = PRESENCE_TTL_S;
 	/** Whether the session currently holds its presence lease. */
 	let presenceHeld = false;
 	/** Whether locator context is derived, and how much path it carries. */
@@ -1234,7 +1241,6 @@ export default function (pi: ExtensionAPI) {
 
 		// Configuration.
 		let extra: string[];
-		let presenceTtl: number;
 		try {
 			const topicsFlag = pi.getFlag("msgq-topics");
 			const policyFlag = pi.getFlag("msgq-policy");

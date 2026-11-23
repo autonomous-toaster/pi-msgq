@@ -37,11 +37,15 @@ test("recovery is a notice, and it comes before the records", () => {
 
 	const withBacklog = attachNotice(change({ state: "attached", failures: 0, waiting: 24 }), ADDRESS, "retrying");
 	assert.match(withBacklog?.content ?? "", /24 records were waiting/);
+
+	// One record reads as one record, not as a count that disagrees with itself.
+	const one = attachNotice(change({ state: "attached", failures: 0, waiting: 1 }), ADDRESS, "retrying");
+	assert.match(one?.content ?? "", /1 record was waiting and is being delivered/);
 });
 
 test("a backlog is announced even when nothing was lost", () => {
 	const first = attachNotice(change({ state: "attached", failures: 0, waiting: 1 }), ADDRESS, "attaching");
-	assert.match(first?.content ?? "", /1 record were waiting|1 record/);
+	assert.match(first?.content ?? "", /1 record was waiting on session\/worker and is being delivered/);
 	assert.equal(
 		attachNotice(change({ state: "attached", failures: 0, waiting: 0 }), ADDRESS, "attaching"),
 		undefined,
